@@ -13,6 +13,7 @@ const AbiValue = contract_mod.abi_adapter.AbiValue;
 const boc = ton_zig_agent_kit.core.boc;
 const signing = ton_zig_agent_kit.wallet.signing;
 const default_rpc_url = "https://toncenter.com/api/v2/jsonRPC";
+const inspect_abi_list_limit: usize = 12;
 
 fn initDefaultProvider(allocator: std.mem.Allocator) !ton_zig_agent_kit.core.MultiProvider {
     return ton_zig_agent_kit.core.MultiProvider.init(allocator, &.{
@@ -116,10 +117,11 @@ pub fn main() !void {
             std.debug.print("ABI:\n", .{});
             std.debug.print("  kind: {s}\n", .{info.version});
             std.debug.print("  uri: {s}\n", .{info.uri orelse "(missing)"});
-            if (abi_doc) |loaded| {
+            if (abi_doc) |*loaded| {
                 std.debug.print("  document_version: {s}\n", .{loaded.abi.version});
                 std.debug.print("  functions: {d}\n", .{loaded.abi.functions.len});
                 std.debug.print("  events: {d}\n", .{loaded.abi.events.len});
+                printInspectAbiDocument(&loaded.abi);
             } else {
                 std.debug.print("  document: not loaded\n", .{});
             }
@@ -144,6 +146,8 @@ pub fn main() !void {
                 printInspectNFTCollectionDetails(allocator, &provider, addr);
             }
         }
+
+        printInspectCommandHints(addr, if (abi_doc) |*loaded| &loaded.abi else null);
         return;
     }
 
@@ -1783,6 +1787,84 @@ fn printInspectNFTCollectionDetails(allocator: std.mem.Allocator, provider: *ton
     std.debug.print("  Owner: {s}\n", .{owner orelse "(none)"});
     std.debug.print("  Next item index: {d}\n", .{data.next_item_index});
     std.debug.print("  Content URI: {s}\n", .{data.content_uri orelse "(none)"});
+}
+
+fn printInspectAbiDocument(abi: *const contract_mod.abi_adapter.AbiInfo) void {
+    if (abi.functions.len > 0) {
+        const shown = @min(abi.functions.len, inspect_abi_list_limit);
+        std.debug.print("ABI functions:\n", .{});
+        for (abi.functions[0..shown]) |function| {
+            printAbiFunctionSignature(function);
+        }
+        if (abi.functions.len > shown) {
+            std.debug.print("  ... {d} more functions omitted\n", .{abi.functions.len - shown});
+        }
+    }
+
+    if (abi.events.len > 0) {
+        const shown = @min(abi.events.len, inspect_abi_list_limit);
+        std.debug.print("ABI events:\n", .{});
+        for (abi.events[0..shown]) |event| {
+            printAbiEventSignature(event);
+        }
+        if (abi.events.len > shown) {
+            std.debug.print("  ... {d} more events omitted\n", .{abi.events.len - shown});
+        }
+    }
+}
+
+fn printAbiFunctionSignature(function: contract_mod.abi_adapter.FunctionDef) void {
+    std.debug.print("  - {s}(", .{function.name});
+    printAbiParamList(function.inputs);
+    std.debug.print(")", .{});
+    if (function.outputs.len > 0) {
+        std.debug.print(" -> (", .{});
+        printAbiParamList(function.outputs);
+        std.debug.print(")", .{});
+    }
+    if (function.opcode) |opcode| {
+        std.debug.print(" [op=0x{X}]", .{opcode});
+    }
+    std.debug.print("\n", .{});
+}
+
+fn printAbiEventSignature(event: contract_mod.abi_adapter.EventDef) void {
+    std.debug.print("  - {s}(", .{event.name});
+    printAbiParamList(event.inputs);
+    std.debug.print(")\n", .{});
+}
+
+fn printAbiParamList(params: []const contract_mod.abi_adapter.ParamDef) void {
+    for (params, 0..) |param, idx| {
+        if (idx != 0) std.debug.print(", ", .{});
+        if (param.name.len > 0) {
+            std.debug.print("{s}:", .{param.name});
+        }
+        std.debug.print("{s}", .{param.type_name});
+    }
+}
+
+fn printInspectCommandHints(addr: []const u8, abi: ?*const contract_mod.abi_adapter.AbiInfo) void {
+    std.debug.print("Command hints:\n", .{});
+    std.debug.print("  Raw read: ton-zig-agent-kit runGetMethod {s} <method> [stack_json]\n", .{addr});
+    std.debug.print("  Typed read: ton-zig-agent-kit runGetMethodTyped {s} <method> [typed_args...]\n", .{addr});
+
+    if (abi) |value| {
+        std.debug.print("  ABI read: ton-zig-agent-kit runGetMethodAuto {s} <function_name> [values...]\n", .{addr});
+        std.debug.print("  ABI write: ton-zig-agent-kit wallet send-auto-abi <wallet_addr> {s} <amount_nanoton> <function_name> [values...]\n", .{addr});
+
+        if (value.functions.len > 0) {
+            const shown = @min(value.functions.len, @as(usize, 3));
+            std.debug.print("  ABI function names:", .{});
+            for (value.functions[0..shown], 0..) |function, idx| {
+                std.debug.print("{s}{s}", .{ if (idx == 0) " " else ", ", function.name });
+            }
+            if (value.functions.len > shown) {
+                std.debug.print(", ...", .{});
+            }
+            std.debug.print("\n", .{});
+        }
+    }
 }
 
 fn printUsage() !void {
