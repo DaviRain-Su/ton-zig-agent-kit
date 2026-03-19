@@ -1174,7 +1174,7 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "wallet")) {
         if (args.len < 3) {
-            std.debug.print("Usage: ton-zig-agent-kit wallet <genkey|address|seqno|info|build-transfer|build-body|build-body-hex|build-function|build-abi|build-auto-abi|build-deploy|build-deploy-auto|send|send-init|deploy-self|send-body|send-body-hex|send-ops|send-function|send-abi|send-auto-abi|send-deploy|send-deploy-auto>\n", .{});
+            std.debug.print("Usage: ton-zig-agent-kit wallet <genkey|address|seqno|info|build-self-deploy|build-transfer|build-body|build-body-hex|build-function|build-abi|build-auto-abi|build-deploy|build-deploy-auto|send|send-init|deploy-self|send-body|send-body-hex|send-ops|send-function|send-abi|send-auto-abi|send-deploy|send-deploy-auto>\n", .{});
             return;
         }
         const wallet_cmd = args[2];
@@ -1299,6 +1299,44 @@ pub fn main() !void {
                     if (std.mem.eql(u8, &local_keys.public_key, &info.public_key)) "yes" else "no",
                 });
             }
+            return;
+        }
+
+        if (std.mem.eql(u8, wallet_cmd, "build-self-deploy")) {
+            const bootstrap = parseWalletBootstrapOptions(args[3..]) catch |err| {
+                std.debug.print("Usage: ton-zig-agent-kit wallet build-self-deploy [workchain] [wallet_id] [seed|@file|hex:<private_key_hex>]\n", .{});
+                std.debug.print("Wallet bootstrap args invalid: {s}\n", .{@errorName(err)});
+                return;
+            };
+            const wallet_keys = loadCliWalletKeyMaterialWithOptionalSpec(allocator, bootstrap.key_spec) catch |err| {
+                printWalletKeyLoadError(err);
+                return;
+            };
+
+            var init = try signing.deriveWalletV4InitFromPrivateKeyAlloc(
+                allocator,
+                bootstrap.workchain,
+                bootstrap.wallet_id,
+                wallet_keys.private_key_seed,
+            );
+            defer init.deinit(allocator);
+
+            const raw = try init.address.toRawAlloc(allocator);
+            defer allocator.free(raw);
+            const user_friendly = try init.address.toUserFriendlyAlloc(allocator, true, false);
+            defer allocator.free(user_friendly);
+
+            var built = try signing.buildWalletDeploymentAlloc(
+                allocator,
+                .v4,
+                wallet_keys.private_key_seed,
+                bootstrap.workchain,
+                bootstrap.wallet_id,
+            );
+            defer built.deinit(allocator);
+
+            try printBuiltWalletExternalMessage(allocator, raw, 0, &built);
+            std.debug.print("  User-friendly: {s}\n", .{user_friendly});
             return;
         }
 
@@ -4203,6 +4241,7 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit wallet address [workchain] [wallet_id] [seed|@file|hex:<private_key_hex>]  Derive wallet v4 address and StateInit\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet seqno <addr>          Get wallet seqno\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet info <addr>           Get wallet seqno, subwallet ID, public key, and local key match if configured\n", .{});
+    std.debug.print("  ton-zig-agent-kit wallet build-self-deploy [workchain] [wallet_id] [seed|@file|hex:<private_key_hex>]  Build signed wallet self-deployment message\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet build-transfer <dst> <amount> [comment]  Build signed transfer without sending\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet build-body <dst> <amount> <body_b64>  Build signed wallet message from raw body\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet build-body-hex <dst> <amount> <body_hex>  Build signed wallet message from raw body hex\n", .{});

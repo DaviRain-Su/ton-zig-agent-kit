@@ -2651,6 +2651,29 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             };
         }
 
+        /// Build the configured wallet's own deployment external message without submitting it.
+        pub fn buildWalletSelfDeploy(self: *@This()) !tools_types.BuiltWalletMessageResult {
+            const private_key = self.config.wallet_private_key orelse {
+                return builtWalletError("", 0, "Wallet not configured");
+            };
+
+            var built = signing.buildWalletDeploymentAlloc(
+                self.allocator,
+                .v4,
+                private_key,
+                self.config.wallet_workchain,
+                self.config.wallet_id,
+            ) catch |err| {
+                return builtWalletError("", 0, @errorName(err));
+            };
+            errdefer built.deinit(self.allocator);
+
+            return self.buildWalletMessageResultAlloc(&built, built.wallet_address, 0) catch |err| {
+                built.deinit(self.allocator);
+                return builtWalletError("", 0, @errorName(err));
+            };
+        }
+
         /// Send the first transfer from an undeployed derived wallet, including wallet StateInit.
         pub fn sendInitialTransfer(self: *@This(), destination: []const u8, amount: u64, comment: ?[]const u8) !tools_types.SendResult {
             const private_key = self.config.wallet_private_key orelse {
@@ -3591,6 +3614,53 @@ test "agent tools deployWalletSelf submits derived wallet deployment" {
     try std.testing.expect(result.success);
     try std.testing.expectEqual(@as(i64, 123), result.lt);
     try std.testing.expect(client.last_boc != null);
+}
+
+test "agent tools buildWalletSelfDeploy builds wallet deployment external message" {
+    const allocator = std.testing.allocator;
+
+    const FakeClient = struct {};
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    var client = FakeClient{};
+    const keypair = try signing.generateKeypair("tools-wallet-build-self-deploy");
+    const config = tools_types.AgentToolsConfig{
+        .rpc_url = "https://example.invalid",
+        .wallet_private_key = keypair[0],
+        .wallet_workchain = 0,
+        .wallet_id = signing.default_wallet_id_v4,
+    };
+
+    var tools = FakeTools.init(allocator, &client, config);
+    var result = try tools.buildWalletSelfDeploy();
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.success);
+    try std.testing.expect(result.state_init_attached);
+    try std.testing.expectEqual(@as(u32, 0), result.seqno);
+    try std.testing.expectEqualStrings(result.wallet_address, result.destination);
+
+    const ext_len = try std.base64.standard.Decoder.calcSizeForSlice(result.external_boc);
+    const ext_bytes = try allocator.alloc(u8, ext_len);
+    defer allocator.free(ext_bytes);
+    try std.base64.standard.Decoder.decode(ext_bytes, result.external_boc);
+
+    const ext_msg = try boc.deserializeBoc(allocator, ext_bytes);
+    defer ext_msg.deinit(allocator);
+
+    var ext_slice = ext_msg.toSlice();
+    try std.testing.expectEqual(@as(u64, 0b10), try ext_slice.loadUint(2));
+    try std.testing.expectEqual(@as(u64, 0), try ext_slice.loadUint(2));
+    const destination = try ext_slice.loadAddress();
+    const destination_raw = try address_mod.formatRaw(allocator, &destination);
+    defer allocator.free(destination_raw);
+    try std.testing.expectEqualStrings(result.wallet_address, destination_raw);
+    try std.testing.expectEqual(@as(u64, 0), try ext_slice.loadCoins());
+    try std.testing.expectEqual(@as(u64, 1), try ext_slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 1), try ext_slice.loadUint(1));
+    _ = try ext_slice.loadRef();
+    try std.testing.expectEqual(@as(u64, 1), try ext_slice.loadUint(1));
+    _ = try ext_slice.loadRef();
 }
 
 test "agent tools sendInitialTransfer submits first transfer without configured wallet address" {
@@ -5165,6 +5235,7 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.buildExternalMessageEnvelopeAbi;
     _ = AgentTools.buildExternalMessageEnvelopeAuto;
     _ = AgentTools.buildWalletTransfer;
+    _ = AgentTools.buildWalletSelfDeploy;
     _ = AgentTools.buildWalletContractMessage;
     _ = AgentTools.buildWalletContractMessageFunction;
     _ = AgentTools.buildWalletContractMessageAbi;
@@ -5212,6 +5283,7 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = ProviderAgentTools.buildExternalMessageEnvelopeAbi;
     _ = ProviderAgentTools.buildExternalMessageEnvelopeAuto;
     _ = ProviderAgentTools.buildWalletTransfer;
+    _ = ProviderAgentTools.buildWalletSelfDeploy;
     _ = ProviderAgentTools.buildWalletContractMessage;
     _ = ProviderAgentTools.buildWalletContractMessageFunction;
     _ = ProviderAgentTools.buildWalletContractMessageAbi;
