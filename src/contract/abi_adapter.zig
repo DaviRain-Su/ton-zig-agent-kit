@@ -149,12 +149,13 @@ fn findOffchainUriInStack(allocator: std.mem.Allocator, stack: []const types.Sta
 
 fn abiUriFromEntry(allocator: std.mem.Allocator, entry: *const types.StackEntry) anyerror!?[]u8 {
     return switch (entry.*) {
-        .cell, .slice => try generic_contract.stackEntryAsOffchainContentUriAlloc(allocator, entry),
+        .cell, .slice, .builder => try generic_contract.stackEntryAsOffchainContentUriAlloc(allocator, entry),
         .bytes => |value| if (looksLikeOffchainUri(value))
             try allocator.dupe(u8, value)
         else
             null,
         .tuple => |items| try findOffchainUriInStack(allocator, items),
+        .list => |items| try findOffchainUriInStack(allocator, items),
         else => null,
     };
 }

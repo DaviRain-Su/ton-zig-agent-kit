@@ -114,7 +114,7 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "runGetMethodTyped") or std.mem.eql(u8, command, "get-method-typed")) {
         if (args.len < 4) {
-            std.debug.print("Usage: ton-zig-agent-kit runGetMethodTyped <address> <method> [int:<n>|addr:<addr>|cell:<b64>|slice:<b64>|cellhex:<hex>|slicehex:<hex> ...]\n", .{});
+            std.debug.print("Usage: ton-zig-agent-kit runGetMethodTyped <address> <method> [null|int:<n>|addr:<addr>|cell:<b64>|slice:<b64>|builder:<b64>|cellhex:<hex>|slicehex:<hex>|builderhex:<hex> ...]\n", .{});
             return;
         }
 
@@ -567,6 +567,11 @@ fn parseCliStackArgs(allocator: std.mem.Allocator, specs: []const []const u8) !P
     }
 
     for (specs, 0..) |spec, i| {
+        if (std.mem.eql(u8, spec, "null")) {
+            parsed_args[i] = .{ .null = {} };
+            continue;
+        }
+
         if (std.mem.startsWith(u8, spec, "int:")) {
             parsed_args[i] = .{ .int = try parseStackInt(spec["int:".len..]) };
             continue;
@@ -591,6 +596,13 @@ fn parseCliStackArgs(allocator: std.mem.Allocator, specs: []const []const u8) !P
             continue;
         }
 
+        if (std.mem.startsWith(u8, spec, "builder:")) {
+            const decoded = try decodeBase64FlexibleAlloc(allocator, spec["builder:".len..]);
+            owned_buffers[i] = decoded;
+            parsed_args[i] = .{ .builder = decoded };
+            continue;
+        }
+
         if (std.mem.startsWith(u8, spec, "cellhex:")) {
             const decoded = try hexToBytes(allocator, spec["cellhex:".len..]);
             owned_buffers[i] = decoded;
@@ -602,6 +614,13 @@ fn parseCliStackArgs(allocator: std.mem.Allocator, specs: []const []const u8) !P
             const decoded = try hexToBytes(allocator, spec["slicehex:".len..]);
             owned_buffers[i] = decoded;
             parsed_args[i] = .{ .slice = decoded };
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, spec, "builderhex:")) {
+            const decoded = try hexToBytes(allocator, spec["builderhex:".len..]);
+            owned_buffers[i] = decoded;
+            parsed_args[i] = .{ .builder = decoded };
             continue;
         }
 
@@ -661,12 +680,22 @@ fn printRunGetMethodResult(result: ton_zig_agent_kit.core.types.RunGetMethodResp
 
 fn printStackEntry(entry: StackEntry, indent: usize) void {
     switch (entry) {
+        .null => std.debug.print("null\n", .{}),
         .number => |value| std.debug.print("number: {d}\n", .{value}),
         .bytes => |value| std.debug.print("bytes/base64: {s}\n", .{value}),
         .cell => |value| std.debug.print("cell(bits={d}, refs={d})\n", .{ value.bit_len, value.ref_cnt }),
         .slice => |value| std.debug.print("slice(bits={d}, refs={d})\n", .{ value.bit_len, value.ref_cnt }),
+        .builder => |value| std.debug.print("builder(bits={d}, refs={d})\n", .{ value.bit_len, value.ref_cnt }),
         .tuple => |items| {
             std.debug.print("tuple[{d}]\n", .{items.len});
+            for (items, 0..) |child, i| {
+                printIndent(indent);
+                std.debug.print("[{d}] ", .{i});
+                printStackEntry(child, indent + 2);
+            }
+        },
+        .list => |items| {
+            std.debug.print("list[{d}]\n", .{items.len});
             for (items, 0..) |child, i| {
                 printIndent(indent);
                 std.debug.print("[{d}] ", .{i});
@@ -693,6 +722,7 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit runGetMethod <addr> <method> [stack_json]  Call any get method\n", .{});
     std.debug.print("  ton-zig-agent-kit inspectContract <addr>        Detect standard interfaces and ABI URI\n", .{});
     std.debug.print("  ton-zig-agent-kit runGetMethodTyped <addr> <method> [typed_args...]  Call get method with typed args\n", .{});
+    std.debug.print("    typed args: null, int:<n>, addr:<addr>, cell:<b64>, slice:<b64>, builder:<b64>, cellhex:<hex>, slicehex:<hex>, builderhex:<hex>\n", .{});
     std.debug.print("  ton-zig-agent-kit sendBoc <boc_base64>          Submit raw BoC to the network\n", .{});
     std.debug.print("  ton-zig-agent-kit sendBocHex <boc_hex>          Submit raw BoC hex to the network\n", .{});
     std.debug.print("  ton-zig-agent-kit parseAddress <address>        Parse TON address\n", .{});
@@ -806,14 +836,18 @@ test "hexToBytes parses mixed case input" {
 test "parse cli stack args" {
     const allocator = std.testing.allocator;
     var parsed = try parseCliStackArgs(allocator, &.{
+        "null",
         "int:-1",
         "addr:0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
         "cellhex:b5ee9c72410101010005000002cafe6c44e11d",
+        "builderhex:b5ee9c72410101010005000002cafe6c44e11d",
     });
     defer parsed.deinit(allocator);
 
-    try std.testing.expectEqual(@as(usize, 3), parsed.args.len);
-    try std.testing.expectEqual(@as(i64, -1), parsed.args[0].int);
-    try std.testing.expectEqualStrings("0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8", parsed.args[1].address);
-    try std.testing.expectEqualSlices(u8, &.{ 0xB5, 0xEE, 0x9C, 0x72 }, parsed.args[2].cell[0..4]);
+    try std.testing.expectEqual(@as(usize, 5), parsed.args.len);
+    try std.testing.expect(std.meta.activeTag(parsed.args[0]) == .null);
+    try std.testing.expectEqual(@as(i64, -1), parsed.args[1].int);
+    try std.testing.expectEqualStrings("0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8", parsed.args[2].address);
+    try std.testing.expectEqualSlices(u8, &.{ 0xB5, 0xEE, 0x9C, 0x72 }, parsed.args[3].cell[0..4]);
+    try std.testing.expectEqualSlices(u8, &.{ 0xB5, 0xEE, 0x9C, 0x72 }, parsed.args[4].builder[0..4]);
 }

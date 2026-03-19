@@ -342,9 +342,16 @@ fn parseStack(allocator: std.mem.Allocator, value: std.json.Value) anyerror![]ty
 }
 
 fn parseStackEntry(allocator: std.mem.Allocator, value: std.json.Value) anyerror!types.StackEntry {
-    if (value != .array or value.array.items.len < 2) return error.InvalidResponse;
+    if (value != .array or value.array.items.len == 0) return error.InvalidResponse;
+    if (value.array.items[0] != .string) return error.InvalidResponse;
 
     const tag = value.array.items[0].string;
+
+    if (std.mem.eql(u8, tag, "null")) {
+        return .{ .null = {} };
+    }
+
+    if (value.array.items.len < 2) return error.InvalidResponse;
     const raw_value = value.array.items[1];
 
     if (std.mem.eql(u8, tag, "num") or std.mem.eql(u8, tag, "int")) {
@@ -356,7 +363,16 @@ fn parseStackEntry(allocator: std.mem.Allocator, value: std.json.Value) anyerror
         return .{ .tuple = items };
     }
 
-    if (std.mem.eql(u8, tag, "cell") or std.mem.eql(u8, tag, "slice")) {
+    if (std.mem.eql(u8, tag, "list")) {
+        const items = try parseStack(allocator, raw_value);
+        return .{ .list = items };
+    }
+
+    if (std.mem.eql(u8, tag, "bytes")) {
+        return .{ .bytes = try dupJsonString(allocator, raw_value) };
+    }
+
+    if (std.mem.eql(u8, tag, "cell") or std.mem.eql(u8, tag, "slice") or std.mem.eql(u8, tag, "builder")) {
         const boc_base64 = try extractStackBytes(raw_value);
         const boc_bytes = try decodeBase64Flexible(allocator, boc_base64);
         defer allocator.free(boc_bytes);
@@ -365,7 +381,10 @@ fn parseStackEntry(allocator: std.mem.Allocator, value: std.json.Value) anyerror
         if (std.mem.eql(u8, tag, "cell")) {
             return .{ .cell = parsed_cell };
         }
-        return .{ .slice = parsed_cell };
+        if (std.mem.eql(u8, tag, "slice")) {
+            return .{ .slice = parsed_cell };
+        }
+        return .{ .builder = parsed_cell };
     }
 
     return error.UnsupportedStackEntry;
@@ -377,8 +396,13 @@ fn freeStackEntry(allocator: std.mem.Allocator, entry: *types.StackEntry) void {
             for (items) |*child| freeStackEntry(allocator, child);
             allocator.free(items);
         },
+        .list => |items| {
+            for (items) |*child| freeStackEntry(allocator, child);
+            allocator.free(items);
+        },
         .cell => |value| value.deinit(allocator),
         .slice => |value| value.deinit(allocator),
+        .builder => |value| value.deinit(allocator),
         .bytes => |bytes| if (bytes.len > 0) allocator.free(bytes),
         else => {},
     }
@@ -670,6 +694,48 @@ test "parse runGetMethod stack cell" {
     }
 
     try std.testing.expectEqual(@as(u16, 32), stack[0].cell.bit_len);
+}
+
+test "parse runGetMethod stack supports null list builder and bytes" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "result": {
+        \\    "exit_code": 0,
+        \\    "stack": [
+        \\      ["null"],
+        \\      ["builder", "te6cckEBAQEABgAACP/////btDe4"],
+        \\      ["list", [["num", "0x2a"], ["bytes", "https://example.com/abi.json"]]]
+        \\    ],
+        \\    "logs": ""
+        \\  }
+        \\}
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+
+    const stack = try parseStack(allocator, parsed.value.object.get("result").?.object.get("stack").?);
+    defer {
+        var client = TonHttpClient{
+            .allocator = allocator,
+            .base_url = "",
+            .api_key = null,
+            .http_client = .{ .allocator = allocator },
+        };
+        var response = types.RunGetMethodResponse{
+            .exit_code = 0,
+            .stack = stack,
+            .logs = "",
+        };
+        client.freeRunGetMethodResponse(&response);
+    }
+
+    try std.testing.expect(std.meta.activeTag(stack[0]) == .null);
+    try std.testing.expectEqual(@as(u16, 32), stack[1].builder.bit_len);
+    try std.testing.expectEqual(@as(usize, 2), stack[2].list.len);
+    try std.testing.expectEqual(@as(i64, 42), stack[2].list[0].number);
+    try std.testing.expectEqualStrings("https://example.com/abi.json", stack[2].list[1].bytes);
 }
 
 test "decode base64 flexible accepts standard and url safe" {

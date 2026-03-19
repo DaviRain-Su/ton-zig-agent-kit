@@ -46,9 +46,11 @@ pub const GenericContract = struct {
 };
 
 pub const StackArg = union(enum) {
+    null: void,
     int: i64,
     cell: []const u8,
     slice: []const u8,
+    builder: []const u8,
     address: []const u8,
 };
 
@@ -65,6 +67,7 @@ pub fn stackEntryAsCell(entry: *const types.StackEntry) !*cell.Cell {
     return switch (entry.*) {
         .cell => |value| value,
         .slice => |value| value,
+        .builder => |value| value,
         else => error.InvalidStackEntry,
     };
 }
@@ -96,6 +99,7 @@ pub fn stackEntryToBocAlloc(allocator: std.mem.Allocator, entry: *const types.St
     return switch (entry.*) {
         .cell => |value| boc.serializeBoc(allocator, value),
         .slice => |value| boc.serializeBoc(allocator, value),
+        .builder => |value| boc.serializeBoc(allocator, value),
         .bytes => |value| allocator.dupe(u8, value),
         else => error.InvalidStackEntry,
     };
@@ -150,9 +154,11 @@ pub fn buildStackArgsJsonAlloc(allocator: std.mem.Allocator, args: []const Stack
 
 fn writeStackArgJson(writer: anytype, allocator: std.mem.Allocator, arg: StackArg) !void {
     switch (arg) {
+        .null => try writer.writeAll("[\"null\"]"),
         .int => |value| try writer.print("[\"num\",{d}]", .{value}),
         .cell => |boc_bytes| try writeBocStackArgJson(writer, allocator, "cell", boc_bytes),
         .slice => |boc_bytes| try writeBocStackArgJson(writer, allocator, "slice", boc_bytes),
+        .builder => |boc_bytes| try writeBocStackArgJson(writer, allocator, "builder", boc_bytes),
         .address => |address_text| {
             const address_boc = try buildAddressSliceBocAlloc(allocator, address_text);
             defer allocator.free(address_boc);
@@ -229,15 +235,19 @@ test "build stack args json" {
     defer allocator.free(content_boc);
 
     const stack_json = try buildStackArgsJsonAlloc(allocator, &.{
+        .{ .null = {} },
         .{ .int = 42 },
         .{ .address = "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8" },
         .{ .cell = content_boc },
+        .{ .builder = content_boc },
     });
     defer allocator.free(stack_json);
 
+    try std.testing.expect(std.mem.indexOf(u8, stack_json, "[\"null\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, stack_json, "[\"num\",42]") != null);
     try std.testing.expect(std.mem.indexOf(u8, stack_json, "[\"slice\",\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, stack_json, "[\"cell\",\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stack_json, "[\"builder\",\"") != null);
     try std.testing.expect(std.mem.endsWith(u8, stack_json, "\"]]"));
 }
 
