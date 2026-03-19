@@ -325,18 +325,17 @@ pub fn main() !void {
             const seqno = try signing.getSeqno(&client, wallet_addr);
 
             // Create signed transfer
-            const signed_transfer = try signing.createSignedTransfer(allocator, .v4, private_key, seqno, @constCast(msgs));
+            const signed_transfer = try signing.createSignedTransfer(allocator, .v4, private_key, wallet_addr, seqno, @constCast(msgs));
             defer allocator.free(signed_transfer);
 
             std.debug.print("Signed transfer created ({d} bytes)\n", .{signed_transfer.len});
-            std.debug.print("First 64 bytes (signature): ", .{});
+            std.debug.print("First 64 bytes (BoC prefix): ", .{});
             for (signed_transfer[0..@min(64, signed_transfer.len)]) |byte| {
                 std.debug.print("{X:0>2}", .{byte});
             }
             std.debug.print("...\n", .{});
 
-            // Send (would be: try client.sendBoc(signed_transfer);)
-            std.debug.print("Transfer ready to send (seqno: {d})\n", .{seqno});
+            std.debug.print("Transfer external message ready (seqno: {d})\n", .{seqno});
             return;
         }
 

@@ -266,11 +266,11 @@ pub const AgentTools = struct {
             .{
                 .destination = destination,
                 .amount = amount,
-                .body = comment,
+                .comment = comment,
             },
         };
 
-        const signed = signing.createSignedTransfer(self.allocator, .v4, private_key, seqno, @constCast(msgs)) catch |err| {
+        const signed = signing.createSignedTransfer(self.allocator, .v4, private_key, wallet_addr, seqno, @constCast(msgs)) catch |err| {
             return tools_types.SendResult{
                 .hash = "",
                 .lt = 0,
