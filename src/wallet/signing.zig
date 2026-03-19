@@ -7,6 +7,7 @@ const cell = @import("../core/cell.zig");
 const address = @import("../core/address.zig");
 const boc = @import("../core/boc.zig");
 const http_client = @import("../core/http_client.zig");
+const generic_contract = @import("../contract/contract.zig");
 
 const Ed25519 = std.crypto.sign.Ed25519;
 const default_wallet_id_v4: u32 = 698983191;
@@ -24,6 +25,12 @@ pub const WalletMessage = struct {
     body: ?[]const u8 = null, // Raw body BoC
     comment: ?[]const u8 = null,
     mode: u8 = 3, // 3 = pay separately
+};
+
+pub const WalletInfo = struct {
+    seqno: u32,
+    wallet_id: u32,
+    public_key: [32]u8,
 };
 
 /// Generate Ed25519 keypair from seed
@@ -103,13 +110,14 @@ fn createInternalTransferMessageCell(
 
 fn createWalletV4SigningPayloadCell(
     allocator: std.mem.Allocator,
+    wallet_id: u32,
     seqno: u32,
     valid_until: u32,
     messages: []const WalletMessage,
 ) !*cell.Cell {
     var builder = cell.Builder.init();
 
-    try builder.storeUint(default_wallet_id_v4, 32);
+    try builder.storeUint(wallet_id, 32);
     try builder.storeUint(valid_until, 32);
     try builder.storeUint(seqno, 32);
     try builder.storeUint(simple_send_opcode, 32);
@@ -126,11 +134,12 @@ fn createWalletV4SigningPayloadCell(
 fn createSignedBodyCell(
     allocator: std.mem.Allocator,
     private_key_seed: [32]u8,
+    wallet_id: u32,
     seqno: u32,
     valid_until: u32,
     messages: []const WalletMessage,
 ) !*cell.Cell {
-    const payload_cell = try createWalletV4SigningPayloadCell(allocator, seqno, valid_until, messages);
+    const payload_cell = try createWalletV4SigningPayloadCell(allocator, wallet_id, seqno, valid_until, messages);
     defer destroyCellShallow(allocator, payload_cell);
 
     const signature = try signMessage(private_key_seed, &payload_cell.hash());
@@ -162,6 +171,24 @@ fn createExternalIncomingMessageCell(
     return builder.toCell(allocator);
 }
 
+fn createWalletV4ExternalMessageWithId(
+    allocator: std.mem.Allocator,
+    private_key_seed: [32]u8,
+    wallet_addr: []const u8,
+    wallet_id: u32,
+    seqno: u32,
+    valid_until: u32,
+    messages: []const WalletMessage,
+) ![]u8 {
+    const signed_body = try createSignedBodyCell(allocator, private_key_seed, wallet_id, seqno, valid_until, messages);
+    errdefer signed_body.deinit(allocator);
+
+    const ext_msg = try createExternalIncomingMessageCell(allocator, wallet_addr, signed_body);
+    defer ext_msg.deinit(allocator);
+
+    return boc.serializeBoc(allocator, ext_msg);
+}
+
 /// Create wallet v4 external message
 pub fn createWalletV4ExternalMessage(
     allocator: std.mem.Allocator,
@@ -171,13 +198,15 @@ pub fn createWalletV4ExternalMessage(
     valid_until: u32,
     messages: []const WalletMessage,
 ) ![]u8 {
-    const signed_body = try createSignedBodyCell(allocator, private_key_seed, seqno, valid_until, messages);
-    errdefer signed_body.deinit(allocator);
-
-    const ext_msg = try createExternalIncomingMessageCell(allocator, wallet_addr, signed_body);
-    defer ext_msg.deinit(allocator);
-
-    return boc.serializeBoc(allocator, ext_msg);
+    return createWalletV4ExternalMessageWithId(
+        allocator,
+        private_key_seed,
+        wallet_addr,
+        default_wallet_id_v4,
+        seqno,
+        valid_until,
+        messages,
+    );
 }
 
 /// Sign message with Ed25519
@@ -200,10 +229,35 @@ pub fn createSignedTransfer(
 
     const valid_until = @as(u32, @intCast(std.time.timestamp())) + 60;
 
-    return createWalletV4ExternalMessage(
+    return createSignedTransferWithWalletId(
+        allocator,
+        version,
+        private_key,
+        wallet_address,
+        default_wallet_id_v4,
+        seqno,
+        msgs,
+        valid_until,
+    );
+}
+
+pub fn createSignedTransferWithWalletId(
+    allocator: std.mem.Allocator,
+    version: WalletVersion,
+    private_key: [32]u8,
+    wallet_address: []const u8,
+    wallet_id: u32,
+    seqno: u32,
+    msgs: []const WalletMessage,
+    valid_until: u32,
+) ![]u8 {
+    if (version != .v4) return error.UnsupportedWalletVersion;
+
+    return createWalletV4ExternalMessageWithId(
         allocator,
         private_key,
         wallet_address,
+        wallet_id,
         seqno,
         valid_until,
         msgs,
@@ -226,6 +280,47 @@ pub fn getSeqno(client: *http_client.TonHttpClient, wallet_address: []const u8) 
     }
 
     return 0;
+}
+
+pub fn getSubwalletId(client: *http_client.TonHttpClient, wallet_address: []const u8) !u32 {
+    var result = try client.runGetMethod(wallet_address, "get_subwallet_id", &.{});
+    defer client.freeRunGetMethodResponse(&result);
+
+    if (result.stack.len == 0) return error.InvalidResponse;
+    return generic_contract.stackEntryAsUnsigned(u32, &result.stack[0]);
+}
+
+pub fn getPublicKey(client: *http_client.TonHttpClient, wallet_address: []const u8) ![32]u8 {
+    var result = try client.runGetMethod(wallet_address, "get_public_key", &.{});
+    defer client.freeRunGetMethodResponse(&result);
+
+    if (result.stack.len == 0) return error.InvalidResponse;
+    return stackEntryAsPublicKeyBytes(&result.stack[0]);
+}
+
+pub fn getWalletInfo(client: *http_client.TonHttpClient, wallet_address: []const u8) !WalletInfo {
+    return .{
+        .seqno = try getSeqno(client, wallet_address),
+        .wallet_id = try getSubwalletId(client, wallet_address),
+        .public_key = try getPublicKey(client, wallet_address),
+    };
+}
+
+fn stackEntryAsPublicKeyBytes(entry: *const types.StackEntry) ![32]u8 {
+    const value = try generic_contract.stackEntryAsUnsigned(u256, entry);
+    return u256ToBytes(value);
+}
+
+fn u256ToBytes(value: u256) [32]u8 {
+    var out: [32]u8 = undefined;
+    var remaining = value;
+    var idx: usize = out.len;
+    while (idx > 0) {
+        idx -= 1;
+        out[idx] = @intCast(remaining & 0xff);
+        remaining >>= 8;
+    }
+    return out;
 }
 
 /// Send transfer
@@ -278,8 +373,22 @@ pub fn sendMessages(
 ) !types.SendBocResponse {
     const allocator = std.heap.page_allocator;
 
-    const seqno = try getSeqno(client, wallet_address);
-    const signed_transfer = try createSignedTransfer(allocator, version, private_key, wallet_address, seqno, msgs);
+    const wallet_info = try getWalletInfo(client, wallet_address);
+    const key_pair = try ed25519KeyPairFromSeed(private_key);
+    const public_key = key_pair.public_key.toBytes();
+    if (!std.mem.eql(u8, &wallet_info.public_key, &public_key)) return error.InvalidWalletPublicKey;
+
+    const valid_until = @as(u32, @intCast(std.time.timestamp())) + 60;
+    const signed_transfer = try createSignedTransferWithWalletId(
+        allocator,
+        version,
+        private_key,
+        wallet_address,
+        wallet_info.wallet_id,
+        wallet_info.seqno,
+        msgs,
+        valid_until,
+    );
     defer allocator.free(signed_transfer);
 
     return try client.sendBoc(signed_transfer);
@@ -408,4 +517,59 @@ test "wallet signing preserves raw body boc in internal message" {
 
     const decoded_body = try out_slice.loadRef();
     try std.testing.expectEqualSlices(u8, &raw_body_cell.hash(), &decoded_body.hash());
+}
+
+test "wallet signing supports custom wallet id" {
+    const allocator = std.testing.allocator;
+    const keypair = try generateKeypair("test_seed");
+
+    var msgs = [_]WalletMessage{
+        .{
+            .destination = "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+            .amount = 1,
+        },
+    };
+
+    const signed = try createSignedTransferWithWalletId(
+        allocator,
+        .v4,
+        keypair[0],
+        "0:0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+        0xA1B2C3D4,
+        5,
+        msgs[0..],
+        1234567890,
+    );
+    defer allocator.free(signed);
+
+    const ext_msg = try boc.deserializeBoc(allocator, signed);
+    defer ext_msg.deinit(allocator);
+
+    var ext_slice = ext_msg.toSlice();
+    _ = try ext_slice.loadUint(2);
+    _ = try ext_slice.loadUint(2);
+    _ = try ext_slice.loadAddress();
+    _ = try ext_slice.loadCoins();
+    _ = try ext_slice.loadUint(1);
+    _ = try ext_slice.loadUint(1);
+
+    const signed_body = try ext_slice.loadRef();
+    var signed_slice = signed_body.toSlice();
+    _ = try signed_slice.loadBits(512);
+    try std.testing.expectEqual(@as(u32, 0xA1B2C3D4), try signed_slice.loadUint32());
+    try std.testing.expectEqual(@as(u32, 1234567890), try signed_slice.loadUint32());
+    try std.testing.expectEqual(@as(u32, 5), try signed_slice.loadUint32());
+}
+
+test "wallet public key helper parses stack entry" {
+    const entry = types.StackEntry{
+        .big_number = "0x0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+    };
+
+    const public_key = try stackEntryAsPublicKeyBytes(&entry);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF },
+        &public_key,
+    );
 }

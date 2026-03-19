@@ -507,7 +507,7 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "wallet")) {
         if (args.len < 3) {
-            std.debug.print("Usage: ton-zig-agent-kit wallet <genkey|seqno|send|send-body|send-body-hex|send-ops|send-function|send-abi|send-auto-abi>\n", .{});
+            std.debug.print("Usage: ton-zig-agent-kit wallet <genkey|seqno|info|send|send-body|send-body-hex|send-ops|send-function|send-abi|send-auto-abi>\n", .{});
             return;
         }
         const wallet_cmd = args[2];
@@ -539,6 +539,28 @@ pub fn main() !void {
 
             const seqno = try signing.getSeqno(&client, wallet_addr);
             std.debug.print("Wallet seqno: {d}\n", .{seqno});
+            return;
+        }
+
+        if (std.mem.eql(u8, wallet_cmd, "info")) {
+            if (args.len < 4) {
+                std.debug.print("Usage: ton-zig-agent-kit wallet info <wallet_address>\n", .{});
+                return;
+            }
+            const wallet_addr = args[3];
+            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
+            defer client.deinit();
+
+            const info = try signing.getWalletInfo(&client, wallet_addr);
+            std.debug.print("Wallet info:\n", .{});
+            std.debug.print("  Address: {s}\n", .{wallet_addr});
+            std.debug.print("  Seqno: {d}\n", .{info.seqno});
+            std.debug.print("  Subwallet ID: {d} (0x{X:0>8})\n", .{ info.wallet_id, info.wallet_id });
+            std.debug.print("  Public key: ", .{});
+            for (info.public_key) |byte| {
+                std.debug.print("{X:0>2}", .{byte});
+            }
+            std.debug.print("\n", .{});
             return;
         }
 
@@ -1382,6 +1404,7 @@ fn printUsage() !void {
     std.debug.print("\nWallet operations:\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet genkey                Generate keypair\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet seqno <addr>          Get wallet seqno\n", .{});
+    std.debug.print("  ton-zig-agent-kit wallet info <addr>           Get wallet seqno, subwallet ID, public key\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send <src> <dst> <amount>  Send TON\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-body <src> <dst> <amount> <body_b64>  Send raw contract body\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-body-hex <src> <dst> <amount> <body_hex>  Send raw contract body hex\n", .{});
