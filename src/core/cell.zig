@@ -66,7 +66,7 @@ pub const Builder = struct {
         return .{};
     }
 
-    pub fn storeUint(self: *Builder, value: u64, comptime bits: u16) !void {
+    pub fn storeUint(self: *Builder, value: u64, bits: u16) !void {
         if (self.bit_len + bits > MAX_BITS) return error.CellOverflow;
         if (bits == 0) return;
 

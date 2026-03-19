@@ -7,6 +7,7 @@ const Cell = ton_zig_agent_kit.core.Cell;
 const Builder = ton_zig_agent_kit.core.Builder;
 const Slice = ton_zig_agent_kit.core.Slice;
 const boc = ton_zig_agent_kit.core.boc;
+const signing = ton_zig_agent_kit.wallet.signing;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -191,6 +192,90 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "wallet")) {
+        if (args.len < 3) {
+            std.debug.print("Usage: ton-zig-agent-kit wallet <genkey|seqno|send>\n", .{});
+            return;
+        }
+        const wallet_cmd = args[2];
+
+        if (std.mem.eql(u8, wallet_cmd, "genkey")) {
+            const keypair = try signing.generateKeypair("my_seed_phrase");
+            std.debug.print("Keypair generated:\n", .{});
+            std.debug.print("  Private key: ", .{});
+            for (keypair[0]) |byte| {
+                std.debug.print("{X:0>2}", .{byte});
+            }
+            std.debug.print("\n", .{});
+            std.debug.print("  Public key: ", .{});
+            for (keypair[1]) |byte| {
+                std.debug.print("{X:0>2}", .{byte});
+            }
+            std.debug.print("\n", .{});
+            return;
+        }
+
+        if (std.mem.eql(u8, wallet_cmd, "seqno")) {
+            if (args.len < 4) {
+                std.debug.print("Usage: ton-zig-agent-kit wallet seqno <wallet_address>\n", .{});
+                return;
+            }
+            const wallet_addr = args[3];
+            var client = try TonHttpClient.init(allocator, "https://tonapi.io", null);
+            defer client.deinit();
+
+            const seqno = try signing.getSeqno(&client, wallet_addr);
+            std.debug.print("Wallet seqno: {d}\n", .{seqno});
+            return;
+        }
+
+        if (std.mem.eql(u8, wallet_cmd, "send")) {
+            if (args.len < 6) {
+                std.debug.print("Usage: ton-zig-agent-kit wallet send <wallet_addr> <dest> <amount_nanoton>\n", .{});
+                return;
+            }
+            const wallet_addr = args[3];
+            const dest = args[4];
+            const amount = try std.fmt.parseInt(u64, args[5], 10);
+
+            var client = try TonHttpClient.init(allocator, "https://tonapi.io", null);
+            defer client.deinit();
+
+            // Generate keypair (in real usage, load from secure storage)
+            const keypair = try signing.generateKeypair("my_seed_phrase");
+            const private_key = keypair[0];
+
+            // Create message
+            const msgs = &[_]signing.WalletMessage{
+                .{
+                    .destination = dest,
+                    .amount = amount,
+                },
+            };
+
+            // Get seqno
+            const seqno = try signing.getSeqno(&client, wallet_addr);
+
+            // Create signed transfer
+            const signed_transfer = try signing.createSignedTransfer(allocator, .v4, private_key, seqno, @constCast(msgs));
+            defer allocator.free(signed_transfer);
+
+            std.debug.print("Signed transfer created ({d} bytes)\n", .{signed_transfer.len});
+            std.debug.print("First 64 bytes (signature): ", .{});
+            for (signed_transfer[0..@min(64, signed_transfer.len)]) |byte| {
+                std.debug.print("{X:0>2}", .{byte});
+            }
+            std.debug.print("...\n", .{});
+
+            // Send (would be: try client.sendBoc(signed_transfer);)
+            std.debug.print("Transfer ready to send (seqno: {d})\n", .{seqno});
+            return;
+        }
+
+        std.debug.print("Unknown wallet command: {s}\n", .{wallet_cmd});
+        return;
+    }
+
     try printUsage();
 }
 
@@ -229,6 +314,10 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit cell create                  Create test cell\n", .{});
     std.debug.print("  ton-zig-agent-kit cell encode <hex>            Encode data to BoC\n", .{});
     std.debug.print("  ton-zig-agent-kit cell hash <hex>              Get cell hash\n", .{});
+    std.debug.print("\nWallet operations:\n", .{});
+    std.debug.print("  ton-zig-agent-kit wallet genkey                Generate keypair\n", .{});
+    std.debug.print("  ton-zig-agent-kit wallet seqno <addr>          Get wallet seqno\n", .{});
+    std.debug.print("  ton-zig-agent-kit wallet send <src> <dst> <amount>  Send TON\n", .{});
 }
 
 test "basic test" {
