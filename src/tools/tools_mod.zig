@@ -2995,6 +2995,69 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             return self.buildWalletContractMessage(destination, amount, body_boc);
         }
 
+        /// Build a wallet-wrapped signed contract deployment without submitting it.
+        pub fn buildContractDeploy(
+            self: *@This(),
+            destination: []const u8,
+            amount: u64,
+            state_init_boc: []const u8,
+            body_boc: ?[]const u8,
+        ) !tools_types.BuiltWalletMessageResult {
+            const private_key = self.config.wallet_private_key orelse {
+                return builtWalletError(destination, amount, "Wallet not configured");
+            };
+
+            const msgs = &[_]wallet.signing.WalletMessage{
+                .{
+                    .destination = destination,
+                    .amount = amount,
+                    .state_init = state_init_boc,
+                    .body = body_boc,
+                    .bounce = false,
+                },
+            };
+
+            var built = signing.buildSignedMessagesAutoAlloc(
+                self.client,
+                self.allocator,
+                .v4,
+                private_key,
+                self.config.wallet_address,
+                self.config.wallet_workchain,
+                self.config.wallet_id,
+                msgs,
+            ) catch |err| {
+                return builtWalletError(destination, amount, @errorName(err));
+            };
+            errdefer built.deinit(self.allocator);
+
+            return self.buildWalletMessageResultAlloc(&built, destination, amount) catch |err| {
+                built.deinit(self.allocator);
+                return builtWalletError(destination, amount, @errorName(err));
+            };
+        }
+
+        /// Derive deployment address from StateInit and build a signed deploy message there.
+        pub fn buildContractDeployAuto(
+            self: *@This(),
+            workchain: i8,
+            amount: u64,
+            state_init_boc: []const u8,
+            body_boc: ?[]const u8,
+        ) !tools_types.BuiltWalletMessageResult {
+            const addr = try self.computeStateInitAddress(workchain, state_init_boc);
+            defer {
+                if (addr.raw_address.len > 0) self.allocator.free(addr.raw_address);
+                if (addr.user_friendly_address.len > 0) self.allocator.free(addr.user_friendly_address);
+            }
+
+            if (!addr.success) {
+                return builtWalletError("", amount, addr.error_message orelse "InvalidStateInitAddress");
+            }
+
+            return self.buildContractDeploy(addr.raw_address, amount, state_init_boc, body_boc);
+        }
+
         fn buildExternalMessageEnvelopeFromBase64(
             self: *@This(),
             destination: []const u8,
@@ -4248,6 +4311,180 @@ test "agent tools buildWalletContractMessageAuto discovers abi before signing" {
     try std.testing.expectEqual(@as(u64, 0xAABBCCDD), try body_slice.loadUint(32));
 }
 
+test "agent tools buildContractDeploy signs deploy message with state init" {
+    const allocator = std.testing.allocator;
+
+    const keypair = try signing.generateKeypair("tools-wallet-build-deploy");
+
+    var code_builder = core_types.Builder.init();
+    try code_builder.storeUint(0xCAFE, 16);
+    const code_cell = try code_builder.toCell(allocator);
+    defer code_cell.deinit(allocator);
+    const code_boc = try boc.serializeBoc(allocator, code_cell);
+    defer allocator.free(code_boc);
+
+    const state_init_boc = try state_init.buildStateInitBocAlloc(allocator, code_boc, null);
+    defer allocator.free(state_init_boc);
+    const expected_state_init = try boc.deserializeBoc(allocator, state_init_boc);
+    defer expected_state_init.deinit(allocator);
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+        public_key_hex: []const u8,
+
+        pub fn runGetMethod(self: *@This(), _: []const u8, method: []const u8, _: []const []const u8) anyerror!core_types.RunGetMethodResponse {
+            const entries = try self.allocator.alloc(core_types.StackEntry, 1);
+            errdefer self.allocator.free(entries);
+
+            if (std.mem.eql(u8, method, "seqno")) {
+                entries[0] = .{ .number = 2 };
+            } else if (std.mem.eql(u8, method, "get_subwallet_id")) {
+                entries[0] = .{ .number = signing.default_wallet_id_v4 };
+            } else if (std.mem.eql(u8, method, "get_public_key")) {
+                entries[0] = .{ .big_number = try self.allocator.dupe(u8, self.public_key_hex) };
+            } else {
+                return error.InvalidResponse;
+            }
+
+            return .{
+                .exit_code = 0,
+                .stack = entries,
+                .logs = "",
+            };
+        }
+
+        pub fn freeRunGetMethodResponse(self: *@This(), response: *core_types.RunGetMethodResponse) void {
+            for (response.stack) |*entry| {
+                switch (entry.*) {
+                    .big_number => |value| if (value.len > 0) self.allocator.free(value),
+                    else => {},
+                }
+            }
+            if (response.stack.len > 0) self.allocator.free(response.stack);
+        }
+    };
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    const public_key_hex = blk: {
+        const hex_chars = "0123456789abcdef";
+        const out = try allocator.alloc(u8, 2 + keypair[1].len * 2);
+        out[0] = '0';
+        out[1] = 'x';
+        for (keypair[1], 0..) |byte, idx| {
+            out[2 + idx * 2] = hex_chars[byte >> 4];
+            out[2 + idx * 2 + 1] = hex_chars[byte & 0x0f];
+        }
+        break :blk out;
+    };
+    defer allocator.free(public_key_hex);
+
+    var client = FakeClient{ .allocator = allocator, .public_key_hex = public_key_hex };
+    var tools = FakeTools.init(allocator, &client, .{
+        .rpc_url = "https://example.invalid",
+        .wallet_private_key = keypair[0],
+        .wallet_address = "0:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    });
+
+    var result = try tools.buildContractDeploy(
+        "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+        777,
+        state_init_boc,
+        null,
+    );
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqual(@as(u32, 2), result.seqno);
+
+    const ext_len = try std.base64.standard.Decoder.calcSizeForSlice(result.external_boc);
+    const ext_bytes = try allocator.alloc(u8, ext_len);
+    defer allocator.free(ext_bytes);
+    try std.base64.standard.Decoder.decode(ext_bytes, result.external_boc);
+
+    const ext_msg = try boc.deserializeBoc(allocator, ext_bytes);
+    defer ext_msg.deinit(allocator);
+
+    var ext_slice = ext_msg.toSlice();
+    _ = try ext_slice.loadUint(2);
+    _ = try ext_slice.loadUint(2);
+    _ = try ext_slice.loadAddress();
+    _ = try ext_slice.loadCoins();
+    _ = try ext_slice.loadUint(1);
+    _ = try ext_slice.loadUint(1);
+
+    const signed_body = try ext_slice.loadRef();
+    var signed_slice = signed_body.toSlice();
+    _ = try signed_slice.loadBits(512);
+    _ = try signed_slice.loadUint32();
+    _ = try signed_slice.loadUint32();
+    _ = try signed_slice.loadUint32();
+    _ = try signed_slice.loadUint32();
+    _ = try signed_slice.loadUint8();
+
+    const out_msg = try signed_slice.loadRef();
+    var out_slice = out_msg.toSlice();
+    _ = try out_slice.loadUint(1);
+    _ = try out_slice.loadUint(1);
+    _ = try out_slice.loadUint(1);
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadUint(1));
+    _ = try out_slice.loadUint(2);
+    _ = try out_slice.loadAddress();
+    try std.testing.expectEqual(@as(u64, 777), try out_slice.loadCoins());
+    _ = try out_slice.loadUint(1);
+    _ = try out_slice.loadCoins();
+    _ = try out_slice.loadCoins();
+    _ = try out_slice.loadUint(64);
+    _ = try out_slice.loadUint(32);
+    try std.testing.expectEqual(@as(u64, 1), try out_slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 1), try out_slice.loadUint(1));
+
+    const state_init_ref = try out_slice.loadRef();
+    try std.testing.expectEqualSlices(u8, &state_init_ref.hash(), &expected_state_init.hash());
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadUint(1));
+}
+
+test "agent tools buildContractDeployAuto derives destination from state init" {
+    const allocator = std.testing.allocator;
+
+    const keypair = try signing.generateKeypair("tools-wallet-build-deploy-auto");
+
+    var code_builder = core_types.Builder.init();
+    try code_builder.storeUint(0xBEEF, 16);
+    const code_cell = try code_builder.toCell(allocator);
+    defer code_cell.deinit(allocator);
+    const code_boc = try boc.serializeBoc(allocator, code_cell);
+    defer allocator.free(code_boc);
+
+    const state_init_boc = try state_init.buildStateInitBocAlloc(allocator, code_boc, null);
+    defer allocator.free(state_init_boc);
+
+    const computed_addr = try state_init.computeStateInitAddressFromBoc(allocator, 0, state_init_boc);
+    const expected_raw = try address_mod.formatRaw(allocator, &computed_addr);
+    defer allocator.free(expected_raw);
+
+    const FakeClient = struct {
+        pub fn runGetMethod(_: *@This(), _: []const u8, _: []const u8, _: []const []const u8) anyerror!core_types.RunGetMethodResponse {
+            return error.InvalidResponse;
+        }
+
+        pub fn freeRunGetMethodResponse(_: *@This(), _: *core_types.RunGetMethodResponse) void {}
+    };
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    var client = FakeClient{};
+    var tools = FakeTools.init(allocator, &client, .{
+        .rpc_url = "https://example.invalid",
+        .wallet_private_key = keypair[0],
+    });
+
+    var result = try tools.buildContractDeployAuto(0, 123, state_init_boc, null);
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings(expected_raw, result.destination);
+    try std.testing.expect(result.state_init_attached);
+}
+
 test "agent tools decodeFunctionBodyAbi decodes function input json" {
     const allocator = std.testing.allocator;
 
@@ -4932,6 +5169,8 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.buildWalletContractMessageFunction;
     _ = AgentTools.buildWalletContractMessageAbi;
     _ = AgentTools.buildWalletContractMessageAuto;
+    _ = AgentTools.buildContractDeploy;
+    _ = AgentTools.buildContractDeployAuto;
     _ = AgentTools.inspectContract;
     _ = AgentTools.getTransactions;
     _ = AgentTools.lookupTransaction;
@@ -4977,6 +5216,8 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = ProviderAgentTools.buildWalletContractMessageFunction;
     _ = ProviderAgentTools.buildWalletContractMessageAbi;
     _ = ProviderAgentTools.buildWalletContractMessageAuto;
+    _ = ProviderAgentTools.buildContractDeploy;
+    _ = ProviderAgentTools.buildContractDeployAuto;
     _ = ProviderAgentTools.deriveWalletInit;
     _ = ProviderAgentTools.verifyPayment;
     _ = ProviderAgentTools.waitPayment;
