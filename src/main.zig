@@ -326,7 +326,10 @@ pub fn main() !void {
                 return;
             }
 
-            var function_def = try contract_mod.abi_adapter.parseFunctionDefJsonAlloc(allocator, args[3]);
+            const function_json = try loadCliTextAlloc(allocator, args[3]);
+            defer allocator.free(function_json);
+
+            var function_def = try contract_mod.abi_adapter.parseFunctionDefJsonAlloc(allocator, function_json);
             defer function_def.deinit(allocator);
 
             var parsed_values = try parseCliAbiValues(allocator, args[4..]);
@@ -355,13 +358,54 @@ pub fn main() !void {
             return;
         }
 
+        if (std.mem.eql(u8, cell_cmd, "build-abi")) {
+            if (args.len < 5) {
+                std.debug.print("Usage: ton-zig-agent-kit cell build-abi <abi_json|@file> <function_name> <values...>\n", .{});
+                return;
+            }
+
+            const abi_json = try loadCliTextAlloc(allocator, args[3]);
+            defer allocator.free(abi_json);
+            const function_name = args[4];
+
+            var abi = try contract_mod.abi_adapter.parseAbiInfoJsonAlloc(allocator, abi_json);
+            defer abi.deinit(allocator);
+
+            var parsed_values = try parseCliAbiValues(allocator, args[5..]);
+            defer parsed_values.deinit(allocator);
+
+            const built = try contract_mod.abi_adapter.buildFunctionBodyFromAbiAlloc(
+                allocator,
+                &abi.abi,
+                function_name,
+                parsed_values.values,
+            );
+            defer allocator.free(built);
+
+            const encoded_len = std.base64.standard.Encoder.calcSize(built.len);
+            const encoded = try allocator.alloc(u8, encoded_len);
+            defer allocator.free(encoded);
+            _ = std.base64.standard.Encoder.encode(encoded, built);
+
+            std.debug.print("Built ABI function body BoC:\n", .{});
+            std.debug.print("  ABI version: {s}\n", .{abi.abi.version});
+            std.debug.print("  Function: {s}\n", .{function_name});
+            std.debug.print("  Base64: {s}\n", .{encoded});
+            std.debug.print("  Hex: ", .{});
+            for (built) |byte| {
+                std.debug.print("{X:0>2}", .{byte});
+            }
+            std.debug.print("\n", .{});
+            return;
+        }
+
         std.debug.print("Unknown cell command: {s}\n", .{cell_cmd});
         return;
     }
 
     if (std.mem.eql(u8, command, "wallet")) {
         if (args.len < 3) {
-            std.debug.print("Usage: ton-zig-agent-kit wallet <genkey|seqno|send|send-body|send-body-hex|send-ops|send-function>\n", .{});
+            std.debug.print("Usage: ton-zig-agent-kit wallet <genkey|seqno|send|send-body|send-body-hex|send-ops|send-function|send-abi>\n", .{});
             return;
         }
         const wallet_cmd = args[2];
@@ -512,7 +556,10 @@ pub fn main() !void {
             const dest = args[4];
             const amount = try std.fmt.parseInt(u64, args[5], 10);
 
-            var function_def = try contract_mod.abi_adapter.parseFunctionDefJsonAlloc(allocator, args[6]);
+            const function_json = try loadCliTextAlloc(allocator, args[6]);
+            defer allocator.free(function_json);
+
+            var function_def = try contract_mod.abi_adapter.parseFunctionDefJsonAlloc(allocator, function_json);
             defer function_def.deinit(allocator);
 
             var parsed_values = try parseCliAbiValues(allocator, args[7..]);
@@ -536,6 +583,50 @@ pub fn main() !void {
 
             std.debug.print("Function contract message submitted:\n", .{});
             std.debug.print("  Function: {s}\n", .{function_def.function.name});
+            std.debug.print("  Hash: {s}\n", .{result.hash});
+            std.debug.print("  LT: {d}\n", .{result.lt});
+            return;
+        }
+
+        if (std.mem.eql(u8, wallet_cmd, "send-abi")) {
+            if (args.len < 9) {
+                std.debug.print("Usage: ton-zig-agent-kit wallet send-abi <wallet_addr> <dest> <amount_nanoton> <abi_json|@file> <function_name> <values...>\n", .{});
+                return;
+            }
+            const wallet_addr = args[3];
+            const dest = args[4];
+            const amount = try std.fmt.parseInt(u64, args[5], 10);
+            const function_name = args[7];
+
+            const abi_json = try loadCliTextAlloc(allocator, args[6]);
+            defer allocator.free(abi_json);
+
+            var abi = try contract_mod.abi_adapter.parseAbiInfoJsonAlloc(allocator, abi_json);
+            defer abi.deinit(allocator);
+
+            var parsed_values = try parseCliAbiValues(allocator, args[8..]);
+            defer parsed_values.deinit(allocator);
+
+            const body = try contract_mod.abi_adapter.buildFunctionBodyFromAbiAlloc(
+                allocator,
+                &abi.abi,
+                function_name,
+                parsed_values.values,
+            );
+            defer allocator.free(body);
+
+            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
+            defer client.deinit();
+
+            const keypair = try signing.generateKeypair("my_seed_phrase");
+            const private_key = keypair[0];
+
+            var result = try signing.sendBody(&client, .v4, private_key, wallet_addr, dest, amount, body);
+            defer client.freeSendBocResponse(&result);
+
+            std.debug.print("ABI contract message submitted:\n", .{});
+            std.debug.print("  ABI version: {s}\n", .{abi.abi.version});
+            std.debug.print("  Function: {s}\n", .{function_name});
             std.debug.print("  Hash: {s}\n", .{result.hash});
             std.debug.print("  LT: {d}\n", .{result.lt});
             return;
@@ -899,6 +990,13 @@ fn parseCliAbiValues(allocator: std.mem.Allocator, specs: []const []const u8) !P
     };
 }
 
+fn loadCliTextAlloc(allocator: std.mem.Allocator, spec: []const u8) ![]u8 {
+    if (spec.len > 1 and spec[0] == '@') {
+        return std.fs.cwd().readFileAlloc(allocator, spec[1..], 1 << 20);
+    }
+    return allocator.dupe(u8, spec);
+}
+
 fn parseCliStackArgs(allocator: std.mem.Allocator, specs: []const []const u8) !ParsedCliStackArgs {
     const parsed_args = try allocator.alloc(contract_mod.StackArg, specs.len);
     errdefer allocator.free(parsed_args);
@@ -1114,6 +1212,7 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit cell hash <hex>              Get cell hash\n", .{});
     std.debug.print("  ton-zig-agent-kit cell build-typed <ops...>    Build body BoC from typed ops\n", .{});
     std.debug.print("  ton-zig-agent-kit cell build-function <function_json> <values...>  Build body from function schema\n", .{});
+    std.debug.print("  ton-zig-agent-kit cell build-abi <abi_json|@file> <function> <values...>  Build body from ABI doc\n", .{});
     std.debug.print("    body ops: u<bits>:<v>, i<bits>:<v>, coins:<v>, addr:<addr>, bytes:<utf8>, hex:<hex>, ref:<b64 boc>, refhex:<hex boc>\n", .{});
     std.debug.print("    function values: u:<v>, i:<v>, str:<utf8>, addr:<addr>, hex:<hex>, boc:<b64 boc>, bochex:<hex boc>\n", .{});
     std.debug.print("\nWallet operations:\n", .{});
@@ -1124,6 +1223,7 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit wallet send-body-hex <src> <dst> <amount> <body_hex>  Send raw contract body hex\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-ops <src> <dst> <amount> <ops...>  Build and send typed contract body\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-function <src> <dst> <amount> <function_json> <values...>  Build and send function body\n", .{});
+    std.debug.print("  ton-zig-agent-kit wallet send-abi <src> <dst> <amount> <abi_json|@file> <function> <values...>  Build and send ABI function body\n", .{});
     std.debug.print("\nPayment watch operations:\n", .{});
     std.debug.print("  ton-zig-agent-kit paywatch invoice <dest> <amount>  Create invoice\n", .{});
     std.debug.print("  ton-zig-agent-kit paywatch verify <addr> <comment>  Verify payment\n", .{});
@@ -1282,4 +1382,25 @@ test "parse cli abi values" {
     try std.testing.expectEqualStrings("hello", parsed.values[2].text);
     try std.testing.expectEqualSlices(u8, &.{ 0xCA, 0xFE }, parsed.values[4].bytes);
     try std.testing.expectEqualSlices(u8, &.{ 0xB5, 0xEE, 0x9C, 0x72 }, parsed.values[5].boc[0..4]);
+}
+
+test "load cli text alloc supports inline and file specs" {
+    const allocator = std.testing.allocator;
+
+    const inline_text = try loadCliTextAlloc(allocator, "{\"name\":\"x\"}");
+    defer allocator.free(inline_text);
+    try std.testing.expectEqualStrings("{\"name\":\"x\"}", inline_text);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "abi.json", .data = "{\"version\":\"1.0\"}" });
+
+    const abs_path = try tmp.dir.realpathAlloc(allocator, "abi.json");
+    defer allocator.free(abs_path);
+    const path_spec = try std.fmt.allocPrint(allocator, "@{s}", .{abs_path});
+    defer allocator.free(path_spec);
+
+    const file_text = try loadCliTextAlloc(allocator, path_spec);
+    defer allocator.free(file_text);
+    try std.testing.expectEqualStrings("{\"version\":\"1.0\"}", file_text);
 }

@@ -344,6 +344,47 @@ pub const AgentTools = struct {
         return self.sendContractMessage(destination, amount, body_boc);
     }
 
+    /// Build and send a contract body from a full ABI document and function name
+    pub fn sendContractMessageAbi(
+        self: *AgentTools,
+        destination: []const u8,
+        amount: u64,
+        abi_json: []const u8,
+        function_name: []const u8,
+        values: []const abi_adapter.AbiValue,
+    ) !tools_types.SendResult {
+        var abi = abi_adapter.parseAbiInfoJsonAlloc(self.allocator, abi_json) catch |err| {
+            return tools_types.SendResult{
+                .hash = "",
+                .lt = 0,
+                .destination = destination,
+                .amount = amount,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        defer abi.deinit(self.allocator);
+
+        const body_boc = abi_adapter.buildFunctionBodyFromAbiAlloc(
+            self.allocator,
+            &abi.abi,
+            function_name,
+            values,
+        ) catch |err| {
+            return tools_types.SendResult{
+                .hash = "",
+                .lt = 0,
+                .destination = destination,
+                .amount = amount,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        defer self.allocator.free(body_boc);
+
+        return self.sendContractMessage(destination, amount, body_boc);
+    }
+
     fn sendWalletMessages(self: *AgentTools, destination: []const u8, amount: u64, msgs: []const wallet.signing.WalletMessage) !tools_types.SendResult {
         const private_key = self.config.wallet_private_key orelse {
             return tools_types.SendResult{
@@ -427,5 +468,6 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.sendContractMessage;
     _ = AgentTools.sendContractMessageOps;
     _ = AgentTools.sendContractMessageFunction;
+    _ = AgentTools.sendContractMessageAbi;
     _ = RunMethodResult;
 }

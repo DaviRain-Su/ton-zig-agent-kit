@@ -52,6 +52,18 @@ pub const OwnedFunctionDef = struct {
     }
 };
 
+pub const OwnedAbiInfo = struct {
+    abi: AbiInfo,
+
+    pub fn deinit(self: *OwnedAbiInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.abi.version);
+        if (self.abi.uri) |uri| allocator.free(uri);
+        freeFunctionDefs(allocator, self.abi.functions);
+        freeEventDefs(allocator, self.abi.events);
+        self.abi.uri = null;
+    }
+};
+
 pub const AbiValue = union(enum) {
     uint: u64,
     int: i64,
@@ -100,36 +112,60 @@ pub fn adaptToContract(addr: []const u8, abi: ?AbiInfo) ContractAdapter {
     return ContractAdapter{ .address = addr, .abi = abi };
 }
 
-pub fn parseFunctionDefJsonAlloc(allocator: std.mem.Allocator, json_text: []const u8) !OwnedFunctionDef {
+pub fn parseAbiInfoJsonAlloc(allocator: std.mem.Allocator, json_text: []const u8) !OwnedAbiInfo {
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_text, .{});
     defer parsed.deinit();
 
     if (parsed.value != .object) return error.InvalidAbiDefinition;
     const object = parsed.value.object;
 
-    const name = try dupRequiredObjectString(allocator, object, "name");
-    errdefer allocator.free(name);
+    const version = if (object.get("version")) |value|
+        switch (value) {
+            .string => try allocator.dupe(u8, value.string),
+            else => return error.InvalidAbiDefinition,
+        }
+    else
+        try allocator.dupe(u8, "json");
+    errdefer allocator.free(version);
 
-    const inputs = if (object.get("inputs")) |value|
-        try parseParamDefsAlloc(allocator, value)
+    const functions = if (getAbiFunctionArray(object)) |value|
+        try parseFunctionDefsAlloc(allocator, value)
     else
         &.{};
-    errdefer freeParamDefs(allocator, inputs);
+    errdefer freeFunctionDefs(allocator, functions);
 
-    const outputs = if (object.get("outputs")) |value|
-        try parseParamDefsAlloc(allocator, value)
+    const events = if (object.get("events")) |value|
+        try parseEventDefsAlloc(allocator, value)
     else
         &.{};
-    errdefer freeParamDefs(allocator, outputs);
+    errdefer freeEventDefs(allocator, events);
 
     return .{
-        .function = .{
-            .name = name,
-            .opcode = if (object.get("opcode")) |value| try parseOpcodeValue(value) else null,
-            .inputs = inputs,
-            .outputs = outputs,
+        .abi = .{
+            .version = version,
+            .uri = null,
+            .functions = functions,
+            .events = events,
         },
     };
+}
+
+pub fn parseFunctionDefJsonAlloc(allocator: std.mem.Allocator, json_text: []const u8) !OwnedFunctionDef {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_text, .{});
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return error.InvalidAbiDefinition;
+
+    return .{
+        .function = try parseFunctionDefObjectAlloc(allocator, parsed.value.object),
+    };
+}
+
+pub fn findFunction(abi: *const AbiInfo, function_name: []const u8) ?*const FunctionDef {
+    for (abi.functions) |*function| {
+        if (std.mem.eql(u8, function.name, function_name)) return function;
+    }
+    return null;
 }
 
 pub fn buildFunctionBodyBocAlloc(
@@ -157,6 +193,16 @@ pub fn buildFunctionBodyBocAlloc(
     }
 
     return body_builder.buildBodyBocAlloc(allocator, ops);
+}
+
+pub fn buildFunctionBodyFromAbiAlloc(
+    allocator: std.mem.Allocator,
+    abi: *const AbiInfo,
+    function_name: []const u8,
+    values: []const AbiValue,
+) ![]u8 {
+    const function = findFunction(abi, function_name) orelse return error.FunctionNotFound;
+    return buildFunctionBodyBocAlloc(allocator, function.*, values);
 }
 
 const abi_method_candidates = [_][]const u8{
@@ -245,6 +291,90 @@ fn looksLikeOffchainUri(value: []const u8) bool {
         std.mem.startsWith(u8, value, "https://");
 }
 
+fn getAbiFunctionArray(object: std.json.ObjectMap) ?std.json.Value {
+    return object.get("functions") orelse object.get("messages") orelse object.get("methods");
+}
+
+fn parseFunctionDefsAlloc(allocator: std.mem.Allocator, value: std.json.Value) ![]FunctionDef {
+    if (value != .array) return error.InvalidAbiDefinition;
+    if (value.array.items.len == 0) return &.{};
+
+    const functions = try allocator.alloc(FunctionDef, value.array.items.len);
+    var built: usize = 0;
+    errdefer {
+        freeFunctionDefsPartial(allocator, functions, built);
+        allocator.free(functions);
+    }
+
+    for (value.array.items, 0..) |item, idx| {
+        if (item != .object) return error.InvalidAbiDefinition;
+        functions[idx] = try parseFunctionDefObjectAlloc(allocator, item.object);
+        built += 1;
+    }
+
+    return functions;
+}
+
+fn parseFunctionDefObjectAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap) !FunctionDef {
+    const name = try dupRequiredObjectString(allocator, object, "name");
+    errdefer allocator.free(name);
+
+    const inputs = if (object.get("inputs")) |value|
+        try parseParamDefsAlloc(allocator, value)
+    else
+        &.{};
+    errdefer freeParamDefs(allocator, inputs);
+
+    const outputs = if (object.get("outputs")) |value|
+        try parseParamDefsAlloc(allocator, value)
+    else
+        &.{};
+    errdefer freeParamDefs(allocator, outputs);
+
+    return .{
+        .name = name,
+        .opcode = try parseOptionalOpcode(object),
+        .inputs = inputs,
+        .outputs = outputs,
+    };
+}
+
+fn parseEventDefsAlloc(allocator: std.mem.Allocator, value: std.json.Value) ![]EventDef {
+    if (value != .array) return error.InvalidAbiDefinition;
+    if (value.array.items.len == 0) return &.{};
+
+    const events = try allocator.alloc(EventDef, value.array.items.len);
+    var built: usize = 0;
+    errdefer {
+        freeEventDefsPartial(allocator, events, built);
+        allocator.free(events);
+    }
+
+    for (value.array.items, 0..) |item, idx| {
+        if (item != .object) return error.InvalidAbiDefinition;
+        events[idx] = try parseEventDefObjectAlloc(allocator, item.object);
+        built += 1;
+    }
+
+    return events;
+}
+
+fn parseEventDefObjectAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap) !EventDef {
+    const name = try dupRequiredObjectString(allocator, object, "name");
+    errdefer allocator.free(name);
+
+    const inputs = if (object.get("inputs")) |value|
+        try parseParamDefsAlloc(allocator, value)
+    else
+        &.{};
+    errdefer freeParamDefs(allocator, inputs);
+
+    return .{
+        .name = name,
+        .inputs = inputs,
+    };
+}
+
 fn parseParamDefsAlloc(allocator: std.mem.Allocator, value: std.json.Value) ![]ParamDef {
     if (value != .array) return error.InvalidAbiDefinition;
     if (value.array.items.len == 0) return &.{};
@@ -271,6 +401,31 @@ fn parseParamDefsAlloc(allocator: std.mem.Allocator, value: std.json.Value) ![]P
 fn freeParamDefs(allocator: std.mem.Allocator, params: []const ParamDef) void {
     freeParamDefsPartial(allocator, params, params.len);
     if (params.len > 0) allocator.free(params);
+}
+
+fn freeFunctionDefs(allocator: std.mem.Allocator, functions: []const FunctionDef) void {
+    freeFunctionDefsPartial(allocator, functions, functions.len);
+    if (functions.len > 0) allocator.free(functions);
+}
+
+fn freeFunctionDefsPartial(allocator: std.mem.Allocator, functions: []const FunctionDef, len: usize) void {
+    for (functions[0..len]) |function| {
+        allocator.free(function.name);
+        freeParamDefs(allocator, function.inputs);
+        freeParamDefs(allocator, function.outputs);
+    }
+}
+
+fn freeEventDefs(allocator: std.mem.Allocator, events: []const EventDef) void {
+    freeEventDefsPartial(allocator, events, events.len);
+    if (events.len > 0) allocator.free(events);
+}
+
+fn freeEventDefsPartial(allocator: std.mem.Allocator, events: []const EventDef, len: usize) void {
+    for (events[0..len]) |event| {
+        allocator.free(event.name);
+        freeParamDefs(allocator, event.inputs);
+    }
 }
 
 fn freeParamDefsPartial(allocator: std.mem.Allocator, params: []const ParamDef, len: usize) void {
@@ -314,6 +469,13 @@ fn parseOpcodeValue(value: std.json.Value) !u32 {
         .string => try parseUintText(value.string),
         else => error.InvalidAbiDefinition,
     };
+}
+
+fn parseOptionalOpcode(object: std.json.ObjectMap) !?u32 {
+    if (object.get("opcode")) |value| return try parseOpcodeValue(value);
+    if (object.get("id")) |value| return try parseOpcodeValue(value);
+    if (object.get("op")) |value| return try parseOpcodeValue(value);
+    return null;
 }
 
 fn parseUintText(text: []const u8) !u32 {
@@ -498,6 +660,50 @@ test "abi adapter parses function definition json" {
     try std.testing.expectEqualStrings("address", parsed.function.inputs[2].type_name);
 }
 
+test "abi adapter parses abi document json and finds function" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "transfer",
+        \\      "id": "0x0f8a7ea5",
+        \\      "inputs": [
+        \\        {"name": "query_id", "type": "uint64"},
+        \\        {"name": "amount", "type": "coins"}
+        \\      ]
+        \\    },
+        \\    {
+        \\      "name": "burn",
+        \\      "opcode": 1499400124,
+        \\      "inputs": [
+        \\        {"name": "amount", "type": "coins"}
+        \\      ]
+        \\    }
+        \\  ],
+        \\  "events": [
+        \\    {
+        \\      "name": "Transfer",
+        \\      "inputs": [
+        \\        {"name": "from", "type": "address"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var parsed = try parseAbiInfoJsonAlloc(allocator, json);
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqualStrings("1.0", parsed.abi.version);
+    try std.testing.expectEqual(@as(usize, 2), parsed.abi.functions.len);
+    try std.testing.expectEqual(@as(usize, 1), parsed.abi.events.len);
+    try std.testing.expectEqualStrings("Transfer", parsed.abi.events[0].name);
+    try std.testing.expectEqual(@as(u32, 0x0f8a7ea5), findFunction(&parsed.abi, "transfer").?.opcode.?);
+    try std.testing.expect(findFunction(&parsed.abi, "missing") == null);
+}
+
 test "abi adapter builds function body boc from schema" {
     const allocator = std.testing.allocator;
 
@@ -545,4 +751,40 @@ test "abi adapter builds function body boc from schema" {
     const payload_ref = try slice.loadRef();
     var payload_slice = payload_ref.toSlice();
     try std.testing.expectEqual(@as(u64, 0xAB), try payload_slice.loadUint(8));
+}
+
+test "abi adapter builds function body from abi by function name" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "set_flag",
+        \\      "opcode": "0x11223344",
+        \\      "inputs": [
+        \\        {"name": "enabled", "type": "bool"},
+        \\        {"name": "note", "type": "bytes"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var parsed = try parseAbiInfoJsonAlloc(allocator, json);
+    defer parsed.deinit(allocator);
+
+    const built = try buildFunctionBodyFromAbiAlloc(allocator, &parsed.abi, "set_flag", &.{
+        .{ .uint = 1 },
+        .{ .text = "ok" },
+    });
+    defer allocator.free(built);
+
+    const root = try @import("../core/boc.zig").deserializeBoc(allocator, built);
+    defer root.deinit(allocator);
+
+    var slice = root.toSlice();
+    try std.testing.expectEqual(@as(u64, 0x11223344), try slice.loadUint(32));
+    try std.testing.expectEqual(@as(u64, 1), try slice.loadUint(1));
+    try std.testing.expectEqual(@as(u8, 'o'), try slice.loadUint8());
+    try std.testing.expectEqual(@as(u8, 'k'), try slice.loadUint8());
 }
