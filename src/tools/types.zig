@@ -155,6 +155,30 @@ pub const TransactionDetailResult = struct {
     }
 };
 
+pub const ContractInspectResult = struct {
+    address: []const u8,
+    has_wallet: bool,
+    has_jetton: bool,
+    has_jetton_master: bool,
+    has_jetton_wallet: bool,
+    has_nft: bool,
+    has_nft_item: bool,
+    has_nft_collection: bool,
+    has_abi: bool,
+    abi_uri: ?[]const u8,
+    abi_json: ?[]const u8,
+    details_json: ?[]const u8,
+    success: bool,
+    error_message: ?[]const u8 = null,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.abi_uri) |value| allocator.free(value);
+        if (self.abi_json) |value| allocator.free(value);
+        if (self.details_json) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
 pub const TxStatus = enum {
     pending,
     confirmed,
@@ -244,6 +268,7 @@ pub const ToolResponse = union(enum) {
     transaction: TxResult,
     transaction_list: TransactionListResult,
     transaction_detail: TransactionDetailResult,
+    contract_inspect: ContractInspectResult,
     jetton_balance: JettonBalanceResult,
     jetton_info: JettonInfoResult,
     jetton_wallet_address: JettonWalletAddressResult,

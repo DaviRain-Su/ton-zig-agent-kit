@@ -19,9 +19,43 @@ const jetton = @import("../contract/jetton.zig");
 const nft = @import("../contract/nft.zig");
 const tools_types = @import("types.zig");
 
+const BuiltAbiInspect = struct {
+    uri: ?[]u8 = null,
+    json: ?[]u8 = null,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.uri) |value| allocator.free(value);
+        if (self.json) |value| allocator.free(value);
+        self.* = .{};
+    }
+};
+
 fn AgentToolsImpl(comptime ClientType: type) type {
-    const JettonMasterClient = if (ClientType == *http_client.TonHttpClient) jetton.JettonMaster else jetton.ProviderJettonMaster;
-    const NFTCollectionClient = if (ClientType == *http_client.TonHttpClient) nft.NFTCollection else nft.ProviderNFTCollection;
+    const supports_standard_wrappers = ClientType == *http_client.TonHttpClient or ClientType == *provider_mod.MultiProvider;
+    const JettonMasterClient = if (ClientType == *http_client.TonHttpClient)
+        jetton.JettonMaster
+    else if (ClientType == *provider_mod.MultiProvider)
+        jetton.ProviderJettonMaster
+    else
+        void;
+    const JettonWalletClient = if (ClientType == *http_client.TonHttpClient)
+        jetton.JettonWallet
+    else if (ClientType == *provider_mod.MultiProvider)
+        jetton.ProviderJettonWallet
+    else
+        void;
+    const NFTItemClient = if (ClientType == *http_client.TonHttpClient)
+        nft.NFTItem
+    else if (ClientType == *provider_mod.MultiProvider)
+        nft.ProviderNFTItem
+    else
+        void;
+    const NFTCollectionClient = if (ClientType == *http_client.TonHttpClient)
+        nft.NFTCollection
+    else if (ClientType == *provider_mod.MultiProvider)
+        nft.ProviderNFTCollection
+    else
+        void;
 
     return struct {
         allocator: std.mem.Allocator,
@@ -142,6 +176,346 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 return try address_mod.formatRaw(self.allocator, &addr);
             }
             return null;
+        }
+
+        fn writeJsonString(writer: anytype, value: []const u8) !void {
+            try writer.writeByte('"');
+            for (value) |char| {
+                switch (char) {
+                    '"' => try writer.writeAll("\\\""),
+                    '\\' => try writer.writeAll("\\\\"),
+                    '\n' => try writer.writeAll("\\n"),
+                    '\r' => try writer.writeAll("\\r"),
+                    '\t' => try writer.writeAll("\\t"),
+                    0x08 => try writer.writeAll("\\b"),
+                    0x0c => try writer.writeAll("\\f"),
+                    0x00...0x07, 0x0b, 0x0e...0x1f => try writer.print("\\u00{X:0>2}", .{char}),
+                    else => try writer.writeByte(char),
+                }
+            }
+            try writer.writeByte('"');
+        }
+
+        fn writeJsonFieldPrefix(writer: anytype, wrote_any: *bool, field_name: []const u8) !void {
+            if (wrote_any.*) try writer.writeByte(',');
+            wrote_any.* = true;
+            try writeJsonString(writer, field_name);
+            try writer.writeByte(':');
+        }
+
+        fn writeErrorObjectJson(writer: anytype, error_message: []const u8) !void {
+            try writer.writeByte('{');
+            var wrote_any = false;
+            try writeJsonFieldPrefix(writer, &wrote_any, "error");
+            try writeJsonString(writer, error_message);
+            try writer.writeByte('}');
+        }
+
+        fn formatU256Alloc(self: *@This(), value: anytype) ![]u8 {
+            return std.fmt.allocPrint(self.allocator, "{d}", .{value});
+        }
+
+        fn buildAbiSummaryJsonAlloc(self: *@This(), contract_address: []const u8) !BuiltAbiInspect {
+            var abi_ref = try abi_adapter.queryAbiIpfs(self.client, contract_address);
+            defer if (abi_ref) |*info| info.deinit(self.allocator);
+
+            var abi_doc_error: ?[]const u8 = null;
+            var abi_doc = abi_adapter.queryAbiDocumentAlloc(self.client, contract_address) catch |err| blk: {
+                abi_doc_error = @errorName(err);
+                break :blk null;
+            };
+            defer if (abi_doc) |*info| info.deinit(self.allocator);
+
+            if (abi_ref == null and abi_doc == null and abi_doc_error == null) return .{};
+
+            const owned_uri = if (abi_ref) |info|
+                if (info.uri) |value| try self.allocator.dupe(u8, value) else null
+            else
+                null;
+            errdefer if (owned_uri) |value| self.allocator.free(value);
+
+            var writer = std.io.Writer.Allocating.init(self.allocator);
+            errdefer writer.deinit();
+
+            try writer.writer.writeByte('{');
+            var wrote_any = false;
+
+            if (abi_ref) |info| {
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "reference_kind");
+                try writeJsonString(&writer.writer, info.version);
+                if (info.uri) |value| {
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_any, "uri");
+                    try writeJsonString(&writer.writer, value);
+                }
+            }
+
+            if (abi_doc) |*info| {
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "document_version");
+                try writeJsonString(&writer.writer, info.abi.version);
+
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "function_count");
+                try writer.writer.print("{d}", .{info.abi.functions.len});
+
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "event_count");
+                try writer.writer.print("{d}", .{info.abi.events.len});
+
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "functions");
+                try writer.writer.writeByte('[');
+                for (info.abi.functions, 0..) |function, idx| {
+                    if (idx != 0) try writer.writer.writeByte(',');
+                    const selector = try abi_adapter.buildFunctionSelectorAlloc(self.allocator, function);
+                    defer self.allocator.free(selector);
+
+                    try writer.writer.writeByte('{');
+                    var wrote_function = false;
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_function, "name");
+                    try writeJsonString(&writer.writer, function.name);
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_function, "selector");
+                    try writeJsonString(&writer.writer, selector);
+                    if (function.opcode) |opcode| {
+                        try writeJsonFieldPrefix(&writer.writer, &wrote_function, "opcode");
+                        try writer.writer.print("\"0x{X}\"", .{opcode});
+                    }
+                    try writer.writer.writeByte('}');
+                }
+                try writer.writer.writeByte(']');
+
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "events");
+                try writer.writer.writeByte('[');
+                for (info.abi.events, 0..) |event, idx| {
+                    if (idx != 0) try writer.writer.writeByte(',');
+                    const selector = try abi_adapter.buildEventSelectorAlloc(self.allocator, event);
+                    defer self.allocator.free(selector);
+
+                    try writer.writer.writeByte('{');
+                    var wrote_event = false;
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_event, "name");
+                    try writeJsonString(&writer.writer, event.name);
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_event, "selector");
+                    try writeJsonString(&writer.writer, selector);
+                    if (event.opcode) |opcode| {
+                        try writeJsonFieldPrefix(&writer.writer, &wrote_event, "opcode");
+                        try writer.writer.print("\"0x{X}\"", .{opcode});
+                    }
+                    try writer.writer.writeByte('}');
+                }
+                try writer.writer.writeByte(']');
+            } else if (abi_doc_error) |value| {
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "document_error");
+                try writeJsonString(&writer.writer, value);
+            }
+
+            try writer.writer.writeByte('}');
+
+            return .{
+                .uri = owned_uri,
+                .json = try writer.toOwnedSlice(),
+            };
+        }
+
+        fn writeWalletInspectJson(self: *@This(), writer: anytype, contract_address: []const u8) !void {
+            const info = signing.getWalletInfo(self.client, contract_address) catch |err| {
+                return writeErrorObjectJson(writer, @errorName(err));
+            };
+
+            const public_key_hex = try allocHexLower(self.allocator, &info.public_key);
+            defer self.allocator.free(public_key_hex);
+
+            try writer.writeByte('{');
+            var wrote_any = false;
+            try writeJsonFieldPrefix(writer, &wrote_any, "seqno");
+            try writer.print("{d}", .{info.seqno});
+            try writeJsonFieldPrefix(writer, &wrote_any, "wallet_id");
+            try writer.print("{d}", .{info.wallet_id});
+            try writeJsonFieldPrefix(writer, &wrote_any, "public_key");
+            try writeJsonString(writer, public_key_hex);
+            try writer.writeByte('}');
+        }
+
+        fn writeJettonMasterInspectJson(self: *@This(), writer: anytype, contract_address: []const u8) !void {
+            if (!supports_standard_wrappers) {
+                return writeErrorObjectJson(writer, "UnsupportedClientType");
+            }
+
+            var master = JettonMasterClient.init(contract_address, self.client);
+            var data = master.getJettonData() catch |err| {
+                return writeErrorObjectJson(writer, @errorName(err));
+            };
+            defer data.deinit(self.allocator);
+
+            const total_supply = try self.formatU256Alloc(data.total_supply);
+            defer self.allocator.free(total_supply);
+            const admin = if (data.admin) |value| try address_mod.formatRaw(self.allocator, &value) else null;
+            defer if (admin) |value| self.allocator.free(value);
+
+            try writer.writeByte('{');
+            var wrote_any = false;
+            try writeJsonFieldPrefix(writer, &wrote_any, "total_supply");
+            try writeJsonString(writer, total_supply);
+            try writeJsonFieldPrefix(writer, &wrote_any, "mintable");
+            try writer.writeAll(if (data.mintable) "true" else "false");
+            try writeJsonFieldPrefix(writer, &wrote_any, "admin");
+            if (admin) |value| {
+                try writeJsonString(writer, value);
+            } else {
+                try writer.writeAll("null");
+            }
+            try writeJsonFieldPrefix(writer, &wrote_any, "content_uri");
+            if (data.content_uri) |value| {
+                try writeJsonString(writer, value);
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeByte('}');
+        }
+
+        fn writeJettonWalletInspectJson(self: *@This(), writer: anytype, contract_address: []const u8) !void {
+            if (!supports_standard_wrappers) {
+                return writeErrorObjectJson(writer, "UnsupportedClientType");
+            }
+
+            var wallet_contract = JettonWalletClient.init(contract_address, self.client);
+            var data = wallet_contract.getWalletData() catch |err| {
+                return writeErrorObjectJson(writer, @errorName(err));
+            };
+            defer data.deinit(self.allocator);
+
+            const balance = try self.formatU256Alloc(data.balance);
+            defer self.allocator.free(balance);
+
+            try writer.writeByte('{');
+            var wrote_any = false;
+            try writeJsonFieldPrefix(writer, &wrote_any, "balance");
+            try writeJsonString(writer, balance);
+            try writeJsonFieldPrefix(writer, &wrote_any, "owner");
+            try writeJsonString(writer, data.owner);
+            try writeJsonFieldPrefix(writer, &wrote_any, "master");
+            try writeJsonString(writer, data.master);
+            try writer.writeByte('}');
+        }
+
+        fn writeNFTItemInspectJson(self: *@This(), writer: anytype, contract_address: []const u8) !void {
+            if (!supports_standard_wrappers) {
+                return writeErrorObjectJson(writer, "UnsupportedClientType");
+            }
+
+            var item = NFTItemClient.init(contract_address, self.client);
+            var data = item.getNFTData() catch |err| {
+                return writeErrorObjectJson(writer, @errorName(err));
+            };
+            defer data.deinit(self.allocator);
+
+            const index = try self.formatU256Alloc(data.index);
+            defer self.allocator.free(index);
+            const owner = if (data.owner) |value| try address_mod.formatRaw(self.allocator, &value) else null;
+            defer if (owner) |value| self.allocator.free(value);
+            const collection = if (data.collection) |value| try address_mod.formatRaw(self.allocator, &value) else null;
+            defer if (collection) |value| self.allocator.free(value);
+
+            try writer.writeByte('{');
+            var wrote_any = false;
+            try writeJsonFieldPrefix(writer, &wrote_any, "index");
+            try writeJsonString(writer, index);
+            try writeJsonFieldPrefix(writer, &wrote_any, "owner");
+            if (owner) |value| {
+                try writeJsonString(writer, value);
+            } else {
+                try writer.writeAll("null");
+            }
+            try writeJsonFieldPrefix(writer, &wrote_any, "collection");
+            if (collection) |value| {
+                try writeJsonString(writer, value);
+            } else {
+                try writer.writeAll("null");
+            }
+            try writeJsonFieldPrefix(writer, &wrote_any, "content_uri");
+            if (data.content_uri) |value| {
+                try writeJsonString(writer, value);
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeByte('}');
+        }
+
+        fn writeNFTCollectionInspectJson(self: *@This(), writer: anytype, contract_address: []const u8) !void {
+            if (!supports_standard_wrappers) {
+                return writeErrorObjectJson(writer, "UnsupportedClientType");
+            }
+
+            var collection = NFTCollectionClient.init(contract_address, self.client);
+            var data = collection.getCollectionData() catch |err| {
+                return writeErrorObjectJson(writer, @errorName(err));
+            };
+            defer data.deinit(self.allocator);
+
+            const next_item_index = try self.formatU256Alloc(data.next_item_index);
+            defer self.allocator.free(next_item_index);
+            const owner = if (data.owner) |value| try address_mod.formatRaw(self.allocator, &value) else null;
+            defer if (owner) |value| self.allocator.free(value);
+
+            try writer.writeByte('{');
+            var wrote_any = false;
+            try writeJsonFieldPrefix(writer, &wrote_any, "owner");
+            if (owner) |value| {
+                try writeJsonString(writer, value);
+            } else {
+                try writer.writeAll("null");
+            }
+            try writeJsonFieldPrefix(writer, &wrote_any, "next_item_index");
+            try writeJsonString(writer, next_item_index);
+            try writeJsonFieldPrefix(writer, &wrote_any, "content_uri");
+            if (data.content_uri) |value| {
+                try writeJsonString(writer, value);
+            } else {
+                try writer.writeAll("null");
+            }
+            try writer.writeByte('}');
+        }
+
+        fn buildContractDetailsJsonAlloc(
+            self: *@This(),
+            contract_address: []const u8,
+            supported: abi_adapter.SupportedInterfaces,
+        ) !?[]u8 {
+            var writer = std.io.Writer.Allocating.init(self.allocator);
+            errdefer writer.deinit();
+
+            try writer.writer.writeByte('{');
+            var wrote_any = false;
+
+            if (supported.has_wallet) {
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "wallet");
+                try self.writeWalletInspectJson(&writer.writer, contract_address);
+            }
+
+            if (supported.has_jetton_master) {
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "jetton_master");
+                try self.writeJettonMasterInspectJson(&writer.writer, contract_address);
+            }
+
+            if (supported.has_jetton_wallet) {
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "jetton_wallet");
+                try self.writeJettonWalletInspectJson(&writer.writer, contract_address);
+            }
+
+            if (supported.has_nft_item) {
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "nft_item");
+                try self.writeNFTItemInspectJson(&writer.writer, contract_address);
+            }
+
+            if (supported.has_nft_collection) {
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "nft_collection");
+                try self.writeNFTCollectionInspectJson(&writer.writer, contract_address);
+            }
+
+            try writer.writer.writeByte('}');
+
+            if (!wrote_any) {
+                writer.deinit();
+                return null;
+            }
+
+            return try writer.toOwnedSlice();
         }
 
         fn decodedBodyError(
@@ -399,6 +773,28 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             };
         }
 
+        fn contractInspectError(
+            contract_address: []const u8,
+            error_message: []const u8,
+        ) tools_types.ContractInspectResult {
+            return .{
+                .address = contract_address,
+                .has_wallet = false,
+                .has_jetton = false,
+                .has_jetton_master = false,
+                .has_jetton_wallet = false,
+                .has_nft = false,
+                .has_nft_item = false,
+                .has_nft_collection = false,
+                .has_abi = false,
+                .abi_uri = null,
+                .abi_json = null,
+                .details_json = null,
+                .success = false,
+                .error_message = error_message,
+            };
+        }
+
         /// Decode a function body using a provided ABI document.
         pub fn decodeFunctionBodyAbi(
             self: *@This(),
@@ -589,6 +985,51 @@ fn AgentToolsImpl(comptime ClientType: type) type {
 
             return self.buildTransactionDetailResultAlloc(&tx) catch |err| {
                 return transactionDetailError(lt, @errorName(err));
+            };
+        }
+
+        /// Inspect a contract, summarize supported interfaces, discovered ABI, and best-effort standard metadata.
+        pub fn inspectContract(self: *@This(), contract_address: []const u8) !tools_types.ContractInspectResult {
+            const supported_opt = abi_adapter.querySupportedInterfaces(self.client, contract_address) catch |err| {
+                return contractInspectError(contract_address, @errorName(err));
+            };
+            const supported = supported_opt orelse abi_adapter.SupportedInterfaces{
+                .has_wallet = false,
+                .has_jetton = false,
+                .has_jetton_master = false,
+                .has_jetton_wallet = false,
+                .has_nft = false,
+                .has_nft_item = false,
+                .has_nft_collection = false,
+                .has_abi = false,
+            };
+
+            var abi_summary = self.buildAbiSummaryJsonAlloc(contract_address) catch |err| {
+                return contractInspectError(contract_address, @errorName(err));
+            };
+            errdefer abi_summary.deinit(self.allocator);
+
+            const details_json = self.buildContractDetailsJsonAlloc(contract_address, supported) catch |err| {
+                abi_summary.deinit(self.allocator);
+                return contractInspectError(contract_address, @errorName(err));
+            };
+            errdefer if (details_json) |value| self.allocator.free(value);
+
+            return .{
+                .address = contract_address,
+                .has_wallet = supported.has_wallet,
+                .has_jetton = supported.has_jetton,
+                .has_jetton_master = supported.has_jetton_master,
+                .has_jetton_wallet = supported.has_jetton_wallet,
+                .has_nft = supported.has_nft,
+                .has_nft_item = supported.has_nft_item,
+                .has_nft_collection = supported.has_nft_collection,
+                .has_abi = supported.has_abi,
+                .abi_uri = abi_summary.uri,
+                .abi_json = abi_summary.json,
+                .details_json = details_json,
+                .success = true,
+                .error_message = null,
             };
         }
 
@@ -1867,6 +2308,7 @@ pub const VerifyResult = tools_types.VerifyResult;
 pub const TxResult = tools_types.TxResult;
 pub const TransactionListResult = tools_types.TransactionListResult;
 pub const TransactionDetailResult = tools_types.TransactionDetailResult;
+pub const ContractInspectResult = tools_types.ContractInspectResult;
 pub const JettonBalanceResult = tools_types.JettonBalanceResult;
 pub const JettonInfoResult = tools_types.JettonInfoResult;
 pub const JettonWalletAddressResult = tools_types.JettonWalletAddressResult;
@@ -2477,11 +2919,107 @@ test "agent tools lookupTransaction decodes message bodies automatically" {
     );
 }
 
+test "agent tools inspectContract summarizes wallet and abi metadata" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const abi_json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "transfer",
+        \\      "opcode": "0x11223344",
+        \\      "inputs": [
+        \\        {"name": "to", "type": "address"},
+        \\        {"name": "amount", "type": "coins"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "inspect_abi.json", .data = abi_json });
+    const abi_path = try tmp.dir.realpathAlloc(allocator, "inspect_abi.json");
+    defer allocator.free(abi_path);
+    const abi_uri = try std.fmt.allocPrint(allocator, "file://{s}", .{abi_path});
+    defer allocator.free(abi_uri);
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+        abi_uri: []const u8,
+
+        pub fn runGetMethod(self: *@This(), addr: []const u8, method: []const u8, stack: []const []const u8) anyerror!core_types.RunGetMethodResponse {
+            _ = addr;
+            _ = stack;
+
+            const entries = try self.allocator.alloc(core_types.StackEntry, 1);
+            errdefer self.allocator.free(entries);
+
+            if (std.mem.eql(u8, method, "seqno")) {
+                entries[0] = .{ .number = 7 };
+            } else if (std.mem.eql(u8, method, "get_subwallet_id")) {
+                entries[0] = .{ .number = 0xAABBCCDD };
+            } else if (std.mem.eql(u8, method, "get_public_key")) {
+                entries[0] = .{ .big_number = try self.allocator.dupe(u8, "0x00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff") };
+            } else if (std.mem.eql(u8, method, "get_abi_uri")) {
+                var builder = core_types.Builder.init();
+                try builder.storeUint(0x01, 8);
+                try builder.storeBits(self.abi_uri, @intCast(self.abi_uri.len * 8));
+                entries[0] = .{ .cell = try builder.toCell(self.allocator) };
+            } else {
+                return error.InvalidResponse;
+            }
+
+            return .{
+                .exit_code = 0,
+                .stack = entries,
+                .logs = "",
+            };
+        }
+
+        pub fn freeRunGetMethodResponse(self: *@This(), response: *core_types.RunGetMethodResponse) void {
+            for (response.stack) |*entry| {
+                switch (entry.*) {
+                    .big_number => |value| if (value.len > 0) self.allocator.free(value),
+                    .bytes => |value| if (value.len > 0) self.allocator.free(value),
+                    .cell => |value| value.deinit(self.allocator),
+                    else => {},
+                }
+            }
+            if (response.stack.len > 0) self.allocator.free(response.stack);
+        }
+    };
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    var client = FakeClient{ .allocator = allocator, .abi_uri = abi_uri };
+    var tools = FakeTools.init(allocator, &client, .{ .rpc_url = "https://example.invalid" });
+
+    var result = try tools.inspectContract("0:2222222222222222222222222222222222222222222222222222222222222222");
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.success);
+    try std.testing.expect(result.has_wallet);
+    try std.testing.expect(result.has_abi);
+    try std.testing.expect(!result.has_jetton);
+    try std.testing.expect(result.abi_uri != null);
+    try std.testing.expectEqualStrings(abi_uri, result.abi_uri.?);
+    try std.testing.expect(result.abi_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.abi_json.?, "\"document_version\":\"1.0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.abi_json.?, "\"selector\":\"transfer(address,coins)\"") != null);
+    try std.testing.expect(result.details_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"seqno\":7") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"wallet_id\":2864434397") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"public_key\":\"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\"") != null);
+}
+
 test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.decodeFunctionBodyAbi;
     _ = AgentTools.decodeFunctionBodyAuto;
     _ = AgentTools.decodeEventBodyAbi;
     _ = AgentTools.decodeEventBodyAuto;
+    _ = AgentTools.inspectContract;
     _ = AgentTools.getTransactions;
     _ = AgentTools.lookupTransaction;
     _ = AgentTools.runGetMethod;
@@ -2505,6 +3043,7 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = ProviderAgentTools.runGetMethod;
     _ = ProviderAgentTools.runGetMethodAbi;
     _ = ProviderAgentTools.runGetMethodAuto;
+    _ = ProviderAgentTools.inspectContract;
     _ = ProviderAgentTools.getTransactions;
     _ = ProviderAgentTools.lookupTransaction;
     _ = ProviderAgentTools.decodeFunctionBodyAbi;
@@ -2531,6 +3070,7 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = RunMethodResult;
     _ = TransactionListResult;
     _ = TransactionDetailResult;
+    _ = ContractInspectResult;
     _ = WalletInitResult;
     _ = JettonInfoResult;
     _ = JettonWalletAddressResult;

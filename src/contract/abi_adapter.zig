@@ -653,7 +653,8 @@ fn probeMethodSupport(client: anytype, addr: []const u8, method_name: []const u8
 }
 
 fn probeAbiSupport(client: anytype, addr: []const u8) !bool {
-    if (try queryAbiIpfs(client, addr)) |*abi| {
+    if (try queryAbiIpfs(client, addr)) |abi_info| {
+        var abi = abi_info;
         abi.deinit(client.allocator);
         return true;
     }
