@@ -173,7 +173,7 @@ pub fn main() !void {
         const abi_cmd = args[2];
         if (std.mem.eql(u8, abi_cmd, "describe")) {
             if (args.len < 4) {
-                std.debug.print("Usage: ton-zig-agent-kit abi describe <abi_json|@file|file://|http(s)://|ipfs://|auto:<address>> [function_name]\n", .{});
+                std.debug.print("Usage: ton-zig-agent-kit abi describe <abi_json|@file|file://|http(s)://|ipfs://|auto:<address>> [function_name_or_signature]\n", .{});
                 return;
             }
 
@@ -193,19 +193,19 @@ pub fn main() !void {
             std.debug.print("  Events: {d}\n", .{loaded.abi.abi.events.len});
 
             if (args.len >= 5) {
-                const function_name = args[4];
-                const function = contract_mod.abi_adapter.findFunction(&loaded.abi.abi, function_name) orelse {
-                    std.debug.print("Function not found: {s}\n", .{function_name});
+                const function_selector = args[4];
+                const function = contract_mod.abi_adapter.findFunction(&loaded.abi.abi, function_selector) orelse {
+                    std.debug.print("Function not found: {s}\n", .{function_selector});
                     return;
                 };
 
-                printAbiFunctionDescribe(allocator, function.*, loaded.auto_address);
+                printAbiFunctionDescribe(allocator, &loaded.abi.abi, function.*, loaded.auto_address);
             } else {
                 printInspectAbiDocument(&loaded.abi.abi);
                 if (loaded.auto_address) |value| {
-                    std.debug.print("Next: ton-zig-agent-kit abi describe auto:{s} <function_name>\n", .{value});
+                    std.debug.print("Next: ton-zig-agent-kit abi describe auto:{s} <function_name_or_signature>\n", .{value});
                 } else {
-                    std.debug.print("Next: ton-zig-agent-kit abi describe <abi_source> <function_name>\n", .{});
+                    std.debug.print("Next: ton-zig-agent-kit abi describe <abi_source> <function_name_or_signature>\n", .{});
                 }
             }
             return;
@@ -393,24 +393,23 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "runGetMethodAbi") or std.mem.eql(u8, command, "get-method-abi")) {
         if (args.len < 5) {
-            std.debug.print("Usage: ton-zig-agent-kit runGetMethodAbi <address> <abi_json|@file|file://|http(s)://|ipfs://> <function_name> [values...]\n", .{});
+            std.debug.print("Usage: ton-zig-agent-kit runGetMethodAbi <address> <abi_json|@file|file://|http(s)://|ipfs://> <function_name_or_signature> [values...]\n", .{});
             return;
         }
 
         const addr = args[2];
-        const function_name = args[4];
+        const function_selector = args[4];
         var abi = try contract_mod.abi_adapter.loadAbiInfoSourceAlloc(allocator, args[3]);
         defer abi.deinit(allocator);
 
-        const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_name) orelse return error.FunctionNotFound;
+        const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_selector) orelse return error.FunctionNotFound;
 
         var parsed_values = try parseCliAbiValuesForParams(allocator, function.inputs, args[5..]);
         defer parsed_values.deinit(allocator);
 
-        var stack_args = try contract_mod.abi_adapter.buildStackArgsFromAbiAlloc(
+        var stack_args = try contract_mod.abi_adapter.buildStackArgsFromFunctionAlloc(
             allocator,
-            &abi.abi,
-            function_name,
+            function.*,
             parsed_values.values,
         );
         defer stack_args.deinit(allocator);
@@ -419,18 +418,17 @@ pub fn main() !void {
         const stack_json = try contract_mod.buildStackArgsJsonAlloc(allocator, stack_args.args);
         defer allocator.free(stack_json);
 
-        var result = try provider.runGetMethodJson(addr, function_name, stack_json);
+        var result = try provider.runGetMethodJson(addr, function.name, stack_json);
         defer provider.freeRunGetMethodResponse(&result);
 
         std.debug.print("Address: {s}\n", .{addr});
         std.debug.print("ABI version: {s}\n", .{abi.abi.version});
-        std.debug.print("Function: {s}\n", .{function_name});
+        std.debug.print("Function: {s}\n", .{function_selector});
         printRunGetMethodResult(result);
 
-        const decoded = try contract_mod.abi_adapter.decodeFunctionOutputsFromAbiJsonAlloc(
+        const decoded = try contract_mod.abi_adapter.decodeFunctionOutputsJsonAlloc(
             allocator,
-            &abi.abi,
-            function_name,
+            function.*,
             result.stack,
         );
         defer allocator.free(decoded);
@@ -440,12 +438,12 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "runGetMethodAuto") or std.mem.eql(u8, command, "get-method-auto")) {
         if (args.len < 4) {
-            std.debug.print("Usage: ton-zig-agent-kit runGetMethodAuto <address> <function_name> [values...]\n", .{});
+            std.debug.print("Usage: ton-zig-agent-kit runGetMethodAuto <address> <function_name_or_signature> [values...]\n", .{});
             return;
         }
 
         const addr = args[2];
-        const function_name = args[3];
+        const function_selector = args[3];
 
         var provider = try initDefaultProvider(allocator);
 
@@ -455,15 +453,14 @@ pub fn main() !void {
         };
         defer abi.deinit(allocator);
 
-        const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_name) orelse return error.FunctionNotFound;
+        const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_selector) orelse return error.FunctionNotFound;
 
         var parsed_values = try parseCliAbiValuesForParams(allocator, function.inputs, args[4..]);
         defer parsed_values.deinit(allocator);
 
-        var stack_args = try contract_mod.abi_adapter.buildStackArgsFromAbiAlloc(
+        var stack_args = try contract_mod.abi_adapter.buildStackArgsFromFunctionAlloc(
             allocator,
-            &abi.abi,
-            function_name,
+            function.*,
             parsed_values.values,
         );
         defer stack_args.deinit(allocator);
@@ -471,19 +468,18 @@ pub fn main() !void {
         const stack_json = try contract_mod.buildStackArgsJsonAlloc(allocator, stack_args.args);
         defer allocator.free(stack_json);
 
-        var result = try provider.runGetMethodJson(addr, function_name, stack_json);
+        var result = try provider.runGetMethodJson(addr, function.name, stack_json);
         defer provider.freeRunGetMethodResponse(&result);
 
         std.debug.print("Address: {s}\n", .{addr});
         std.debug.print("ABI source: {s}\n", .{abi.abi.uri orelse "(embedded)"});
         std.debug.print("ABI version: {s}\n", .{abi.abi.version});
-        std.debug.print("Function: {s}\n", .{function_name});
+        std.debug.print("Function: {s}\n", .{function_selector});
         printRunGetMethodResult(result);
 
-        const decoded = try contract_mod.abi_adapter.decodeFunctionOutputsFromAbiJsonAlloc(
+        const decoded = try contract_mod.abi_adapter.decodeFunctionOutputsJsonAlloc(
             allocator,
-            &abi.abi,
-            function_name,
+            function.*,
             result.stack,
         );
         defer allocator.free(decoded);
@@ -710,24 +706,23 @@ pub fn main() !void {
 
         if (std.mem.eql(u8, cell_cmd, "build-abi")) {
             if (args.len < 5) {
-                std.debug.print("Usage: ton-zig-agent-kit cell build-abi <abi_json|@file|file://|http(s)://|ipfs://> <function_name> <values...>\n", .{});
+                std.debug.print("Usage: ton-zig-agent-kit cell build-abi <abi_json|@file|file://|http(s)://|ipfs://> <function_name_or_signature> <values...>\n", .{});
                 return;
             }
 
-            const function_name = args[4];
+            const function_selector = args[4];
 
             var abi = try contract_mod.abi_adapter.loadAbiInfoSourceAlloc(allocator, args[3]);
             defer abi.deinit(allocator);
 
-            const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_name) orelse return error.FunctionNotFound;
+            const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_selector) orelse return error.FunctionNotFound;
 
             var parsed_values = try parseCliAbiValuesForParams(allocator, function.inputs, args[5..]);
             defer parsed_values.deinit(allocator);
 
-            const built = try contract_mod.abi_adapter.buildFunctionBodyFromAbiAlloc(
+            const built = try contract_mod.abi_adapter.buildFunctionBodyBocAlloc(
                 allocator,
-                &abi.abi,
-                function_name,
+                function.*,
                 parsed_values.values,
             );
             defer allocator.free(built);
@@ -739,7 +734,7 @@ pub fn main() !void {
 
             std.debug.print("Built ABI function body BoC:\n", .{});
             std.debug.print("  ABI version: {s}\n", .{abi.abi.version});
-            std.debug.print("  Function: {s}\n", .{function_name});
+            std.debug.print("  Function: {s}\n", .{function_selector});
             std.debug.print("  Base64: {s}\n", .{encoded});
             std.debug.print("  Hex: ", .{});
             for (built) |byte| {
@@ -1058,26 +1053,25 @@ pub fn main() !void {
 
         if (std.mem.eql(u8, wallet_cmd, "send-abi")) {
             if (args.len < 9) {
-                std.debug.print("Usage: ton-zig-agent-kit wallet send-abi <wallet_addr> <dest> <amount_nanoton> <abi_json|@file|file://|http(s)://|ipfs://> <function_name> <values...>\n", .{});
+                std.debug.print("Usage: ton-zig-agent-kit wallet send-abi <wallet_addr> <dest> <amount_nanoton> <abi_json|@file|file://|http(s)://|ipfs://> <function_name_or_signature> <values...>\n", .{});
                 return;
             }
             const wallet_addr = args[3];
             const dest = args[4];
             const amount = try std.fmt.parseInt(u64, args[5], 10);
-            const function_name = args[7];
+            const function_selector = args[7];
 
             var abi = try contract_mod.abi_adapter.loadAbiInfoSourceAlloc(allocator, args[6]);
             defer abi.deinit(allocator);
 
-            const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_name) orelse return error.FunctionNotFound;
+            const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_selector) orelse return error.FunctionNotFound;
 
             var parsed_values = try parseCliAbiValuesForParams(allocator, function.inputs, args[8..]);
             defer parsed_values.deinit(allocator);
 
-            const body = try contract_mod.abi_adapter.buildFunctionBodyFromAbiAlloc(
+            const body = try contract_mod.abi_adapter.buildFunctionBodyBocAlloc(
                 allocator,
-                &abi.abi,
-                function_name,
+                function.*,
                 parsed_values.values,
             );
             defer allocator.free(body);
@@ -1095,7 +1089,7 @@ pub fn main() !void {
 
             std.debug.print("ABI contract message submitted:\n", .{});
             std.debug.print("  ABI version: {s}\n", .{abi.abi.version});
-            std.debug.print("  Function: {s}\n", .{function_name});
+            std.debug.print("  Function: {s}\n", .{function_selector});
             std.debug.print("  Hash: {s}\n", .{result.hash});
             std.debug.print("  LT: {d}\n", .{result.lt});
             return;
@@ -1103,13 +1097,13 @@ pub fn main() !void {
 
         if (std.mem.eql(u8, wallet_cmd, "send-auto-abi")) {
             if (args.len < 8) {
-                std.debug.print("Usage: ton-zig-agent-kit wallet send-auto-abi <wallet_addr> <dest> <amount_nanoton> <function_name> <values...>\n", .{});
+                std.debug.print("Usage: ton-zig-agent-kit wallet send-auto-abi <wallet_addr> <dest> <amount_nanoton> <function_name_or_signature> <values...>\n", .{});
                 return;
             }
             const wallet_addr = args[3];
             const dest = args[4];
             const amount = try std.fmt.parseInt(u64, args[5], 10);
-            const function_name = args[6];
+            const function_selector = args[6];
 
             var provider = try initDefaultProvider(allocator);
 
@@ -1119,15 +1113,14 @@ pub fn main() !void {
             };
             defer abi.deinit(allocator);
 
-            const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_name) orelse return error.FunctionNotFound;
+            const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_selector) orelse return error.FunctionNotFound;
 
             var parsed_values = try parseCliAbiValuesForParams(allocator, function.inputs, args[7..]);
             defer parsed_values.deinit(allocator);
 
-            const body = try contract_mod.abi_adapter.buildFunctionBodyFromAbiAlloc(
+            const body = try contract_mod.abi_adapter.buildFunctionBodyBocAlloc(
                 allocator,
-                &abi.abi,
-                function_name,
+                function.*,
                 parsed_values.values,
             );
             defer allocator.free(body);
@@ -1144,7 +1137,7 @@ pub fn main() !void {
             std.debug.print("Auto ABI contract message submitted:\n", .{});
             std.debug.print("  ABI source: {s}\n", .{abi.abi.uri orelse "(embedded)"});
             std.debug.print("  ABI version: {s}\n", .{abi.abi.version});
-            std.debug.print("  Function: {s}\n", .{function_name});
+            std.debug.print("  Function: {s}\n", .{function_selector});
             std.debug.print("  Hash: {s}\n", .{result.hash});
             std.debug.print("  LT: {d}\n", .{result.lt});
             return;
@@ -2295,11 +2288,11 @@ fn printInspectCommandHints(
     std.debug.print("Command hints:\n", .{});
     std.debug.print("  Raw read: ton-zig-agent-kit runGetMethod {s} <method> [stack_json]\n", .{addr});
     std.debug.print("  Typed read: ton-zig-agent-kit runGetMethodTyped {s} <method> [typed_args...]\n", .{addr});
-    std.debug.print("  ABI describe: ton-zig-agent-kit abi describe auto:{s} [function_name]\n", .{addr});
+    std.debug.print("  ABI describe: ton-zig-agent-kit abi describe auto:{s} [function_name_or_signature]\n", .{addr});
 
     if (abi) |value| {
-        std.debug.print("  ABI read: ton-zig-agent-kit runGetMethodAuto {s} <function_name> [values...]\n", .{addr});
-        std.debug.print("  ABI write: ton-zig-agent-kit wallet send-auto-abi <wallet_addr> {s} <amount_nanoton> <function_name> [values...]\n", .{addr});
+        std.debug.print("  ABI read: ton-zig-agent-kit runGetMethodAuto {s} <function_name_or_signature> [values...]\n", .{addr});
+        std.debug.print("  ABI write: ton-zig-agent-kit wallet send-auto-abi <wallet_addr> {s} <amount_nanoton> <function_name_or_signature> [values...]\n", .{addr});
 
         if (value.functions.len > 0) {
             const shown = @min(value.functions.len, inspect_abi_template_limit);
@@ -2314,6 +2307,12 @@ fn printInspectCommandHints(
 
             std.debug.print("  ABI templates:\n", .{});
             for (value.functions[0..shown]) |function| {
+                const function_ref = buildAbiFunctionCommandRefAlloc(allocator, value, function) catch |err| {
+                    std.debug.print("    {s}: selector build failed ({s})\n", .{ function.name, @errorName(err) });
+                    continue;
+                };
+                defer allocator.free(function_ref);
+
                 const template_args = buildInspectCliArgsTemplateAlloc(allocator, function.inputs) catch |err| {
                     std.debug.print("    {s}: template build failed ({s})\n", .{ function.name, @errorName(err) });
                     continue;
@@ -2328,13 +2327,13 @@ fn printInspectCommandHints(
                     std.debug.print("      outputs: template build failed ({s})\n", .{@errorName(err)});
                     std.debug.print("      read: ton-zig-agent-kit runGetMethodAuto {s} {s}{s}{s}\n", .{
                         addr,
-                        function.name,
+                        function_ref,
                         if (template_args.len == 0) "" else " ",
                         template_args,
                     });
                     std.debug.print("      write: ton-zig-agent-kit wallet send-auto-abi <wallet_addr> {s} <amount_nanoton> {s}{s}{s}\n", .{
                         addr,
-                        function.name,
+                        function_ref,
                         if (template_args.len == 0) "" else " ",
                         template_args,
                     });
@@ -2347,13 +2346,13 @@ fn printInspectCommandHints(
                 });
                 std.debug.print("      read: ton-zig-agent-kit runGetMethodAuto {s} {s}{s}{s}\n", .{
                     addr,
-                    function.name,
+                    function_ref,
                     if (template_args.len == 0) "" else " ",
                     template_args,
                 });
                 std.debug.print("      write: ton-zig-agent-kit wallet send-auto-abi <wallet_addr> {s} <amount_nanoton> {s}{s}{s}\n", .{
                     addr,
-                    function.name,
+                    function_ref,
                     if (template_args.len == 0) "" else " ",
                     template_args,
                 });
@@ -2396,11 +2395,19 @@ fn displayAbiSource(source: []const u8) []const u8 {
 
 fn printAbiFunctionDescribe(
     allocator: std.mem.Allocator,
+    abi: *const contract_mod.abi_adapter.AbiInfo,
     function: contract_mod.abi_adapter.FunctionDef,
     auto_address: ?[]const u8,
 ) void {
     std.debug.print("Function detail:\n", .{});
     printAbiFunctionSignature(function);
+
+    const function_ref = buildAbiFunctionCommandRefAlloc(allocator, abi, function) catch |err| {
+        std.debug.print("  Selector: build failed ({s})\n", .{@errorName(err)});
+        return;
+    };
+    defer allocator.free(function_ref);
+    std.debug.print("  Selector: {s}\n", .{function_ref});
 
     const input_template = buildInspectCliArgsTemplateAlloc(allocator, function.inputs) catch |err| {
         std.debug.print("  Input args: template build failed ({s})\n", .{@errorName(err)});
@@ -2433,13 +2440,13 @@ fn printAbiFunctionDescribe(
     if (auto_address) |addr| {
         std.debug.print("  Auto read: ton-zig-agent-kit runGetMethodAuto {s} {s}{s}{s}\n", .{
             addr,
-            function.name,
+            function_ref,
             if (input_template.len == 0) "" else " ",
             input_template,
         });
         std.debug.print("  Auto write: ton-zig-agent-kit wallet send-auto-abi <wallet_addr> {s} <amount_nanoton> {s}{s}{s}\n", .{
             addr,
-            function.name,
+            function_ref,
             if (input_template.len == 0) "" else " ",
             input_template,
         });
@@ -2447,20 +2454,41 @@ fn printAbiFunctionDescribe(
     }
 
     std.debug.print("  Build body: ton-zig-agent-kit cell build-abi <abi_source> {s}{s}{s}\n", .{
-        function.name,
+        function_ref,
         if (input_template.len == 0) "" else " ",
         input_template,
     });
     std.debug.print("  ABI read: ton-zig-agent-kit runGetMethodAbi <address> <abi_source> {s}{s}{s}\n", .{
-        function.name,
+        function_ref,
         if (input_template.len == 0) "" else " ",
         input_template,
     });
     std.debug.print("  ABI write: ton-zig-agent-kit wallet send-abi <wallet_addr> <dest> <amount_nanoton> <abi_source> {s}{s}{s}\n", .{
-        function.name,
+        function_ref,
         if (input_template.len == 0) "" else " ",
         input_template,
     });
+}
+
+fn buildAbiFunctionCommandRefAlloc(
+    allocator: std.mem.Allocator,
+    abi: *const contract_mod.abi_adapter.AbiInfo,
+    function: contract_mod.abi_adapter.FunctionDef,
+) ![]u8 {
+    if (abiFunctionIsOverloaded(abi, function.name)) {
+        return contract_mod.abi_adapter.buildFunctionSelectorAlloc(allocator, function);
+    }
+    return allocator.dupe(u8, function.name);
+}
+
+fn abiFunctionIsOverloaded(abi: *const contract_mod.abi_adapter.AbiInfo, function_name: []const u8) bool {
+    var matches: usize = 0;
+    for (abi.functions) |function| {
+        if (!std.mem.eql(u8, function.name, function_name)) continue;
+        matches += 1;
+        if (matches > 1) return true;
+    }
+    return false;
 }
 
 fn buildInspectCliArgsTemplateAlloc(
@@ -2898,8 +2926,8 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit runGetMethod <addr> <method> [stack_json]  Call any get method\n", .{});
     std.debug.print("  ton-zig-agent-kit inspectContract <addr>        Detect standard interfaces and ABI URI\n", .{});
     std.debug.print("  ton-zig-agent-kit runGetMethodTyped <addr> <method> [typed_args...]  Call get method with typed args\n", .{});
-    std.debug.print("  ton-zig-agent-kit runGetMethodAbi <addr> <abi_json|@file|file://|http(s)://|ipfs://> <function> [values...]  Call get method with ABI decode\n", .{});
-    std.debug.print("  ton-zig-agent-kit runGetMethodAuto <addr> <function> [values...]  Discover ABI and call get method\n", .{});
+    std.debug.print("  ton-zig-agent-kit runGetMethodAbi <addr> <abi_json|@file|file://|http(s)://|ipfs://> <function_or_signature> [values...]  Call get method with ABI decode\n", .{});
+    std.debug.print("  ton-zig-agent-kit runGetMethodAuto <addr> <function_or_signature> [values...]  Discover ABI and call get method\n", .{});
     std.debug.print("    ABI values: positional specs or name=spec; omitted trailing optional args default to null\n", .{});
     std.debug.print("  ton-zig-agent-kit jetton info <master>          Read Jetton master metadata\n", .{});
     std.debug.print("  ton-zig-agent-kit jetton wallet-address <master> <owner>  Resolve Jetton wallet address\n", .{});
@@ -2917,7 +2945,7 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit cell hash <hex>              Get cell hash\n", .{});
     std.debug.print("  ton-zig-agent-kit cell build-typed <ops...>    Build body BoC from typed ops\n", .{});
     std.debug.print("  ton-zig-agent-kit cell build-function <function_json> <values...>  Build body from function schema\n", .{});
-    std.debug.print("  ton-zig-agent-kit cell build-abi <abi_json|@file|file://|http(s)://|ipfs://> <function> <values...>  Build body from ABI doc\n", .{});
+    std.debug.print("  ton-zig-agent-kit cell build-abi <abi_json|@file|file://|http(s)://|ipfs://> <function_or_signature> <values...>  Build body from ABI doc\n", .{});
     std.debug.print("  ton-zig-agent-kit cell build-state-init <code_b64|none> [data_b64|none]  Build StateInit BoC\n", .{});
     std.debug.print("  ton-zig-agent-kit cell state-init-address <workchain> <state_init_b64>  Compute contract address from StateInit\n", .{});
     std.debug.print("    body ops: u<bits>:<v>, i<bits>:<v>, coins:<v>, addr:<addr>, bytes:<utf8>, hex:<hex>, ref:<b64 boc>, refhex:<hex boc>\n", .{});
@@ -2931,8 +2959,8 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit wallet send-body-hex <src> <dst> <amount> <body_hex>  Send raw contract body hex\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-ops <src> <dst> <amount> <ops...>  Build and send typed contract body\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-function <src> <dst> <amount> <function_json> <values...>  Build and send function body\n", .{});
-    std.debug.print("  ton-zig-agent-kit wallet send-abi <src> <dst> <amount> <abi_json|@file|file://|http(s)://|ipfs://> <function> <values...>  Build and send ABI function body\n", .{});
-    std.debug.print("  ton-zig-agent-kit wallet send-auto-abi <src> <dst> <amount> <function> <values...>  Discover ABI and send function body\n", .{});
+    std.debug.print("  ton-zig-agent-kit wallet send-abi <src> <dst> <amount> <abi_json|@file|file://|http(s)://|ipfs://> <function_or_signature> <values...>  Build and send ABI function body\n", .{});
+    std.debug.print("  ton-zig-agent-kit wallet send-auto-abi <src> <dst> <amount> <function_or_signature> <values...>  Discover ABI and send function body\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-deploy <src> <dst> <amount> <state_init_b64> [body_b64]  Deploy contract with StateInit\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-deploy-auto <src> <workchain> <amount> <state_init_b64> [body_b64]  Derive destination from StateInit and deploy\n", .{});
     std.debug.print("    wallet key env: {s}, {s}, {s}\n", .{

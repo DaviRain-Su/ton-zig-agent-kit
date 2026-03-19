@@ -243,10 +243,31 @@ pub fn parseFunctionDefJsonAlloc(allocator: std.mem.Allocator, json_text: []cons
 }
 
 pub fn findFunction(abi: *const AbiInfo, function_name: []const u8) ?*const FunctionDef {
+    if (selectorUsesFullSignature(function_name)) {
+        for (abi.functions) |*function| {
+            if (functionMatchesSelector(function, function_name)) return function;
+        }
+        return null;
+    }
+
     for (abi.functions) |*function| {
         if (std.mem.eql(u8, function.name, function_name)) return function;
     }
     return null;
+}
+
+pub fn buildFunctionSelectorAlloc(allocator: std.mem.Allocator, function: FunctionDef) ![]u8 {
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    try writer.writer.print("{s}(", .{function.name});
+    for (function.inputs, 0..) |param, idx| {
+        if (idx != 0) try writer.writer.writeByte(',');
+        try writer.writer.writeAll(std.mem.trim(u8, param.type_name, " \t\r\n"));
+    }
+    try writer.writer.writeByte(')');
+
+    return try writer.toOwnedSlice();
 }
 
 pub fn buildFunctionBodyBocAlloc(
@@ -528,6 +549,63 @@ fn looksLikeOffchainUri(value: []const u8) bool {
 
 fn getAbiFunctionArray(object: std.json.ObjectMap) ?std.json.Value {
     return object.get("functions") orelse object.get("messages") orelse object.get("methods");
+}
+
+fn selectorUsesFullSignature(function_name: []const u8) bool {
+    const trimmed = std.mem.trim(u8, function_name, " \t\r\n");
+    return std.mem.indexOfScalar(u8, trimmed, '(') != null and trimmed.len > 0 and trimmed[trimmed.len - 1] == ')';
+}
+
+fn functionMatchesSelector(function: *const FunctionDef, selector: []const u8) bool {
+    const trimmed = std.mem.trim(u8, selector, " \t\r\n");
+    const open_idx = std.mem.indexOfScalar(u8, trimmed, '(') orelse return false;
+    if (trimmed.len == 0 or trimmed[trimmed.len - 1] != ')') return false;
+
+    const name = std.mem.trim(u8, trimmed[0..open_idx], " \t\r\n");
+    if (!std.mem.eql(u8, function.name, name)) return false;
+
+    const type_list = trimmed[open_idx + 1 .. trimmed.len - 1];
+    return functionInputTypesMatch(function.inputs, type_list);
+}
+
+fn functionInputTypesMatch(params: []const ParamDef, type_list: []const u8) bool {
+    var idx: usize = 0;
+    var param_idx: usize = 0;
+
+    while (idx < type_list.len) {
+        while (idx < type_list.len and std.ascii.isWhitespace(type_list[idx])) : (idx += 1) {}
+        if (idx == type_list.len) break;
+
+        if (param_idx >= params.len) return false;
+
+        const start = idx;
+        var generic_depth: usize = 0;
+        while (idx < type_list.len) : (idx += 1) {
+            const char = type_list[idx];
+            switch (char) {
+                '<' => generic_depth += 1,
+                '>' => {
+                    if (generic_depth == 0) return false;
+                    generic_depth -= 1;
+                },
+                ',' => if (generic_depth == 0) break,
+                else => {},
+            }
+        }
+
+        const selector_type = std.mem.trim(u8, type_list[start..idx], " \t\r\n");
+        const param_type = std.mem.trim(u8, params[param_idx].type_name, " \t\r\n");
+        if (!std.mem.eql(u8, param_type, selector_type)) return false;
+
+        param_idx += 1;
+
+        if (idx < type_list.len) {
+            if (type_list[idx] != ',') return false;
+            idx += 1;
+        }
+    }
+
+    return param_idx == params.len;
 }
 
 fn parseFunctionDefsAlloc(allocator: std.mem.Allocator, value: std.json.Value) ![]FunctionDef {
@@ -2466,6 +2544,58 @@ test "abi adapter parses abi document json and finds function" {
     try std.testing.expectEqualStrings("Transfer", parsed.abi.events[0].name);
     try std.testing.expectEqual(@as(u32, 0x0f8a7ea5), findFunction(&parsed.abi, "transfer").?.opcode.?);
     try std.testing.expect(findFunction(&parsed.abi, "missing") == null);
+}
+
+test "abi adapter resolves overloaded functions by full selector" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "transfer",
+        \\      "opcode": 1,
+        \\      "inputs": [
+        \\        {"name": "to", "type": "address"},
+        \\        {"name": "amount", "type": "coins"}
+        \\      ]
+        \\    },
+        \\    {
+        \\      "name": "transfer",
+        \\      "opcode": 2,
+        \\      "inputs": [
+        \\        {"name": "to", "type": "address"},
+        \\        {"name": "amount", "type": "coins"},
+        \\        {"name": "memo", "type": "bytes"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var parsed = try parseAbiInfoJsonAlloc(allocator, json);
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), findFunction(&parsed.abi, "transfer").?.opcode.?);
+    try std.testing.expectEqual(@as(u32, 1), findFunction(&parsed.abi, "transfer(address,coins)").?.opcode.?);
+    try std.testing.expectEqual(@as(u32, 2), findFunction(&parsed.abi, "transfer(address, coins, bytes)").?.opcode.?);
+
+    const selector = try buildFunctionSelectorAlloc(allocator, findFunction(&parsed.abi, "transfer(address, coins, bytes)").?.*);
+    defer allocator.free(selector);
+    try std.testing.expectEqualStrings("transfer(address,coins,bytes)", selector);
+
+    const built = try buildFunctionBodyFromAbiAlloc(allocator, &parsed.abi, "transfer(address,coins,bytes)", &.{
+        .{ .text = "EQDKbjIcfM6ezt8KjKJJLshZJJSqX7XOA4ff-W72r5gqPrHF" },
+        .{ .numeric_text = "1000" },
+        .{ .bytes = "memo" },
+    });
+    defer allocator.free(built);
+
+    const parsed_cell = try boc.deserializeBoc(allocator, built);
+    defer parsed_cell.deinit(allocator);
+
+    var slice = parsed_cell.toSlice();
+    try std.testing.expectEqual(@as(u64, 2), try slice.loadUint(32));
 }
 
 test "abi adapter builds function body boc from schema" {
