@@ -179,6 +179,61 @@ pub const ContractInspectResult = struct {
     }
 };
 
+pub const AbiFunctionTemplateResult = struct {
+    name: []const u8,
+    selector: []const u8,
+    opcode: ?u32,
+    input_template: []const u8,
+    named_input_template: []const u8,
+    decoded_output_template: []const u8,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.name.len > 0) allocator.free(self.name);
+        if (self.selector.len > 0) allocator.free(self.selector);
+        if (self.input_template.len > 0) allocator.free(self.input_template);
+        if (self.named_input_template.len > 0) allocator.free(self.named_input_template);
+        if (self.decoded_output_template.len > 0) allocator.free(self.decoded_output_template);
+        self.* = undefined;
+    }
+};
+
+pub const AbiEventTemplateResult = struct {
+    name: []const u8,
+    selector: []const u8,
+    opcode: ?u32,
+    decoded_fields_template: []const u8,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.name.len > 0) allocator.free(self.name);
+        if (self.selector.len > 0) allocator.free(self.selector);
+        if (self.decoded_fields_template.len > 0) allocator.free(self.decoded_fields_template);
+        self.* = undefined;
+    }
+};
+
+pub const AbiDescribeResult = struct {
+    source: []const u8,
+    address: ?[]const u8,
+    version: []const u8,
+    uri: ?[]const u8,
+    functions: []AbiFunctionTemplateResult,
+    events: []AbiEventTemplateResult,
+    success: bool,
+    error_message: ?[]const u8 = null,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.source.len > 0) allocator.free(self.source);
+        if (self.address) |value| allocator.free(value);
+        if (self.version.len > 0) allocator.free(self.version);
+        if (self.uri) |value| allocator.free(value);
+        for (self.functions) |*item| item.deinit(allocator);
+        if (self.functions.len > 0) allocator.free(self.functions);
+        for (self.events) |*item| item.deinit(allocator);
+        if (self.events.len > 0) allocator.free(self.events);
+        self.* = undefined;
+    }
+};
+
 pub const TxStatus = enum {
     pending,
     confirmed,
@@ -269,6 +324,7 @@ pub const ToolResponse = union(enum) {
     transaction_list: TransactionListResult,
     transaction_detail: TransactionDetailResult,
     contract_inspect: ContractInspectResult,
+    abi_describe: AbiDescribeResult,
     jetton_balance: JettonBalanceResult,
     jetton_info: JettonInfoResult,
     jetton_wallet_address: JettonWalletAddressResult,

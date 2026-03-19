@@ -753,6 +753,115 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             };
         }
 
+        fn buildAbiFunctionTemplateResultsAlloc(
+            self: *@This(),
+            functions: []const abi_adapter.FunctionDef,
+        ) ![]tools_types.AbiFunctionTemplateResult {
+            const items = try self.allocator.alloc(tools_types.AbiFunctionTemplateResult, functions.len);
+            var built: usize = 0;
+            errdefer {
+                for (items[0..built]) |*item| item.deinit(self.allocator);
+                if (items.len > 0) self.allocator.free(items);
+            }
+
+            for (functions, 0..) |function, idx| {
+                items[idx] = .{
+                    .name = try self.allocator.dupe(u8, function.name),
+                    .selector = try abi_adapter.buildFunctionSelectorAlloc(self.allocator, function),
+                    .opcode = function.opcode,
+                    .input_template = try buildAbiCliArgsTemplateAlloc(self.allocator, function.inputs),
+                    .named_input_template = try buildAbiNamedCliArgsTemplateAlloc(self.allocator, function.inputs),
+                    .decoded_output_template = try buildAbiDecodedOutputsTemplateAlloc(self.allocator, function.outputs),
+                };
+                built += 1;
+            }
+
+            return items;
+        }
+
+        fn buildAbiEventTemplateResultsAlloc(
+            self: *@This(),
+            events: []const abi_adapter.EventDef,
+        ) ![]tools_types.AbiEventTemplateResult {
+            const items = try self.allocator.alloc(tools_types.AbiEventTemplateResult, events.len);
+            var built: usize = 0;
+            errdefer {
+                for (items[0..built]) |*item| item.deinit(self.allocator);
+                if (items.len > 0) self.allocator.free(items);
+            }
+
+            for (events, 0..) |event, idx| {
+                items[idx] = .{
+                    .name = try self.allocator.dupe(u8, event.name),
+                    .selector = try abi_adapter.buildEventSelectorAlloc(self.allocator, event),
+                    .opcode = event.opcode,
+                    .decoded_fields_template = try buildAbiDecodedOutputsTemplateAlloc(self.allocator, event.inputs),
+                };
+                built += 1;
+            }
+
+            return items;
+        }
+
+        fn abiDescribeErrorAlloc(
+            self: *@This(),
+            source: []const u8,
+            error_message: []const u8,
+        ) !tools_types.AbiDescribeResult {
+            return .{
+                .source = try self.allocator.dupe(u8, source),
+                .address = null,
+                .version = "",
+                .uri = null,
+                .functions = &.{},
+                .events = &.{},
+                .success = false,
+                .error_message = error_message,
+            };
+        }
+
+        fn buildAbiDescribeResultAlloc(
+            self: *@This(),
+            source: []const u8,
+            address: ?[]const u8,
+            abi: *const abi_adapter.AbiInfo,
+        ) !tools_types.AbiDescribeResult {
+            const owned_source = try self.allocator.dupe(u8, source);
+            errdefer self.allocator.free(owned_source);
+
+            const owned_address = if (address) |value| try self.allocator.dupe(u8, value) else null;
+            errdefer if (owned_address) |value| self.allocator.free(value);
+
+            const version = try self.allocator.dupe(u8, abi.version);
+            errdefer self.allocator.free(version);
+
+            const uri = if (abi.uri) |value| try self.allocator.dupe(u8, value) else null;
+            errdefer if (uri) |value| self.allocator.free(value);
+
+            const functions = try self.buildAbiFunctionTemplateResultsAlloc(abi.functions);
+            errdefer {
+                for (functions) |*item| item.deinit(self.allocator);
+                if (functions.len > 0) self.allocator.free(functions);
+            }
+
+            const events = try self.buildAbiEventTemplateResultsAlloc(abi.events);
+            errdefer {
+                for (events) |*item| item.deinit(self.allocator);
+                if (events.len > 0) self.allocator.free(events);
+            }
+
+            return .{
+                .source = owned_source,
+                .address = owned_address,
+                .version = version,
+                .uri = uri,
+                .functions = functions,
+                .events = events,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
         fn writeWalletInspectJson(self: *@This(), writer: anytype, contract_address: []const u8) !void {
             const info = signing.getWalletInfo(self.client, contract_address) catch |err| {
                 return writeErrorObjectJson(writer, @errorName(err));
@@ -1386,6 +1495,41 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 .decoded_json = decoded_json,
                 .success = true,
                 .error_message = null,
+            };
+        }
+
+        /// Load any ABI source and return structured function/event call templates.
+        pub fn describeAbi(self: *@This(), abi_source: []const u8) !tools_types.AbiDescribeResult {
+            var abi = abi_adapter.loadAbiInfoSourceAlloc(self.allocator, abi_source) catch |err| {
+                return try self.abiDescribeErrorAlloc(abi_source, @errorName(err));
+            };
+            defer abi.deinit(self.allocator);
+
+            return self.buildAbiDescribeResultAlloc(abi_source, null, &abi.abi) catch |err| {
+                return try self.abiDescribeErrorAlloc(abi_source, @errorName(err));
+            };
+        }
+
+        /// Discover a contract ABI on-chain and return structured function/event call templates.
+        pub fn describeAbiAuto(self: *@This(), contract_address: []const u8) !tools_types.AbiDescribeResult {
+            var abi = abi_adapter.queryAbiDocumentAlloc(self.client, contract_address) catch |err| {
+                const source = try std.fmt.allocPrint(self.allocator, "auto:{s}", .{contract_address});
+                defer self.allocator.free(source);
+                return try self.abiDescribeErrorAlloc(source, @errorName(err));
+            } orelse {
+                const source = try std.fmt.allocPrint(self.allocator, "auto:{s}", .{contract_address});
+                defer self.allocator.free(source);
+                return try self.abiDescribeErrorAlloc(source, "AbiNotFound");
+            };
+            defer abi.deinit(self.allocator);
+
+            const source = try std.fmt.allocPrint(self.allocator, "auto:{s}", .{contract_address});
+            defer self.allocator.free(source);
+
+            return self.buildAbiDescribeResultAlloc(source, contract_address, &abi.abi) catch |err| {
+                const fallback_source = try std.fmt.allocPrint(self.allocator, "auto:{s}", .{contract_address});
+                defer self.allocator.free(fallback_source);
+                return try self.abiDescribeErrorAlloc(fallback_source, @errorName(err));
             };
         }
 
@@ -2749,6 +2893,9 @@ pub const TxResult = tools_types.TxResult;
 pub const TransactionListResult = tools_types.TransactionListResult;
 pub const TransactionDetailResult = tools_types.TransactionDetailResult;
 pub const ContractInspectResult = tools_types.ContractInspectResult;
+pub const AbiFunctionTemplateResult = tools_types.AbiFunctionTemplateResult;
+pub const AbiEventTemplateResult = tools_types.AbiEventTemplateResult;
+pub const AbiDescribeResult = tools_types.AbiDescribeResult;
 pub const JettonBalanceResult = tools_types.JettonBalanceResult;
 pub const JettonInfoResult = tools_types.JettonInfoResult;
 pub const JettonWalletAddressResult = tools_types.JettonWalletAddressResult;
@@ -3457,7 +3604,141 @@ test "agent tools inspectContract summarizes wallet and abi metadata" {
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"public_key\":\"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\"") != null);
 }
 
+test "agent tools describeAbi returns structured templates for direct source" {
+    const allocator = std.testing.allocator;
+
+    const FakeClient = struct {};
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    const abi_json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "transfer",
+        \\      "opcode": "0x11223344",
+        \\      "inputs": [
+        \\        {"name": "to", "type": "address"},
+        \\        {"name": "amount", "type": "coins"}
+        \\      ],
+        \\      "outputs": [
+        \\        {"name": "ok", "type": "bool"}
+        \\      ]
+        \\    }
+        \\  ],
+        \\  "events": [
+        \\    {
+        \\      "name": "Transfer",
+        \\      "opcode": "0x55667788",
+        \\      "inputs": [
+        \\        {"name": "amount", "type": "coins"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var client = FakeClient{};
+    var tools = FakeTools.init(allocator, &client, .{ .rpc_url = "https://example.invalid" });
+
+    var result = try tools.describeAbi(abi_json);
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings(abi_json, result.source);
+    try std.testing.expect(result.address == null);
+    try std.testing.expectEqualStrings("1.0", result.version);
+    try std.testing.expectEqual(@as(usize, 1), result.functions.len);
+    try std.testing.expectEqual(@as(usize, 1), result.events.len);
+    try std.testing.expectEqualStrings("transfer", result.functions[0].name);
+    try std.testing.expectEqualStrings("transfer(address,coins)", result.functions[0].selector);
+    try std.testing.expectEqualStrings("addr:EQ... num:0", result.functions[0].input_template);
+    try std.testing.expectEqualStrings("to=addr:EQ... amount=num:0", result.functions[0].named_input_template);
+    try std.testing.expectEqualStrings("{\"ok\":true}", result.functions[0].decoded_output_template);
+    try std.testing.expectEqualStrings("Transfer", result.events[0].name);
+    try std.testing.expectEqualStrings("Transfer(coins)", result.events[0].selector);
+    try std.testing.expectEqualStrings("{\"amount\":0}", result.events[0].decoded_fields_template);
+}
+
+test "agent tools describeAbiAuto discovers abi and returns templates" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const abi_json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "ping",
+        \\      "inputs": [],
+        \\      "outputs": []
+        \\    }
+        \\  ],
+        \\  "events": []
+        \\}
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "describe_abi.json", .data = abi_json });
+    const abi_path = try tmp.dir.realpathAlloc(allocator, "describe_abi.json");
+    defer allocator.free(abi_path);
+    const abi_uri = try std.fmt.allocPrint(allocator, "file://{s}", .{abi_path});
+    defer allocator.free(abi_uri);
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+        abi_uri: []const u8,
+
+        pub fn runGetMethod(self: *@This(), addr: []const u8, method: []const u8, stack: []const []const u8) anyerror!core_types.RunGetMethodResponse {
+            _ = addr;
+            _ = stack;
+            if (!std.mem.eql(u8, method, "get_abi_uri")) return error.InvalidResponse;
+
+            var builder = core_types.Builder.init();
+            try builder.storeUint(0x01, 8);
+            try builder.storeBits(self.abi_uri, @intCast(self.abi_uri.len * 8));
+            const cell_value = try builder.toCell(self.allocator);
+
+            const entries = try self.allocator.alloc(core_types.StackEntry, 1);
+            entries[0] = .{ .cell = cell_value };
+            return .{
+                .exit_code = 0,
+                .stack = entries,
+                .logs = "",
+            };
+        }
+
+        pub fn freeRunGetMethodResponse(self: *@This(), response: *core_types.RunGetMethodResponse) void {
+            for (response.stack) |*entry| {
+                switch (entry.*) {
+                    .cell => |value| value.deinit(self.allocator),
+                    else => {},
+                }
+            }
+            if (response.stack.len > 0) self.allocator.free(response.stack);
+        }
+    };
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    var client = FakeClient{ .allocator = allocator, .abi_uri = abi_uri };
+    var tools = FakeTools.init(allocator, &client, .{ .rpc_url = "https://example.invalid" });
+
+    var result = try tools.describeAbiAuto("0:3333333333333333333333333333333333333333333333333333333333333333");
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("auto:0:3333333333333333333333333333333333333333333333333333333333333333", result.source);
+    try std.testing.expect(result.address != null);
+    try std.testing.expectEqualStrings("0:3333333333333333333333333333333333333333333333333333333333333333", result.address.?);
+    try std.testing.expect(result.uri != null);
+    try std.testing.expectEqualStrings(abi_uri, result.uri.?);
+    try std.testing.expectEqual(@as(usize, 1), result.functions.len);
+    try std.testing.expectEqualStrings("ping()", result.functions[0].selector);
+}
+
 test "agent tools generic runGetMethod result type is exported" {
+    _ = AgentTools.describeAbi;
+    _ = AgentTools.describeAbiAuto;
     _ = AgentTools.decodeFunctionBodyAbi;
     _ = AgentTools.decodeFunctionBodyAuto;
     _ = AgentTools.decodeEventBodyAbi;
@@ -3486,6 +3767,8 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = ProviderAgentTools.runGetMethod;
     _ = ProviderAgentTools.runGetMethodAbi;
     _ = ProviderAgentTools.runGetMethodAuto;
+    _ = ProviderAgentTools.describeAbi;
+    _ = ProviderAgentTools.describeAbiAuto;
     _ = ProviderAgentTools.inspectContract;
     _ = ProviderAgentTools.getTransactions;
     _ = ProviderAgentTools.lookupTransaction;
@@ -3514,6 +3797,9 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = TransactionListResult;
     _ = TransactionDetailResult;
     _ = ContractInspectResult;
+    _ = AbiFunctionTemplateResult;
+    _ = AbiEventTemplateResult;
+    _ = AbiDescribeResult;
     _ = WalletInitResult;
     _ = JettonInfoResult;
     _ = JettonWalletAddressResult;
