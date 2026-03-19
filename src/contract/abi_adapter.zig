@@ -780,11 +780,11 @@ fn storeAbiValue(
         try builder.storeBits(bytes, @intCast(bytes.len * 8));
         return;
     }
-    if (std.mem.eql(u8, param.type_name, "ref") or
-        std.mem.eql(u8, param.type_name, "boc") or
-        std.mem.eql(u8, param.type_name, "ref_boc") or
-        std.mem.eql(u8, param.type_name, "cell_ref"))
-    {
+    if (isInlineCellLikeAbiType(param.type_name)) {
+        try storeInlineBoc(builder, allocator, try abiValueAsBoc(value));
+        return;
+    }
+    if (isRefCellLikeAbiType(param.type_name)) {
         try body_builder.storeRefBoc(builder, allocator, try abiValueAsBoc(value));
         return;
     }
@@ -880,27 +880,13 @@ fn abiValueToStackArgAlloc(
         };
     }
 
-    if (std.mem.eql(u8, param.type_name, "cell") or
-        std.mem.eql(u8, param.type_name, "ref") or
-        std.mem.eql(u8, param.type_name, "boc") or
-        std.mem.eql(u8, param.type_name, "cell_ref"))
-    {
+    if (stackCellLikeKind(param.type_name)) |kind| {
         return switch (value) {
-            .boc => |v| .{ .arg = .{ .cell = v } },
-            else => error.InvalidAbiArguments,
-        };
-    }
-
-    if (std.mem.eql(u8, param.type_name, "slice")) {
-        return switch (value) {
-            .boc => |v| .{ .arg = .{ .slice = v } },
-            else => error.InvalidAbiArguments,
-        };
-    }
-
-    if (std.mem.eql(u8, param.type_name, "builder")) {
-        return switch (value) {
-            .boc => |v| .{ .arg = .{ .builder = v } },
+            .boc => |v| switch (kind) {
+                .cell => .{ .arg = .{ .cell = v } },
+                .slice => .{ .arg = .{ .slice = v } },
+                .builder => .{ .arg = .{ .builder = v } },
+            },
             else => error.InvalidAbiArguments,
         };
     }
@@ -1075,6 +1061,47 @@ fn isNumericAbiType(type_name: []const u8) bool {
         std.mem.eql(u8, type_name, "coins") or
         std.mem.startsWith(u8, type_name, "uint") or
         std.mem.startsWith(u8, type_name, "int");
+}
+
+fn matchesAbiTypeBase(type_name: []const u8, base: []const u8) bool {
+    const trimmed = std.mem.trim(u8, type_name, " \t\r\n");
+    if (trimmed.len < base.len) return false;
+    if (!std.ascii.eqlIgnoreCase(trimmed[0..base.len], base)) return false;
+    return trimmed.len == base.len or trimmed[base.len] == '<' or trimmed[base.len] == ' ';
+}
+
+fn isInlineCellLikeAbiType(type_name: []const u8) bool {
+    return std.mem.eql(u8, type_name, "cell") or
+        std.mem.eql(u8, type_name, "slice") or
+        std.mem.eql(u8, type_name, "builder") or
+        matchesAbiTypeBase(type_name, "dict") or
+        matchesAbiTypeBase(type_name, "map") or
+        matchesAbiTypeBase(type_name, "hashmap") or
+        matchesAbiTypeBase(type_name, "hashmape");
+}
+
+fn isRefCellLikeAbiType(type_name: []const u8) bool {
+    return std.mem.eql(u8, type_name, "ref") or
+        std.mem.eql(u8, type_name, "boc") or
+        std.mem.eql(u8, type_name, "ref_boc") or
+        std.mem.eql(u8, type_name, "cell_ref") or
+        matchesAbiTypeBase(type_name, "dict_ref") or
+        matchesAbiTypeBase(type_name, "map_ref") or
+        matchesAbiTypeBase(type_name, "hashmap_ref") or
+        matchesAbiTypeBase(type_name, "hashmape_ref");
+}
+
+const StackCellLikeKind = enum {
+    cell,
+    slice,
+    builder,
+};
+
+fn stackCellLikeKind(type_name: []const u8) ?StackCellLikeKind {
+    if (std.mem.eql(u8, type_name, "slice")) return .slice;
+    if (std.mem.eql(u8, type_name, "builder")) return .builder;
+    if (isInlineCellLikeAbiType(type_name) or isRefCellLikeAbiType(type_name)) return .cell;
+    return null;
 }
 
 fn storeNumericTextValue(
@@ -1384,21 +1411,14 @@ fn storeAbiJsonValue(
         return;
     }
 
-    if (std.mem.eql(u8, param.type_name, "cell") or
-        std.mem.eql(u8, param.type_name, "slice") or
-        std.mem.eql(u8, param.type_name, "builder"))
-    {
+    if (isInlineCellLikeAbiType(param.type_name)) {
         const decoded = try decodeJsonBocAlloc(allocator, json_value);
         defer decoded.deinit(allocator);
         try storeInlineBoc(builder, allocator, decoded.value);
         return;
     }
 
-    if (std.mem.eql(u8, param.type_name, "ref") or
-        std.mem.eql(u8, param.type_name, "boc") or
-        std.mem.eql(u8, param.type_name, "ref_boc") or
-        std.mem.eql(u8, param.type_name, "cell_ref"))
-    {
+    if (isRefCellLikeAbiType(param.type_name)) {
         const decoded = try decodeJsonBocAlloc(allocator, json_value);
         defer decoded.deinit(allocator);
         try body_builder.storeRefBoc(builder, allocator, decoded.value);
@@ -1553,28 +1573,15 @@ fn writeAbiStackArgJson(
         return;
     }
 
-    if (std.mem.eql(u8, param.type_name, "cell") or
-        std.mem.eql(u8, param.type_name, "ref") or
-        std.mem.eql(u8, param.type_name, "boc") or
-        std.mem.eql(u8, param.type_name, "cell_ref"))
-    {
+    if (stackCellLikeKind(param.type_name)) |kind| {
         const decoded = try decodeJsonBocAlloc(allocator, json_value);
         defer decoded.deinit(allocator);
-        try writeStackBocArgJson(writer, allocator, "cell", decoded.value);
-        return;
-    }
-
-    if (std.mem.eql(u8, param.type_name, "slice")) {
-        const decoded = try decodeJsonBocAlloc(allocator, json_value);
-        defer decoded.deinit(allocator);
-        try writeStackBocArgJson(writer, allocator, "slice", decoded.value);
-        return;
-    }
-
-    if (std.mem.eql(u8, param.type_name, "builder")) {
-        const decoded = try decodeJsonBocAlloc(allocator, json_value);
-        defer decoded.deinit(allocator);
-        try writeStackBocArgJson(writer, allocator, "builder", decoded.value);
+        const tag = switch (kind) {
+            .cell => "cell",
+            .slice => "slice",
+            .builder => "builder",
+        };
+        try writeStackBocArgJson(writer, allocator, tag, decoded.value);
         return;
     }
 
@@ -1969,13 +1976,7 @@ fn writeDecodedOutputJsonType(
         return;
     }
 
-    if (std.mem.eql(u8, type_name, "cell") or
-        std.mem.eql(u8, type_name, "slice") or
-        std.mem.eql(u8, type_name, "builder") or
-        std.mem.eql(u8, type_name, "ref") or
-        std.mem.eql(u8, type_name, "boc") or
-        std.mem.eql(u8, type_name, "cell_ref"))
-    {
+    if (isInlineCellLikeAbiType(type_name) or isRefCellLikeAbiType(type_name)) {
         const body = try generic_contract.stackEntryToBocAlloc(allocator, entry);
         defer allocator.free(body);
         const encoded = try base64EncodeAlloc(allocator, body);
@@ -2496,6 +2497,51 @@ test "abi adapter builds composite body from json bytes and boc leaves" {
     try std.testing.expectEqual(@as(u64, 0xCAFE), try nested_slice.loadUint(16));
 }
 
+test "abi adapter supports dict aliases in body encoding" {
+    const allocator = std.testing.allocator;
+
+    var inline_builder = cell.Builder.init();
+    try inline_builder.storeUint(0xBEEF, 16);
+    const inline_cell = try inline_builder.toCell(allocator);
+    defer inline_cell.deinit(allocator);
+    const inline_boc = try boc.serializeBoc(allocator, inline_cell);
+    defer allocator.free(inline_boc);
+
+    var ref_builder = cell.Builder.init();
+    try ref_builder.storeUint(0xCAFE, 16);
+    const ref_cell = try ref_builder.toCell(allocator);
+    defer ref_cell.deinit(allocator);
+    const ref_boc = try boc.serializeBoc(allocator, ref_cell);
+    defer allocator.free(ref_boc);
+
+    const function = FunctionDef{
+        .name = "set_dicts",
+        .opcode = 0x44556677,
+        .inputs = &.{
+            .{ .name = "settings", .type_name = "HashmapE<32, uint32>" },
+            .{ .name = "cache", .type_name = "map_ref<address, cell>" },
+        },
+        .outputs = &.{},
+    };
+
+    const built = try buildFunctionBodyBocAlloc(allocator, function, &.{
+        .{ .boc = inline_boc },
+        .{ .boc = ref_boc },
+    });
+    defer allocator.free(built);
+
+    const root = try boc.deserializeBoc(allocator, built);
+    defer root.deinit(allocator);
+
+    var slice = root.toSlice();
+    try std.testing.expectEqual(@as(u64, 0x44556677), try slice.loadUint(32));
+    try std.testing.expectEqual(@as(u64, 0xBEEF), try slice.loadUint(16));
+
+    const cache_ref = try slice.loadRef();
+    var cache_slice = cache_ref.toSlice();
+    try std.testing.expectEqual(@as(u64, 0xCAFE), try cache_slice.loadUint(16));
+}
+
 test "abi adapter builds stack args and decodes outputs for abi function" {
     const allocator = std.testing.allocator;
     const abi_json =
@@ -2869,6 +2915,45 @@ test "abi adapter supports big numeric json leaves in stack args" {
     try std.testing.expect(std.mem.indexOf(u8, list_args.args[0].raw_json, "[\"num\",\"0x02030405060708090A0B0C0D0E0F10\"]") != null);
 }
 
+test "abi adapter supports dict aliases in stack args" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "lookup_dicts",
+        \\      "inputs": [
+        \\        {"name": "settings", "type": "dict<address,uint32>"},
+        \\        {"name": "cache", "type": "HashmapE_ref<32,cell>"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var abi = try parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer abi.deinit(allocator);
+
+    var dict_builder = cell.Builder.init();
+    try dict_builder.storeUint(0xABCD, 16);
+    const dict_cell = try dict_builder.toCell(allocator);
+    defer dict_cell.deinit(allocator);
+    const dict_boc = try boc.serializeBoc(allocator, dict_cell);
+    defer allocator.free(dict_boc);
+
+    var args = try buildStackArgsFromAbiAlloc(allocator, &abi.abi, "lookup_dicts", &.{
+        .{ .boc = dict_boc },
+        .{ .boc = dict_boc },
+    });
+    defer args.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), args.args.len);
+    try std.testing.expect(args.args[0] == .cell);
+    try std.testing.expect(args.args[1] == .cell);
+    try std.testing.expectEqualSlices(u8, dict_boc, args.args[0].cell);
+    try std.testing.expectEqualSlices(u8, dict_boc, args.args[1].cell);
+}
+
 test "abi adapter builds tuple and list get-method stack args from json" {
     const allocator = std.testing.allocator;
     const abi_json =
@@ -3210,6 +3295,51 @@ test "abi adapter decodes scalar and tuple array outputs" {
         "{\"items\":[{\"enabled\":true,\"owner\":\"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8\"},{\"enabled\":false,\"owner\":\"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8\"}]}",
         tuple_decoded,
     );
+}
+
+test "abi adapter decodes dict aliases as boc strings" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "get_dicts",
+        \\      "outputs": [
+        \\        {"name": "settings", "type": "dict<address,uint32>"},
+        \\        {"name": "cache", "type": "map_ref<uint32,cell>"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var abi = try parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer abi.deinit(allocator);
+
+    var dict_builder = cell.Builder.init();
+    try dict_builder.storeUint(0xCAFE, 16);
+    const dict_cell = try dict_builder.toCell(allocator);
+    defer dict_cell.deinit(allocator);
+    const dict_boc = try boc.serializeBoc(allocator, dict_cell);
+    defer allocator.free(dict_boc);
+    const dict_b64 = try base64EncodeAlloc(allocator, dict_boc);
+    defer allocator.free(dict_b64);
+
+    const stack = [_]types.StackEntry{
+        .{ .cell = dict_cell },
+        .{ .cell = dict_cell },
+    };
+
+    const decoded = try decodeFunctionOutputsFromAbiJsonAlloc(allocator, &abi.abi, "get_dicts", stack[0..]);
+    defer allocator.free(decoded);
+
+    const expected = try std.fmt.allocPrint(
+        allocator,
+        "{{\"settings\":\"{s}\",\"cache\":\"{s}\"}}",
+        .{ dict_b64, dict_b64 },
+    );
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, decoded);
 }
 
 test "abi adapter preserves large numeric outputs as strings" {
