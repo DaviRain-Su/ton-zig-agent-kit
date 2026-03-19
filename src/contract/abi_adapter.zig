@@ -912,11 +912,39 @@ fn storeAbiJsonValue(
         };
     }
 
-    if (std.mem.eql(u8, param.type_name, "bytes") or std.mem.eql(u8, param.type_name, "string")) {
+    if (std.mem.eql(u8, param.type_name, "string")) {
         return switch (json_value) {
             .string => |value| builder.storeBits(value, @intCast(value.len * 8)),
             else => error.InvalidAbiArguments,
         };
+    }
+
+    if (std.mem.eql(u8, param.type_name, "bytes")) {
+        const decoded = try decodeJsonBytesAlloc(allocator, json_value);
+        defer decoded.deinit(allocator);
+        try builder.storeBits(decoded.value, @intCast(decoded.value.len * 8));
+        return;
+    }
+
+    if (std.mem.eql(u8, param.type_name, "cell") or
+        std.mem.eql(u8, param.type_name, "slice") or
+        std.mem.eql(u8, param.type_name, "builder"))
+    {
+        const decoded = try decodeJsonBocAlloc(allocator, json_value);
+        defer decoded.deinit(allocator);
+        try storeInlineBoc(builder, allocator, decoded.value);
+        return;
+    }
+
+    if (std.mem.eql(u8, param.type_name, "ref") or
+        std.mem.eql(u8, param.type_name, "boc") or
+        std.mem.eql(u8, param.type_name, "ref_boc") or
+        std.mem.eql(u8, param.type_name, "cell_ref"))
+    {
+        const decoded = try decodeJsonBocAlloc(allocator, json_value);
+        defer decoded.deinit(allocator);
+        try body_builder.storeRefBoc(builder, allocator, decoded.value);
+        return;
     }
 
     if (std.mem.eql(u8, param.type_name, "coins") or std.mem.startsWith(u8, param.type_name, "uint")) {
@@ -1025,14 +1053,23 @@ fn writeAbiStackArgJson(
     }
 
     if (std.mem.eql(u8, param.type_name, "bytes") or std.mem.eql(u8, param.type_name, "string")) {
-        return switch (json_value) {
-            .string => |value| {
-                const body_boc = try buildBytesSliceBocAlloc(allocator, value);
-                defer allocator.free(body_boc);
-                try writeStackBocArgJson(writer, allocator, "slice", body_boc);
-            },
-            else => error.InvalidAbiArguments,
-        };
+        if (std.mem.eql(u8, param.type_name, "string")) {
+            return switch (json_value) {
+                .string => |value| {
+                    const body_boc = try buildBytesSliceBocAlloc(allocator, value);
+                    defer allocator.free(body_boc);
+                    try writeStackBocArgJson(writer, allocator, "slice", body_boc);
+                },
+                else => error.InvalidAbiArguments,
+            };
+        }
+
+        const decoded = try decodeJsonBytesAlloc(allocator, json_value);
+        defer decoded.deinit(allocator);
+        const body_boc = try buildBytesSliceBocAlloc(allocator, decoded.value);
+        defer allocator.free(body_boc);
+        try writeStackBocArgJson(writer, allocator, "slice", body_boc);
+        return;
     }
 
     if (std.mem.eql(u8, param.type_name, "cell") or
@@ -1040,24 +1077,24 @@ fn writeAbiStackArgJson(
         std.mem.eql(u8, param.type_name, "boc") or
         std.mem.eql(u8, param.type_name, "cell_ref"))
     {
-        return switch (json_value) {
-            .string => |value| writer.print("[\"cell\",\"{s}\"]", .{value}),
-            else => error.InvalidAbiArguments,
-        };
+        const decoded = try decodeJsonBocAlloc(allocator, json_value);
+        defer decoded.deinit(allocator);
+        try writeStackBocArgJson(writer, allocator, "cell", decoded.value);
+        return;
     }
 
     if (std.mem.eql(u8, param.type_name, "slice")) {
-        return switch (json_value) {
-            .string => |value| writer.print("[\"slice\",\"{s}\"]", .{value}),
-            else => error.InvalidAbiArguments,
-        };
+        const decoded = try decodeJsonBocAlloc(allocator, json_value);
+        defer decoded.deinit(allocator);
+        try writeStackBocArgJson(writer, allocator, "slice", decoded.value);
+        return;
     }
 
     if (std.mem.eql(u8, param.type_name, "builder")) {
-        return switch (json_value) {
-            .string => |value| writer.print("[\"builder\",\"{s}\"]", .{value}),
-            else => error.InvalidAbiArguments,
-        };
+        const decoded = try decodeJsonBocAlloc(allocator, json_value);
+        defer decoded.deinit(allocator);
+        try writeStackBocArgJson(writer, allocator, "builder", decoded.value);
+        return;
     }
 
     return error.UnsupportedAbiType;
@@ -1122,6 +1159,15 @@ fn writeCompositeItemsJson(
     try writer.writeByte(']');
 }
 
+const OwnedDecodedBytes = struct {
+    value: []const u8,
+    owned: ?[]u8 = null,
+
+    fn deinit(self: OwnedDecodedBytes, allocator: std.mem.Allocator) void {
+        if (self.owned) |buffer| allocator.free(buffer);
+    }
+};
+
 fn compositeStackTag(type_name: []const u8) []const u8 {
     const trimmed = std.mem.trim(u8, type_name, " \t\r\n");
     if (std.mem.eql(u8, trimmed, "list") or
@@ -1164,6 +1210,105 @@ fn writeStackBocArgJson(writer: anytype, allocator: std.mem.Allocator, tag: []co
     try writer.print("[\"{s}\",\"{s}\"]", .{ tag, encoded });
 }
 
+fn decodeJsonBytesAlloc(allocator: std.mem.Allocator, json_value: std.json.Value) !OwnedDecodedBytes {
+    return switch (json_value) {
+        .string => |value| .{ .value = value },
+        .object => |object| {
+            if (object.get("text")) |text_value| {
+                return switch (text_value) {
+                    .string => |value| .{ .value = value },
+                    else => error.InvalidAbiArguments,
+                };
+            }
+            if (object.get("hex")) |hex_value| {
+                return switch (hex_value) {
+                    .string => |value| blk: {
+                        const decoded = try hexToBytesAlloc(allocator, value);
+                        break :blk .{ .value = decoded, .owned = decoded };
+                    },
+                    else => error.InvalidAbiArguments,
+                };
+            }
+            if (object.get("base64")) |base64_value| {
+                return switch (base64_value) {
+                    .string => |value| blk: {
+                        const decoded = try decodeBase64FlexibleAlloc(allocator, value);
+                        break :blk .{ .value = decoded, .owned = decoded };
+                    },
+                    else => error.InvalidAbiArguments,
+                };
+            }
+            return error.InvalidAbiArguments;
+        },
+        else => error.InvalidAbiArguments,
+    };
+}
+
+fn decodeJsonBocAlloc(allocator: std.mem.Allocator, json_value: std.json.Value) !OwnedDecodedBytes {
+    return switch (json_value) {
+        .string => |value| blk: {
+            const decoded = try decodeBase64FlexibleAlloc(allocator, value);
+            break :blk .{ .value = decoded, .owned = decoded };
+        },
+        .object => |object| {
+            if (object.get("boc")) |boc_value| {
+                return switch (boc_value) {
+                    .string => |value| blk: {
+                        const decoded = try decodeBase64FlexibleAlloc(allocator, value);
+                        break :blk .{ .value = decoded, .owned = decoded };
+                    },
+                    else => error.InvalidAbiArguments,
+                };
+            }
+            if (object.get("base64")) |base64_value| {
+                return switch (base64_value) {
+                    .string => |value| blk: {
+                        const decoded = try decodeBase64FlexibleAlloc(allocator, value);
+                        break :blk .{ .value = decoded, .owned = decoded };
+                    },
+                    else => error.InvalidAbiArguments,
+                };
+            }
+            if (object.get("hex")) |hex_value| {
+                return switch (hex_value) {
+                    .string => |value| blk: {
+                        const decoded = try hexToBytesAlloc(allocator, value);
+                        break :blk .{ .value = decoded, .owned = decoded };
+                    },
+                    else => error.InvalidAbiArguments,
+                };
+            }
+            if (object.get("boc_hex")) |hex_value| {
+                return switch (hex_value) {
+                    .string => |value| blk: {
+                        const decoded = try hexToBytesAlloc(allocator, value);
+                        break :blk .{ .value = decoded, .owned = decoded };
+                    },
+                    else => error.InvalidAbiArguments,
+                };
+            }
+            return error.InvalidAbiArguments;
+        },
+        else => error.InvalidAbiArguments,
+    };
+}
+
+fn storeInlineBoc(builder: *cell.Builder, allocator: std.mem.Allocator, body_boc: []const u8) !void {
+    const root = try boc.deserializeBoc(allocator, body_boc);
+    errdefer root.deinit(allocator);
+
+    const byte_len: usize = @intCast(@divTrunc(root.bit_len + 7, 8));
+    try builder.storeBits(root.data[0..byte_len], root.bit_len);
+
+    for (0..root.ref_cnt) |idx| {
+        const ref = root.refs[idx] orelse return error.InvalidBoc;
+        root.refs[idx] = null;
+        try builder.storeRef(ref);
+    }
+    root.ref_cnt = 0;
+    root.deinit(allocator);
+}
+
 fn buildAddressStackSliceBocAlloc(allocator: std.mem.Allocator, address_text: []const u8) ![]u8 {
     var builder = cell.Builder.init();
     try builder.storeAddress(address_text);
@@ -1172,6 +1317,43 @@ fn buildAddressStackSliceBocAlloc(allocator: std.mem.Allocator, address_text: []
     defer value.deinit(allocator);
 
     return boc.serializeBoc(allocator, value);
+}
+
+fn hexToBytesAlloc(allocator: std.mem.Allocator, hex: []const u8) ![]u8 {
+    if (hex.len % 2 != 0) return error.InvalidHex;
+
+    const out = try allocator.alloc(u8, hex.len / 2);
+    errdefer allocator.free(out);
+
+    for (0..out.len) |idx| {
+        const hi = try hexCharValue(hex[idx * 2]);
+        const lo = try hexCharValue(hex[idx * 2 + 1]);
+        out[idx] = (hi << 4) | lo;
+    }
+
+    return out;
+}
+
+fn hexCharValue(c: u8) !u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => error.InvalidHex,
+    };
+}
+
+fn decodeBase64FlexibleAlloc(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    return decodeBase64WithDecoder(allocator, input, std.base64.standard.Decoder) catch
+        decodeBase64WithDecoder(allocator, input, std.base64.url_safe.Decoder);
+}
+
+fn decodeBase64WithDecoder(allocator: std.mem.Allocator, input: []const u8, comptime decoder: anytype) ![]u8 {
+    const decoded_len = try decoder.calcSizeForSlice(input);
+    const output = try allocator.alloc(u8, decoded_len);
+    errdefer allocator.free(output);
+    try decoder.decode(output, input);
+    return output;
 }
 
 fn checkedAbiUintToI64(value: u64) !i64 {
@@ -1689,6 +1871,72 @@ test "abi adapter builds tuple body from json abi value" {
     try std.testing.expectEqual(@as(u8, 'o'), try slice.loadUint8());
 }
 
+test "abi adapter builds composite body from json bytes and boc leaves" {
+    const allocator = std.testing.allocator;
+
+    var inline_builder = cell.Builder.init();
+    try inline_builder.storeUint(0xABCD, 16);
+    const inline_cell = try inline_builder.toCell(allocator);
+    defer inline_cell.deinit(allocator);
+    const inline_boc = try boc.serializeBoc(allocator, inline_cell);
+    defer allocator.free(inline_boc);
+    const inline_b64 = try base64EncodeAlloc(allocator, inline_boc);
+    defer allocator.free(inline_b64);
+
+    var ref_builder = cell.Builder.init();
+    try ref_builder.storeUint(0xCAFE, 16);
+    const ref_cell = try ref_builder.toCell(allocator);
+    defer ref_cell.deinit(allocator);
+    const ref_boc = try boc.serializeBoc(allocator, ref_cell);
+    defer allocator.free(ref_boc);
+    const ref_b64 = try base64EncodeAlloc(allocator, ref_boc);
+    defer allocator.free(ref_b64);
+
+    const payload_json = try std.fmt.allocPrint(
+        allocator,
+        "{{\"tag\":7,\"data\":{{\"hex\":\"CAFE\"}},\"body\":{{\"boc\":\"{s}\"}},\"nested\":{{\"boc\":\"{s}\"}}}}",
+        .{ inline_b64, ref_b64 },
+    );
+    defer allocator.free(payload_json);
+
+    const function = FunctionDef{
+        .name = "set_payload",
+        .opcode = 0x55667788,
+        .inputs = &.{
+            .{
+                .name = "payload",
+                .type_name = "tuple",
+                .components = &.{
+                    .{ .name = "tag", .type_name = "uint8" },
+                    .{ .name = "data", .type_name = "bytes" },
+                    .{ .name = "body", .type_name = "slice" },
+                    .{ .name = "nested", .type_name = "ref" },
+                },
+            },
+        },
+        .outputs = &.{},
+    };
+
+    const built = try buildFunctionBodyBocAlloc(allocator, function, &.{
+        .{ .json = payload_json },
+    });
+    defer allocator.free(built);
+
+    const root = try boc.deserializeBoc(allocator, built);
+    defer root.deinit(allocator);
+
+    var slice = root.toSlice();
+    try std.testing.expectEqual(@as(u64, 0x55667788), try slice.loadUint(32));
+    try std.testing.expectEqual(@as(u64, 7), try slice.loadUint(8));
+    try std.testing.expectEqual(@as(u8, 0xCA), try slice.loadUint8());
+    try std.testing.expectEqual(@as(u8, 0xFE), try slice.loadUint8());
+    try std.testing.expectEqual(@as(u64, 0xABCD), try slice.loadUint(16));
+
+    const nested_ref = try slice.loadRef();
+    var nested_slice = nested_ref.toSlice();
+    try std.testing.expectEqual(@as(u64, 0xCAFE), try nested_slice.loadUint(16));
+}
+
 test "abi adapter builds stack args and decodes outputs for abi function" {
     const allocator = std.testing.allocator;
     const abi_json =
@@ -1901,6 +2149,60 @@ test "abi adapter builds tuple and list get-method stack args from json" {
     try std.testing.expectEqual(@as(usize, 1), list_args.args.len);
     try std.testing.expect(list_args.args[0] == .raw_json);
     try std.testing.expectEqualStrings("[\"list\",[[\"num\",1],[\"num\",7]]]", list_args.args[0].raw_json);
+}
+
+test "abi adapter builds get-method stack args from json hex and boc leaves" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "lookup_payload",
+        \\      "inputs": [
+        \\        {
+        \\          "name": "payload",
+        \\          "type": "tuple",
+        \\          "components": [
+        \\            {"name": "data", "type": "bytes"},
+        \\            {"name": "body", "type": "slice"},
+        \\            {"name": "code", "type": "builder"}
+        \\          ]
+        \\        }
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var abi = try parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer abi.deinit(allocator);
+
+    var payload_builder = cell.Builder.init();
+    try payload_builder.storeUint(0xBEEF, 16);
+    const payload_cell = try payload_builder.toCell(allocator);
+    defer payload_cell.deinit(allocator);
+    const payload_boc = try boc.serializeBoc(allocator, payload_cell);
+    defer allocator.free(payload_boc);
+    const payload_b64 = try base64EncodeAlloc(allocator, payload_boc);
+    defer allocator.free(payload_b64);
+
+    const value_json = try std.fmt.allocPrint(
+        allocator,
+        "{{\"data\":{{\"hex\":\"CAFE\"}},\"body\":{{\"boc\":\"{s}\"}},\"code\":{{\"boc\":\"{s}\"}}}}",
+        .{ payload_b64, payload_b64 },
+    );
+    defer allocator.free(value_json);
+
+    var args = try buildStackArgsFromAbiAlloc(allocator, &abi.abi, "lookup_payload", &.{
+        .{ .json = value_json },
+    });
+    defer args.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), args.args.len);
+    try std.testing.expect(args.args[0] == .raw_json);
+    try std.testing.expect(std.mem.startsWith(u8, args.args[0].raw_json, "[\"tuple\",[[\"slice\",\""));
+    try std.testing.expect(std.mem.indexOf(u8, args.args[0].raw_json, "[\"slice\",\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, args.args[0].raw_json, "[\"builder\",\"") != null);
 }
 
 test "abi adapter builds scalar and tuple array get-method stack args from json" {
