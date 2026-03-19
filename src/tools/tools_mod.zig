@@ -62,6 +62,7 @@ pub const AgentTools = struct {
                 .method = method,
                 .exit_code = -1,
                 .stack_json = "[]",
+                .decoded_json = null,
                 .logs = "",
                 .success = false,
                 .error_message = @errorName(err),
@@ -75,6 +76,7 @@ pub const AgentTools = struct {
                 .method = method,
                 .exit_code = result.exit_code,
                 .stack_json = "[]",
+                .decoded_json = null,
                 .logs = "",
                 .success = false,
                 .error_message = @errorName(err),
@@ -87,6 +89,106 @@ pub const AgentTools = struct {
             .method = method,
             .exit_code = result.exit_code,
             .stack_json = stack_json,
+            .decoded_json = null,
+            .logs = logs,
+            .success = true,
+            .error_message = null,
+        };
+    }
+
+    /// Run a get-method using ABI input/output definitions
+    pub fn runGetMethodAbi(
+        self: *AgentTools,
+        contract_address: []const u8,
+        abi_json: []const u8,
+        function_name: []const u8,
+        values: []const abi_adapter.AbiValue,
+    ) !tools_types.RunMethodResult {
+        var abi = abi_adapter.parseAbiInfoJsonAlloc(self.allocator, abi_json) catch |err| {
+            return tools_types.RunMethodResult{
+                .address = contract_address,
+                .method = function_name,
+                .exit_code = -1,
+                .stack_json = "[]",
+                .decoded_json = null,
+                .logs = "",
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        defer abi.deinit(self.allocator);
+
+        var args = abi_adapter.buildStackArgsFromAbiAlloc(self.allocator, &abi.abi, function_name, values) catch |err| {
+            return tools_types.RunMethodResult{
+                .address = contract_address,
+                .method = function_name,
+                .exit_code = -1,
+                .stack_json = "[]",
+                .decoded_json = null,
+                .logs = "",
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        defer args.deinit(self.allocator);
+
+        var generic = contract.GenericContract.init(self.client, contract_address);
+        var result = generic.callGetMethodArgs(function_name, args.args) catch |err| {
+            return tools_types.RunMethodResult{
+                .address = contract_address,
+                .method = function_name,
+                .exit_code = -1,
+                .stack_json = "[]",
+                .decoded_json = null,
+                .logs = "",
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        defer self.client.freeRunGetMethodResponse(&result);
+
+        const stack_json = contract.stackToJsonAlloc(self.allocator, result.stack) catch |err| {
+            return tools_types.RunMethodResult{
+                .address = contract_address,
+                .method = function_name,
+                .exit_code = result.exit_code,
+                .stack_json = "[]",
+                .decoded_json = null,
+                .logs = "",
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        errdefer self.allocator.free(stack_json);
+
+        const logs = try self.allocator.dupe(u8, result.logs);
+        errdefer self.allocator.free(logs);
+
+        const decoded_json = abi_adapter.decodeFunctionOutputsFromAbiJsonAlloc(
+            self.allocator,
+            &abi.abi,
+            function_name,
+            result.stack,
+        ) catch |err| {
+            return tools_types.RunMethodResult{
+                .address = contract_address,
+                .method = function_name,
+                .exit_code = result.exit_code,
+                .stack_json = stack_json,
+                .decoded_json = null,
+                .logs = logs,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        errdefer self.allocator.free(decoded_json);
+
+        return tools_types.RunMethodResult{
+            .address = contract_address,
+            .method = function_name,
+            .exit_code = result.exit_code,
+            .stack_json = stack_json,
+            .decoded_json = decoded_json,
             .logs = logs,
             .success = true,
             .error_message = null,
@@ -465,6 +567,7 @@ test "agent tools getBalance" {
 
 test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.runGetMethod;
+    _ = AgentTools.runGetMethodAbi;
     _ = AgentTools.sendContractMessage;
     _ = AgentTools.sendContractMessageOps;
     _ = AgentTools.sendContractMessageFunction;
