@@ -184,7 +184,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             };
             defer abi.deinit(self.client.allocator);
 
-            const function = abi_adapter.findFunction(&abi.abi, function_name) orelse {
+            const function = abi_adapter.resolveFunctionByValueCount(&abi.abi, function_name, values.len) catch |err| {
                 return tools_types.RunMethodResult{
                     .address = contract_address,
                     .method = function_name,
@@ -193,11 +193,32 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                     .decoded_json = null,
                     .logs = "",
                     .success = false,
-                    .error_message = "FunctionNotFound",
+                    .error_message = @errorName(err),
                 };
             };
 
-            var args = abi_adapter.buildStackArgsFromFunctionAlloc(self.allocator, function.*, values) catch |err| {
+            const prepared_values = if (function.inputs.len == values.len)
+                null
+            else
+                abi_adapter.expandValuesForFunctionAlloc(self.allocator, function.*, values) catch |err| {
+                    return tools_types.RunMethodResult{
+                        .address = contract_address,
+                        .method = function_name,
+                        .exit_code = -1,
+                        .stack_json = "[]",
+                        .decoded_json = null,
+                        .logs = "",
+                        .success = false,
+                        .error_message = @errorName(err),
+                    };
+                };
+            defer if (prepared_values) |owned| self.allocator.free(owned);
+
+            var args = abi_adapter.buildStackArgsFromFunctionAlloc(
+                self.allocator,
+                function.*,
+                if (prepared_values) |owned| owned else values,
+            ) catch |err| {
                 return tools_types.RunMethodResult{
                     .address = contract_address,
                     .method = function_name,
@@ -316,7 +337,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             };
             defer abi.deinit(self.client.allocator);
 
-            const function = abi_adapter.findFunction(&abi.abi, function_name) orelse {
+            const function = abi_adapter.resolveFunctionByValueCount(&abi.abi, function_name, values.len) catch |err| {
                 return tools_types.RunMethodResult{
                     .address = contract_address,
                     .method = function_name,
@@ -325,11 +346,32 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                     .decoded_json = null,
                     .logs = "",
                     .success = false,
-                    .error_message = "FunctionNotFound",
+                    .error_message = @errorName(err),
                 };
             };
 
-            var args = abi_adapter.buildStackArgsFromFunctionAlloc(self.allocator, function.*, values) catch |err| {
+            const prepared_values = if (function.inputs.len == values.len)
+                null
+            else
+                abi_adapter.expandValuesForFunctionAlloc(self.allocator, function.*, values) catch |err| {
+                    return tools_types.RunMethodResult{
+                        .address = contract_address,
+                        .method = function_name,
+                        .exit_code = -1,
+                        .stack_json = "[]",
+                        .decoded_json = null,
+                        .logs = "",
+                        .success = false,
+                        .error_message = @errorName(err),
+                    };
+                };
+            defer if (prepared_values) |owned| self.allocator.free(owned);
+
+            var args = abi_adapter.buildStackArgsFromFunctionAlloc(
+                self.allocator,
+                function.*,
+                if (prepared_values) |owned| owned else values,
+            ) catch |err| {
                 return tools_types.RunMethodResult{
                     .address = contract_address,
                     .method = function_name,

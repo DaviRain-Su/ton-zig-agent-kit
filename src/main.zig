@@ -402,7 +402,7 @@ pub fn main() !void {
         var abi = try contract_mod.abi_adapter.loadAbiInfoSourceAlloc(allocator, args[3]);
         defer abi.deinit(allocator);
 
-        const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_selector) orelse return error.FunctionNotFound;
+        const function = try resolveCliAbiFunction(&abi.abi, function_selector, args[5..]);
 
         var parsed_values = try parseCliAbiValuesForParams(allocator, function.inputs, args[5..]);
         defer parsed_values.deinit(allocator);
@@ -453,7 +453,7 @@ pub fn main() !void {
         };
         defer abi.deinit(allocator);
 
-        const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_selector) orelse return error.FunctionNotFound;
+        const function = try resolveCliAbiFunction(&abi.abi, function_selector, args[4..]);
 
         var parsed_values = try parseCliAbiValuesForParams(allocator, function.inputs, args[4..]);
         defer parsed_values.deinit(allocator);
@@ -715,7 +715,7 @@ pub fn main() !void {
             var abi = try contract_mod.abi_adapter.loadAbiInfoSourceAlloc(allocator, args[3]);
             defer abi.deinit(allocator);
 
-            const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_selector) orelse return error.FunctionNotFound;
+            const function = try resolveCliAbiFunction(&abi.abi, function_selector, args[5..]);
 
             var parsed_values = try parseCliAbiValuesForParams(allocator, function.inputs, args[5..]);
             defer parsed_values.deinit(allocator);
@@ -1064,7 +1064,7 @@ pub fn main() !void {
             var abi = try contract_mod.abi_adapter.loadAbiInfoSourceAlloc(allocator, args[6]);
             defer abi.deinit(allocator);
 
-            const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_selector) orelse return error.FunctionNotFound;
+            const function = try resolveCliAbiFunction(&abi.abi, function_selector, args[8..]);
 
             var parsed_values = try parseCliAbiValuesForParams(allocator, function.inputs, args[8..]);
             defer parsed_values.deinit(allocator);
@@ -1113,7 +1113,7 @@ pub fn main() !void {
             };
             defer abi.deinit(allocator);
 
-            const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_selector) orelse return error.FunctionNotFound;
+            const function = try resolveCliAbiFunction(&abi.abi, function_selector, args[7..]);
 
             var parsed_values = try parseCliAbiValuesForParams(allocator, function.inputs, args[7..]);
             defer parsed_values.deinit(allocator);
@@ -1627,6 +1627,95 @@ fn parseCliAbiValuesForParams(
         return parseCliAbiValuesNamedForParams(allocator, params, specs);
     }
     return parseCliAbiValuesPositionalForParams(allocator, params, specs);
+}
+
+const CliAbiFunctionMatch = enum {
+    exact,
+    optional_missing,
+};
+
+fn resolveCliAbiFunction(
+    abi: *const contract_mod.abi_adapter.AbiInfo,
+    function_selector: []const u8,
+    specs: []const []const u8,
+) !*const contract_mod.abi_adapter.FunctionDef {
+    if (!cliAbiSpecsUseNamedSyntax(specs)) {
+        return contract_mod.abi_adapter.resolveFunctionByValueCount(abi, function_selector, specs.len);
+    }
+
+    const direct = contract_mod.abi_adapter.findFunction(abi, function_selector);
+    if (std.mem.indexOfScalar(u8, std.mem.trim(u8, function_selector, " \t\r\n"), '(') != null) {
+        return direct orelse error.FunctionNotFound;
+    }
+
+    var exact_match: ?*const contract_mod.abi_adapter.FunctionDef = null;
+    var exact_count: usize = 0;
+    var optional_match: ?*const contract_mod.abi_adapter.FunctionDef = null;
+    var optional_count: usize = 0;
+
+    for (abi.functions) |*function| {
+        if (!std.mem.eql(u8, function.name, function_selector)) continue;
+
+        const match = cliNamedSpecsMatchFunction(function.inputs, specs) orelse continue;
+        switch (match) {
+            .exact => {
+                exact_count += 1;
+                if (exact_match == null) exact_match = function;
+            },
+            .optional_missing => {
+                optional_count += 1;
+                if (optional_match == null) optional_match = function;
+            },
+        }
+    }
+
+    if (exact_match) |function| {
+        if (exact_count > 1) return error.AmbiguousFunctionOverload;
+        return function;
+    }
+
+    if (optional_match) |function| {
+        if (optional_count > 1) return error.AmbiguousFunctionOverload;
+        return function;
+    }
+
+    return error.FunctionNotFound;
+}
+
+fn cliNamedSpecsMatchFunction(
+    params: []const contract_mod.abi_adapter.ParamDef,
+    specs: []const []const u8,
+) ?CliAbiFunctionMatch {
+    if (specs.len > params.len) return null;
+
+    for (specs, 0..) |spec, spec_idx| {
+        const named = splitCliNamedAbiSpec(spec) orelse return null;
+        const idx = findCliAbiParamIndex(params, named.name) orelse return null;
+
+        for (specs[0..spec_idx]) |prev_spec| {
+            const prev_named = splitCliNamedAbiSpec(prev_spec) orelse return null;
+            const prev_idx = findCliAbiParamIndex(params, prev_named.name) orelse return null;
+            if (prev_idx == idx) return null;
+        }
+    }
+
+    if (specs.len == params.len) return .exact;
+
+    for (params, 0..) |param, idx| {
+        var seen = false;
+        for (specs) |spec| {
+            const named = splitCliNamedAbiSpec(spec) orelse return null;
+            const spec_idx = findCliAbiParamIndex(params, named.name) orelse return null;
+            if (spec_idx == idx) {
+                seen = true;
+                break;
+            }
+        }
+
+        if (!seen and inspectOptionalInnerType(param.type_name) == null) return null;
+    }
+
+    return .optional_missing;
 }
 
 fn parseCliAbiValuesPositionalForParams(
@@ -3172,6 +3261,67 @@ test "parse cli abi values for params supports positional optional omission" {
 
     try std.testing.expectEqualStrings("1", parsed.values[0].numeric_text);
     try std.testing.expect(std.meta.activeTag(parsed.values[1]) == .null);
+}
+
+test "resolve cli abi function selects overloads for positional and named specs" {
+    const functions = [_]contract_mod.abi_adapter.FunctionDef{
+        .{
+            .name = "set_user",
+            .opcode = 1,
+            .inputs = &.{
+                .{ .name = "owner", .type_name = "address" },
+            },
+            .outputs = &.{},
+        },
+        .{
+            .name = "set_user",
+            .opcode = 2,
+            .inputs = &.{
+                .{ .name = "owner", .type_name = "address" },
+                .{ .name = "memo", .type_name = "optional<string>" },
+            },
+            .outputs = &.{},
+        },
+        .{
+            .name = "set_admin",
+            .opcode = 3,
+            .inputs = &.{
+                .{ .name = "admin", .type_name = "address" },
+            },
+            .outputs = &.{},
+        },
+        .{
+            .name = "set_admin",
+            .opcode = 4,
+            .inputs = &.{
+                .{ .name = "owner", .type_name = "address" },
+            },
+            .outputs = &.{},
+        },
+    };
+
+    const abi = contract_mod.abi_adapter.AbiInfo{
+        .version = "1.0",
+        .functions = functions[0..],
+        .events = &.{},
+    };
+
+    try std.testing.expectEqual(
+        @as(u32, 1),
+        (try resolveCliAbiFunction(&abi, "set_user", &.{"addr:EQ..."})).opcode.?,
+    );
+    try std.testing.expectEqual(
+        @as(u32, 2),
+        (try resolveCliAbiFunction(&abi, "set_user", &.{ "owner=addr:EQ...", "memo=null" })).opcode.?,
+    );
+    try std.testing.expectEqual(
+        @as(u32, 3),
+        (try resolveCliAbiFunction(&abi, "set_admin", &.{"admin=addr:EQ..."})).opcode.?,
+    );
+    try std.testing.expectError(
+        error.AmbiguousFunctionOverload,
+        resolveCliAbiFunction(&abi, "set_admin", &.{"arg0=addr:EQ..."}),
+    );
 }
 
 test "load cli text alloc supports inline and file specs" {

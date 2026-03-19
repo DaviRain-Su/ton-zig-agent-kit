@@ -300,8 +300,14 @@ pub fn buildFunctionBodyFromAbiAlloc(
     function_name: []const u8,
     values: []const AbiValue,
 ) ![]u8 {
-    const function = findFunction(abi, function_name) orelse return error.FunctionNotFound;
-    return buildFunctionBodyBocAlloc(allocator, function.*, values);
+    const function = try resolveFunctionByValueCount(abi, function_name, values.len);
+    if (function.inputs.len == values.len) {
+        return buildFunctionBodyBocAlloc(allocator, function.*, values);
+    }
+
+    const expanded_values = try expandValuesForFunctionAlloc(allocator, function.*, values);
+    defer allocator.free(expanded_values);
+    return buildFunctionBodyBocAlloc(allocator, function.*, expanded_values);
 }
 
 pub fn buildStackArgsFromFunctionAlloc(
@@ -347,8 +353,14 @@ pub fn buildStackArgsFromAbiAlloc(
     function_name: []const u8,
     values: []const AbiValue,
 ) !OwnedStackArgs {
-    const function = findFunction(abi, function_name) orelse return error.FunctionNotFound;
-    return buildStackArgsFromFunctionAlloc(allocator, function.*, values);
+    const function = try resolveFunctionByValueCount(abi, function_name, values.len);
+    if (function.inputs.len == values.len) {
+        return buildStackArgsFromFunctionAlloc(allocator, function.*, values);
+    }
+
+    const expanded_values = try expandValuesForFunctionAlloc(allocator, function.*, values);
+    defer allocator.free(expanded_values);
+    return buildStackArgsFromFunctionAlloc(allocator, function.*, expanded_values);
 }
 
 pub fn decodeFunctionOutputsJsonAlloc(
@@ -390,6 +402,66 @@ pub fn decodeFunctionOutputsFromAbiJsonAlloc(
 ) ![]u8 {
     const function = findFunction(abi, function_name) orelse return error.FunctionNotFound;
     return decodeFunctionOutputsJsonAlloc(allocator, function.*, stack);
+}
+
+pub fn resolveFunctionByValueCount(
+    abi: *const AbiInfo,
+    function_name: []const u8,
+    value_count: usize,
+) !*const FunctionDef {
+    if (selectorUsesFullSignature(function_name)) {
+        return findFunction(abi, function_name) orelse error.FunctionNotFound;
+    }
+
+    var exact_match: ?*const FunctionDef = null;
+    var exact_count: usize = 0;
+    var optional_match: ?*const FunctionDef = null;
+    var optional_count: usize = 0;
+
+    for (abi.functions) |*function| {
+        if (!std.mem.eql(u8, function.name, function_name)) continue;
+
+        if (function.inputs.len == value_count) {
+            exact_count += 1;
+            if (exact_match == null) exact_match = function;
+            continue;
+        }
+
+        if (functionAcceptsValueCount(function.*, value_count)) {
+            optional_count += 1;
+            if (optional_match == null) optional_match = function;
+        }
+    }
+
+    if (exact_match) |function| {
+        if (exact_count > 1) return error.AmbiguousFunctionOverload;
+        return function;
+    }
+
+    if (optional_match) |function| {
+        if (optional_count > 1) return error.AmbiguousFunctionOverload;
+        return function;
+    }
+
+    return error.FunctionNotFound;
+}
+
+pub fn expandValuesForFunctionAlloc(
+    allocator: std.mem.Allocator,
+    function: FunctionDef,
+    values: []const AbiValue,
+) ![]AbiValue {
+    if (!functionAcceptsValueCount(function, values.len)) return error.InvalidAbiArguments;
+
+    const expanded = try allocator.alloc(AbiValue, function.inputs.len);
+    errdefer allocator.free(expanded);
+
+    @memcpy(expanded[0..values.len], values);
+    for (values.len..function.inputs.len) |idx| {
+        expanded[idx] = .{ .null = {} };
+    }
+
+    return expanded;
 }
 
 const abi_method_candidates = [_][]const u8{
@@ -606,6 +678,17 @@ fn functionInputTypesMatch(params: []const ParamDef, type_list: []const u8) bool
     }
 
     return param_idx == params.len;
+}
+
+fn functionAcceptsValueCount(function: FunctionDef, value_count: usize) bool {
+    if (value_count > function.inputs.len) return false;
+    if (value_count == function.inputs.len) return true;
+
+    for (function.inputs[value_count..]) |param| {
+        if (optionalInnerType(param.type_name) == null) return false;
+    }
+
+    return true;
 }
 
 fn parseFunctionDefsAlloc(allocator: std.mem.Allocator, value: std.json.Value) ![]FunctionDef {
@@ -2596,6 +2679,91 @@ test "abi adapter resolves overloaded functions by full selector" {
 
     var slice = parsed_cell.toSlice();
     try std.testing.expectEqual(@as(u64, 2), try slice.loadUint(32));
+}
+
+test "abi adapter resolves bare overloaded names by value count and fills optional tail args" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "set_flag",
+        \\      "opcode": 7,
+        \\      "inputs": [
+        \\        {"name": "enabled", "type": "bool"}
+        \\      ]
+        \\    },
+        \\    {
+        \\      "name": "set_flag",
+        \\      "opcode": 9,
+        \\      "inputs": [
+        \\        {"name": "enabled", "type": "bool"},
+        \\        {"name": "memo", "type": "optional<string>"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var parsed = try parseAbiInfoJsonAlloc(allocator, json);
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 7), (try resolveFunctionByValueCount(&parsed.abi, "set_flag", 1)).opcode.?);
+    try std.testing.expectEqual(@as(u32, 9), (try resolveFunctionByValueCount(&parsed.abi, "set_flag", 2)).opcode.?);
+    try std.testing.expectError(error.FunctionNotFound, resolveFunctionByValueCount(&parsed.abi, "set_flag", 0));
+}
+
+test "abi adapter fills omitted trailing optional args in body and stack builders" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "set_flag",
+        \\      "opcode": 9,
+        \\      "inputs": [
+        \\        {"name": "enabled", "type": "bool"},
+        \\        {"name": "memo", "type": "optional<string>"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var parsed = try parseAbiInfoJsonAlloc(allocator, json);
+    defer parsed.deinit(allocator);
+
+    const function = try resolveFunctionByValueCount(&parsed.abi, "set_flag", 1);
+    const expanded = try expandValuesForFunctionAlloc(allocator, function.*, &.{
+        .{ .numeric_text = "1" },
+    });
+    defer allocator.free(expanded);
+
+    try std.testing.expectEqual(@as(usize, 2), expanded.len);
+    try std.testing.expect(std.meta.activeTag(expanded[1]) == .null);
+
+    const built = try buildFunctionBodyFromAbiAlloc(allocator, &parsed.abi, "set_flag", &.{
+        .{ .numeric_text = "1" },
+    });
+    defer allocator.free(built);
+
+    const parsed_cell = try boc.deserializeBoc(allocator, built);
+    defer parsed_cell.deinit(allocator);
+
+    var slice = parsed_cell.toSlice();
+    try std.testing.expectEqual(@as(u64, 9), try slice.loadUint(32));
+    try std.testing.expectEqual(@as(u64, 1), try slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 0), try slice.loadUint(1));
+
+    var stack_args = try buildStackArgsFromAbiAlloc(allocator, &parsed.abi, "set_flag", &.{
+        .{ .numeric_text = "1" },
+    });
+    defer stack_args.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), stack_args.args.len);
+    try std.testing.expect(std.meta.activeTag(stack_args.args[1]) == .null);
 }
 
 test "abi adapter builds function body boc from schema" {
