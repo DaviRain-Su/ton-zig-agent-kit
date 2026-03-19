@@ -433,6 +433,83 @@ pub fn decodeFunctionOutputsFromAbiJsonAlloc(
     return decodeFunctionOutputsJsonAlloc(allocator, function.*, stack);
 }
 
+pub fn resolveFunctionByBodyBoc(
+    abi: *const AbiInfo,
+    function_selector: ?[]const u8,
+    body_boc: []const u8,
+) !*const FunctionDef {
+    const opcode = peekBodyOpcodeFromBoc(body_boc) catch null;
+
+    if (function_selector) |selector| {
+        return resolveFunctionSelector(abi, selector, opcode);
+    }
+
+    if (abi.functions.len == 1) return &abi.functions[0];
+
+    if (opcode) |value| {
+        var matched: ?*const FunctionDef = null;
+        var match_count: usize = 0;
+
+        for (abi.functions) |*function| {
+            if (function.opcode != null and function.opcode.? == value) {
+                match_count += 1;
+                if (matched == null) matched = function;
+            }
+        }
+
+        if (matched) |function| {
+            if (match_count > 1) return error.AmbiguousFunctionOverload;
+            return function;
+        }
+    }
+
+    var opcode_less: ?*const FunctionDef = null;
+    var opcode_less_count: usize = 0;
+    for (abi.functions) |*function| {
+        if (function.opcode == null) {
+            opcode_less_count += 1;
+            if (opcode_less == null) opcode_less = function;
+        }
+    }
+
+    if (opcode_less) |function| {
+        if (opcode_less_count > 1) return error.AmbiguousFunctionOverload;
+        return function;
+    }
+
+    return error.FunctionNotFound;
+}
+
+pub fn decodeFunctionBodyJsonAlloc(
+    allocator: std.mem.Allocator,
+    function: FunctionDef,
+    body_boc: []const u8,
+) ![]u8 {
+    const root = try boc.deserializeBoc(allocator, body_boc);
+    defer root.deinit(allocator);
+
+    var slice = root.toSlice();
+    if (function.opcode) |opcode| {
+        const actual = try loadUintDynamic(&slice, 32);
+        if (actual != opcode) return error.InvalidAbiOutputs;
+    }
+
+    const decoded = try decodeBodyFieldsJsonAlloc(allocator, function.inputs, &slice, true);
+    errdefer allocator.free(decoded);
+    if (!slice.empty()) return error.InvalidAbiOutputs;
+    return decoded;
+}
+
+pub fn decodeFunctionBodyFromAbiJsonAlloc(
+    allocator: std.mem.Allocator,
+    abi: *const AbiInfo,
+    function_selector: ?[]const u8,
+    body_boc: []const u8,
+) ![]u8 {
+    const function = try resolveFunctionByBodyBoc(abi, function_selector, body_boc);
+    return decodeFunctionBodyJsonAlloc(allocator, function.*, body_boc);
+}
+
 pub fn resolveEventByBodyBoc(
     abi: *const AbiInfo,
     event_selector: ?[]const u8,
@@ -729,6 +806,45 @@ fn functionMatchesSelector(function: *const FunctionDef, selector: []const u8) b
 
     const type_list = trimmed[open_idx + 1 .. trimmed.len - 1];
     return functionInputTypesMatch(function.inputs, type_list);
+}
+
+fn resolveFunctionSelector(
+    abi: *const AbiInfo,
+    function_selector: []const u8,
+    opcode: ?u32,
+) !*const FunctionDef {
+    if (selectorUsesFullSignature(function_selector)) {
+        return findFunction(abi, function_selector) orelse error.FunctionNotFound;
+    }
+
+    var exact_opcode_match: ?*const FunctionDef = null;
+    var exact_opcode_count: usize = 0;
+    var fallback_match: ?*const FunctionDef = null;
+    var fallback_count: usize = 0;
+
+    for (abi.functions) |*function| {
+        if (!std.mem.eql(u8, function.name, function_selector)) continue;
+
+        fallback_count += 1;
+        if (fallback_match == null) fallback_match = function;
+
+        if (opcode != null and function.opcode != null and function.opcode.? == opcode.?) {
+            exact_opcode_count += 1;
+            if (exact_opcode_match == null) exact_opcode_match = function;
+        }
+    }
+
+    if (exact_opcode_match) |function| {
+        if (exact_opcode_count > 1) return error.AmbiguousFunctionOverload;
+        return function;
+    }
+
+    if (fallback_match) |function| {
+        if (fallback_count > 1) return error.AmbiguousFunctionOverload;
+        return function;
+    }
+
+    return error.FunctionNotFound;
 }
 
 fn eventMatchesSelector(event: *const EventDef, selector: []const u8) bool {
@@ -3282,6 +3398,101 @@ test "abi adapter decodes event body from abi by opcode" {
 
     try std.testing.expectEqualStrings(
         "{\"from\":\"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8\",\"amount\":1234,\"active\":true}",
+        decoded,
+    );
+}
+
+test "abi adapter decodes function body from abi by opcode" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "transfer",
+        \\      "opcode": "0x11223344",
+        \\      "inputs": [
+        \\        {"name": "to", "type": "address"},
+        \\        {"name": "amount", "type": "coins"},
+        \\        {"name": "notify", "type": "bool"}
+        \\      ]
+        \\    },
+        \\    {
+        \\      "name": "burn",
+        \\      "opcode": "0x55667788",
+        \\      "inputs": [
+        \\        {"name": "amount", "type": "coins"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var parsed = try parseAbiInfoJsonAlloc(allocator, json);
+    defer parsed.deinit(allocator);
+
+    const body = try buildFunctionBodyBocAlloc(allocator, parsed.abi.functions[0], &.{
+        .{ .text = "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8" },
+        .{ .uint = 777 },
+        .{ .uint = 1 },
+    });
+    defer allocator.free(body);
+
+    const function = try resolveFunctionByBodyBoc(&parsed.abi, null, body);
+    try std.testing.expectEqualStrings("transfer", function.name);
+
+    const decoded = try decodeFunctionBodyFromAbiJsonAlloc(allocator, &parsed.abi, null, body);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqualStrings(
+        "{\"to\":\"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8\",\"amount\":777,\"notify\":true}",
+        decoded,
+    );
+}
+
+test "abi adapter decodes opcode-less function body by explicit selector" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "set_config",
+        \\      "inputs": [
+        \\        {"name": "enabled", "type": "bool"},
+        \\        {"name": "limit", "type": "uint32"}
+        \\      ]
+        \\    },
+        \\    {
+        \\      "name": "set_config",
+        \\      "inputs": [
+        \\        {"name": "enabled", "type": "bool"},
+        \\        {"name": "owner", "type": "address"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var parsed = try parseAbiInfoJsonAlloc(allocator, json);
+    defer parsed.deinit(allocator);
+
+    const selector = "set_config(bool,uint32)";
+    const function = findFunction(&parsed.abi, selector).?;
+    const body = try buildFunctionBodyBocAlloc(allocator, function.*, &.{
+        .{ .uint = 1 },
+        .{ .uint = 42 },
+    });
+    defer allocator.free(body);
+
+    const resolved = try resolveFunctionByBodyBoc(&parsed.abi, selector, body);
+    try std.testing.expectEqualStrings("uint32", resolved.inputs[1].type_name);
+
+    const decoded = try decodeFunctionBodyFromAbiJsonAlloc(allocator, &parsed.abi, selector, body);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqualStrings(
+        "{\"enabled\":true,\"limit\":42}",
         decoded,
     );
 }

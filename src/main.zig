@@ -168,7 +168,7 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "abi")) {
         if (args.len < 3) {
-            std.debug.print("Usage: ton-zig-agent-kit abi <describe|decode-event>\n", .{});
+            std.debug.print("Usage: ton-zig-agent-kit abi <describe|decode-function|decode-event>\n", .{});
             return;
         }
 
@@ -210,6 +210,40 @@ pub fn main() !void {
                     std.debug.print("Next: ton-zig-agent-kit abi describe <abi_source> <function_name_or_signature>\n", .{});
                 }
             }
+            return;
+        }
+
+        if (std.mem.eql(u8, abi_cmd, "decode-function")) {
+            if (args.len < 5) {
+                std.debug.print("Usage: ton-zig-agent-kit abi decode-function <abi_json|@file|file://|http(s)://|ipfs://|auto:<address>> <body_b64> [function_name_or_signature]\n", .{});
+                return;
+            }
+
+            var loaded = try loadCliAbiSourceAlloc(allocator, args[3]);
+            defer loaded.deinit(allocator);
+
+            const body_text = try loadCliTextAlloc(allocator, args[4]);
+            defer allocator.free(body_text);
+            const body_boc = try decodeBase64FlexibleAlloc(allocator, body_text);
+            defer allocator.free(body_boc);
+
+            const function_selector = if (args.len >= 6) args[5] else null;
+            const function = try contract_mod.abi_adapter.resolveFunctionByBodyBoc(&loaded.abi.abi, function_selector, body_boc);
+            const decoded = try contract_mod.abi_adapter.decodeFunctionBodyJsonAlloc(allocator, function.*, body_boc);
+            defer allocator.free(decoded);
+            const function_ref = try buildAbiFunctionCommandRefAlloc(allocator, &loaded.abi.abi, function.*);
+            defer allocator.free(function_ref);
+
+            std.debug.print("Decoded function body:\n", .{});
+            std.debug.print("  Input source: {s}\n", .{displayAbiSource(args[3])});
+            if (loaded.auto_address) |value| {
+                std.debug.print("  Auto address: {s}\n", .{value});
+            }
+            std.debug.print("  Function: {s}\n", .{function_ref});
+            if (function.opcode) |opcode| {
+                std.debug.print("  Opcode: 0x{X}\n", .{opcode});
+            }
+            std.debug.print("  Decoded payload:\n{s}\n", .{decoded});
             return;
         }
 
@@ -3451,6 +3485,7 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit help                          Show this help\n", .{});
     std.debug.print("  ton-zig-agent-kit version                       Show version\n", .{});
     std.debug.print("  ton-zig-agent-kit abi describe <source|auto:addr> [function]  Describe ABI and show call templates\n", .{});
+    std.debug.print("  ton-zig-agent-kit abi decode-function <source|auto:addr> <body_b64> [function]  Decode an ABI function body\n", .{});
     std.debug.print("  ton-zig-agent-kit abi decode-event <source|auto:addr> <body_b64> [event]  Decode an ABI event body\n", .{});
     std.debug.print("  ton-zig-agent-kit getBalance <address>          Get TON balance\n", .{});
     std.debug.print("  ton-zig-agent-kit runGetMethod <addr> <method> [stack_json]  Call any get method\n", .{});
