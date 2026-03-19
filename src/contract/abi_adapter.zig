@@ -39,6 +39,7 @@ pub const FunctionDef = struct {
 
 pub const EventDef = struct {
     name: []const u8,
+    opcode: ?u32 = null,
     inputs: []const ParamDef,
 };
 
@@ -256,12 +257,40 @@ pub fn findFunction(abi: *const AbiInfo, function_name: []const u8) ?*const Func
     return null;
 }
 
+pub fn findEvent(abi: *const AbiInfo, event_name: []const u8) ?*const EventDef {
+    if (selectorUsesFullSignature(event_name)) {
+        for (abi.events) |*event| {
+            if (eventMatchesSelector(event, event_name)) return event;
+        }
+        return null;
+    }
+
+    for (abi.events) |*event| {
+        if (std.mem.eql(u8, event.name, event_name)) return event;
+    }
+    return null;
+}
+
 pub fn buildFunctionSelectorAlloc(allocator: std.mem.Allocator, function: FunctionDef) ![]u8 {
     var writer = std.io.Writer.Allocating.init(allocator);
     errdefer writer.deinit();
 
     try writer.writer.print("{s}(", .{function.name});
     for (function.inputs, 0..) |param, idx| {
+        if (idx != 0) try writer.writer.writeByte(',');
+        try writer.writer.writeAll(std.mem.trim(u8, param.type_name, " \t\r\n"));
+    }
+    try writer.writer.writeByte(')');
+
+    return try writer.toOwnedSlice();
+}
+
+pub fn buildEventSelectorAlloc(allocator: std.mem.Allocator, event: EventDef) ![]u8 {
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    try writer.writer.print("{s}(", .{event.name});
+    for (event.inputs, 0..) |param, idx| {
         if (idx != 0) try writer.writer.writeByte(',');
         try writer.writer.writeAll(std.mem.trim(u8, param.type_name, " \t\r\n"));
     }
@@ -402,6 +431,68 @@ pub fn decodeFunctionOutputsFromAbiJsonAlloc(
 ) ![]u8 {
     const function = findFunction(abi, function_name) orelse return error.FunctionNotFound;
     return decodeFunctionOutputsJsonAlloc(allocator, function.*, stack);
+}
+
+pub fn resolveEventByBodyBoc(
+    abi: *const AbiInfo,
+    event_selector: ?[]const u8,
+    body_boc: []const u8,
+) !*const EventDef {
+    if (event_selector) |selector| {
+        return resolveEventSelector(abi, selector);
+    }
+
+    if (abi.events.len == 1) return &abi.events[0];
+
+    const opcode = peekBodyOpcodeFromBoc(body_boc) catch null;
+    if (opcode) |value| {
+        var matched: ?*const EventDef = null;
+        var match_count: usize = 0;
+
+        for (abi.events) |*event| {
+            if (event.opcode != null and event.opcode.? == value) {
+                match_count += 1;
+                if (matched == null) matched = event;
+            }
+        }
+
+        if (matched) |event| {
+            if (match_count > 1) return error.AmbiguousEventOverload;
+            return event;
+        }
+    }
+
+    return error.EventNotFound;
+}
+
+pub fn decodeEventBodyJsonAlloc(
+    allocator: std.mem.Allocator,
+    event: EventDef,
+    body_boc: []const u8,
+) ![]u8 {
+    const root = try boc.deserializeBoc(allocator, body_boc);
+    defer root.deinit(allocator);
+
+    var slice = root.toSlice();
+    if (event.opcode) |opcode| {
+        const actual = try loadUintDynamic(&slice, 32);
+        if (actual != opcode) return error.InvalidAbiOutputs;
+    }
+
+    const decoded = try decodeBodyFieldsJsonAlloc(allocator, event.inputs, &slice, true);
+    errdefer allocator.free(decoded);
+    if (!slice.empty()) return error.InvalidAbiOutputs;
+    return decoded;
+}
+
+pub fn decodeEventBodyFromAbiJsonAlloc(
+    allocator: std.mem.Allocator,
+    abi: *const AbiInfo,
+    event_selector: ?[]const u8,
+    body_boc: []const u8,
+) ![]u8 {
+    const event = try resolveEventByBodyBoc(abi, event_selector, body_boc);
+    return decodeEventBodyJsonAlloc(allocator, event.*, body_boc);
 }
 
 pub fn resolveFunctionByValueCount(
@@ -640,6 +731,40 @@ fn functionMatchesSelector(function: *const FunctionDef, selector: []const u8) b
     return functionInputTypesMatch(function.inputs, type_list);
 }
 
+fn eventMatchesSelector(event: *const EventDef, selector: []const u8) bool {
+    const trimmed = std.mem.trim(u8, selector, " \t\r\n");
+    const open_idx = std.mem.indexOfScalar(u8, trimmed, '(') orelse return false;
+    if (trimmed.len == 0 or trimmed[trimmed.len - 1] != ')') return false;
+
+    const name = std.mem.trim(u8, trimmed[0..open_idx], " \t\r\n");
+    if (!std.mem.eql(u8, event.name, name)) return false;
+
+    const type_list = trimmed[open_idx + 1 .. trimmed.len - 1];
+    return functionInputTypesMatch(event.inputs, type_list);
+}
+
+fn resolveEventSelector(abi: *const AbiInfo, event_selector: []const u8) !*const EventDef {
+    if (selectorUsesFullSignature(event_selector)) {
+        return findEvent(abi, event_selector) orelse error.EventNotFound;
+    }
+
+    var matched: ?*const EventDef = null;
+    var match_count: usize = 0;
+
+    for (abi.events) |*event| {
+        if (!std.mem.eql(u8, event.name, event_selector)) continue;
+        match_count += 1;
+        if (matched == null) matched = event;
+    }
+
+    if (matched) |event| {
+        if (match_count > 1) return error.AmbiguousEventOverload;
+        return event;
+    }
+
+    return error.EventNotFound;
+}
+
 fn functionInputTypesMatch(params: []const ParamDef, type_list: []const u8) bool {
     var idx: usize = 0;
     var param_idx: usize = 0;
@@ -767,6 +892,7 @@ fn parseEventDefObjectAlloc(allocator: std.mem.Allocator, object: std.json.Objec
 
     return .{
         .name = name,
+        .opcode = try parseOptionalOpcode(object),
         .inputs = inputs,
     };
 }
@@ -2235,6 +2361,378 @@ fn optionalInnerType(type_name: []const u8) ?[]const u8 {
     return null;
 }
 
+fn peekBodyOpcodeFromBoc(body_boc: []const u8) !u32 {
+    const root = try boc.deserializeBoc(std.heap.page_allocator, body_boc);
+    defer root.deinit(std.heap.page_allocator);
+
+    var slice = root.toSlice();
+    return @intCast(try loadUintDynamic(&slice, 32));
+}
+
+fn decodeBodyFieldsJsonAlloc(
+    allocator: std.mem.Allocator,
+    params: []const ParamDef,
+    slice: *cell.Slice,
+    allow_tail_variable: bool,
+) ![]u8 {
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    try writeDecodedBodyFieldsJson(&writer.writer, allocator, params, slice, allow_tail_variable);
+    return try writer.toOwnedSlice();
+}
+
+fn writeDecodedBodyFieldsJson(
+    writer: anytype,
+    allocator: std.mem.Allocator,
+    params: []const ParamDef,
+    slice: *cell.Slice,
+    allow_tail_variable: bool,
+) anyerror!void {
+    if (allParamNamesMissing(params)) {
+        try writer.writeByte('[');
+        for (params, 0..) |param, idx| {
+            if (idx != 0) try writer.writeByte(',');
+            try writeDecodedBodyParamJson(
+                writer,
+                allocator,
+                param,
+                slice,
+                allow_tail_variable and idx + 1 == params.len,
+            );
+        }
+        try writer.writeByte(']');
+        return;
+    }
+
+    try writer.writeByte('{');
+    for (params, 0..) |param, idx| {
+        if (idx != 0) try writer.writeByte(',');
+        try writeDecodedFieldName(writer, param.name, idx);
+        try writer.writeByte(':');
+        try writeDecodedBodyParamJson(
+            writer,
+            allocator,
+            param,
+            slice,
+            allow_tail_variable and idx + 1 == params.len,
+        );
+    }
+    try writer.writeByte('}');
+}
+
+fn writeDecodedBodyParamJson(
+    writer: anytype,
+    allocator: std.mem.Allocator,
+    param: ParamDef,
+    slice: *cell.Slice,
+    is_last: bool,
+) anyerror!void {
+    if (optionalInnerType(param.type_name)) |inner_type| {
+        const present = try loadUintDynamic(slice, 1);
+        if (present == 0) {
+            try writer.writeAll("null");
+            return;
+        }
+
+        return writeDecodedBodyParamJson(writer, allocator, paramWithType(param, inner_type), slice, is_last);
+    }
+
+    if (arrayInnerType(param.type_name)) |inner_type| {
+        const inner_param = paramWithType(param, inner_type);
+        const length = try loadUintDynamic(slice, abi_array_length_bits);
+        if (!paramIsBodySelfDelimited(inner_param)) {
+            if (!is_last or length > 1) return error.UnsupportedAbiType;
+        }
+
+        try writer.writeByte('[');
+        var idx: u64 = 0;
+        while (idx < length) : (idx += 1) {
+            if (idx != 0) try writer.writeByte(',');
+            try writeDecodedBodyParamJson(
+                writer,
+                allocator,
+                inner_param,
+                slice,
+                is_last and idx + 1 == length,
+            );
+        }
+        try writer.writeByte(']');
+        return;
+    }
+
+    if (isCompositeParam(param)) {
+        return writeDecodedBodyFieldsJson(writer, allocator, param.components, slice, is_last);
+    }
+
+    return writeDecodedBodyJsonType(writer, allocator, param.type_name, slice, is_last);
+}
+
+fn writeDecodedBodyJsonType(
+    writer: anytype,
+    allocator: std.mem.Allocator,
+    type_name: []const u8,
+    slice: *cell.Slice,
+    is_last: bool,
+) anyerror!void {
+    if (std.mem.eql(u8, type_name, "bool")) {
+        const value = (try loadUintDynamic(slice, 1)) != 0;
+        try writer.writeAll(if (value) "true" else "false");
+        return;
+    }
+
+    if (std.mem.eql(u8, type_name, "coins")) {
+        try writer.print("{d}", .{try slice.loadCoins()});
+        return;
+    }
+
+    if (std.mem.startsWith(u8, type_name, "uint")) {
+        const bits = try parseSizedTypeBits(type_name, "uint", 64);
+        if (bits <= 64) {
+            try writer.print("{d}", .{try loadUintDynamic(slice, bits)});
+            return;
+        }
+
+        const text = try decodeUnsignedBodyBitsTextAlloc(allocator, slice, bits);
+        defer allocator.free(text);
+        try writeJsonString(writer, text);
+        return;
+    }
+
+    if (std.mem.startsWith(u8, type_name, "int")) {
+        const bits = try parseSizedTypeBits(type_name, "int", 64);
+        if (bits <= 64) {
+            try writer.print("{d}", .{try loadIntDynamic(slice, bits)});
+            return;
+        }
+
+        const text = try decodeSignedBodyBitsTextAlloc(allocator, slice, bits);
+        defer allocator.free(text);
+        try writeJsonString(writer, text);
+        return;
+    }
+
+    if (std.mem.eql(u8, type_name, "address")) {
+        const addr = try loadAddressFromBody(slice);
+        if (addr) |value| {
+            const raw = try value.toRawAlloc(allocator);
+            defer allocator.free(raw);
+            try writeJsonString(writer, raw);
+        } else {
+            try writer.writeAll("null");
+        }
+        return;
+    }
+
+    if (fixedBytesLength(type_name)) |byte_len| {
+        const bytes = try loadBitsRightAlignedAlloc(allocator, slice, @intCast(byte_len * 8));
+        defer allocator.free(bytes);
+        const encoded = try base64EncodeAlloc(allocator, bytes);
+        defer allocator.free(encoded);
+        try writeJsonString(writer, encoded);
+        return;
+    }
+
+    if (std.mem.eql(u8, type_name, "string")) {
+        if (!is_last) return error.UnsupportedAbiType;
+        const bytes = try loadRemainingBodyBytesAlloc(allocator, slice);
+        defer allocator.free(bytes);
+        if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidAbiOutputs;
+        try writeJsonString(writer, bytes);
+        return;
+    }
+
+    if (std.mem.eql(u8, type_name, "bytes")) {
+        if (!is_last) return error.UnsupportedAbiType;
+        const bytes = try loadRemainingBodyBytesAlloc(allocator, slice);
+        defer allocator.free(bytes);
+        const encoded = try base64EncodeAlloc(allocator, bytes);
+        defer allocator.free(encoded);
+        try writeJsonString(writer, encoded);
+        return;
+    }
+
+    if (isInlineCellLikeAbiType(type_name) or isRefCellLikeAbiType(type_name)) {
+        if (!is_last) return error.UnsupportedAbiType;
+        const body = try buildRemainingBodyBocAlloc(allocator, slice);
+        defer allocator.free(body);
+        const encoded = try base64EncodeAlloc(allocator, body);
+        defer allocator.free(encoded);
+        try writeJsonString(writer, encoded);
+        return;
+    }
+
+    return error.UnsupportedAbiType;
+}
+
+fn paramIsBodySelfDelimited(param: ParamDef) bool {
+    if (optionalInnerType(param.type_name)) |inner_type| {
+        return paramIsBodySelfDelimited(paramWithType(param, inner_type));
+    }
+
+    if (arrayInnerType(param.type_name)) |inner_type| {
+        return paramIsBodySelfDelimited(paramWithType(param, inner_type));
+    }
+
+    if (isCompositeParam(param)) {
+        for (param.components) |component| {
+            if (!paramIsBodySelfDelimited(component)) return false;
+        }
+        return true;
+    }
+
+    if (std.mem.eql(u8, param.type_name, "string") or std.mem.eql(u8, param.type_name, "bytes")) {
+        return false;
+    }
+
+    if (isInlineCellLikeAbiType(param.type_name) or isRefCellLikeAbiType(param.type_name)) {
+        return false;
+    }
+
+    return true;
+}
+
+fn loadUintDynamic(slice: *cell.Slice, bits: u16) !u64 {
+    if (bits > 64) return error.UnsupportedAbiType;
+    if (slice.remainingBits() < bits) return error.NotEnoughData;
+    if (bits == 0) return 0;
+
+    var result: u64 = 0;
+    var idx: u16 = 0;
+    while (idx < bits) : (idx += 1) {
+        result = (result << 1) | try slice.loadUint(1);
+    }
+    return result;
+}
+
+fn loadIntDynamic(slice: *cell.Slice, bits: u16) !i64 {
+    if (bits > 64) return error.UnsupportedAbiType;
+    const value = try loadUintDynamic(slice, bits);
+    if (bits == 0) return 0;
+
+    const sign_bit = @as(u64, 1) << @intCast(bits - 1);
+    if ((value & sign_bit) == 0) return @intCast(value);
+    if (bits == 64) return @bitCast(value);
+    return @bitCast(value | (@as(u64, 0xFFFFFFFFFFFFFFFF) << @intCast(bits)));
+}
+
+fn loadBitsRightAlignedAlloc(allocator: std.mem.Allocator, slice: *cell.Slice, bits: u16) ![]u8 {
+    if (slice.remainingBits() < bits) return error.NotEnoughData;
+
+    const byte_len: usize = @intCast(@divTrunc(bits + 7, 8));
+    const out = try allocator.alloc(u8, byte_len);
+    errdefer allocator.free(out);
+    @memset(out, 0);
+
+    if (bits == 0) return out;
+
+    const padding_bits: usize = byte_len * 8 - bits;
+    var idx: usize = 0;
+    while (idx < bits) : (idx += 1) {
+        const bit = try slice.loadUint(1);
+        const abs_idx = padding_bits + idx;
+        out[abs_idx / 8] |= @as(u8, @intCast(bit)) << @as(u3, @intCast(7 - (abs_idx % 8)));
+    }
+
+    return out;
+}
+
+fn trimLeadingZeroBytesView(bytes: []const u8) []const u8 {
+    var start: usize = 0;
+    while (start < bytes.len and bytes[start] == 0) : (start += 1) {}
+    return bytes[start..];
+}
+
+fn decodeUnsignedBodyBitsTextAlloc(allocator: std.mem.Allocator, slice: *cell.Slice, bits: u16) ![]u8 {
+    const bytes = try loadBitsRightAlignedAlloc(allocator, slice, bits);
+    defer allocator.free(bytes);
+    return formatTonNumTextAlloc(allocator, trimLeadingZeroBytesView(bytes), false);
+}
+
+fn decodeSignedBodyBitsTextAlloc(allocator: std.mem.Allocator, slice: *cell.Slice, bits: u16) ![]u8 {
+    const bytes = try loadBitsRightAlignedAlloc(allocator, slice, bits);
+    defer allocator.free(bytes);
+    if (bits == 0) return allocator.dupe(u8, "0x0");
+
+    const padding_bits: u16 = @intCast(bytes.len * 8 - bits);
+    const sign_mask = @as(u8, 1) << @as(u3, @intCast(7 - padding_bits));
+    if ((bytes[0] & sign_mask) == 0) {
+        return formatTonNumTextAlloc(allocator, trimLeadingZeroBytesView(bytes), false);
+    }
+
+    const magnitude = try decodeSignedMagnitudeAlloc(allocator, bytes, bits);
+    defer allocator.free(magnitude);
+    return formatTonNumTextAlloc(allocator, magnitude, true);
+}
+
+fn decodeSignedMagnitudeAlloc(allocator: std.mem.Allocator, bytes: []const u8, bits: u16) ![]u8 {
+    const out = try allocator.dupe(u8, bytes);
+    errdefer allocator.free(out);
+    if (out.len == 0) return out;
+
+    const padding_bits: u16 = @intCast(out.len * 8 - bits);
+    const leading_mask: u8 = if (padding_bits == 0)
+        0xFF
+    else
+        @as(u8, @intCast(@as(u16, 0xFF) >> @intCast(padding_bits)));
+
+    out[0] &= leading_mask;
+    out[0] = ~out[0] & leading_mask;
+    for (out[1..]) |*byte| {
+        byte.* = ~byte.*;
+    }
+
+    var carry: u16 = 1;
+    var idx = out.len;
+    while (idx > 0 and carry != 0) {
+        idx -= 1;
+        const sum = @as(u16, out[idx]) + carry;
+        out[idx] = @intCast(sum & 0xFF);
+        carry = sum >> 8;
+    }
+    out[0] &= leading_mask;
+
+    const trimmed = try dupeTrimmedBytes(allocator, out);
+    allocator.free(out);
+    return trimmed;
+}
+
+fn loadAddressFromBody(slice: *cell.Slice) !?types.Address {
+    const tag = try loadUintDynamic(slice, 2);
+    if (tag == 0) return null;
+    if (tag != 0b10) return error.InvalidAbiOutputs;
+
+    const has_anycast = try loadUintDynamic(slice, 1);
+    if (has_anycast != 0) return error.UnsupportedAddress;
+
+    var raw: [32]u8 = undefined;
+    const workchain = try slice.loadInt8();
+    for (&raw) |*byte| {
+        byte.* = try slice.loadUint8();
+    }
+
+    return .{
+        .raw = raw,
+        .workchain = workchain,
+    };
+}
+
+fn loadRemainingBodyBytesAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) ![]u8 {
+    if (slice.remainingRefs() != 0) return error.UnsupportedAbiType;
+    if (slice.remainingBits() % 8 != 0) return error.InvalidAbiOutputs;
+    return loadBitsRightAlignedAlloc(allocator, slice, slice.remainingBits());
+}
+
+fn buildRemainingBodyBocAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) ![]u8 {
+    var builder = cell.Builder.init();
+    try builder.storeSlice(slice);
+
+    const value = try builder.toCell(allocator);
+    defer value.deinit(allocator);
+
+    return boc.serializeBoc(allocator, value);
+}
+
 fn writeDecodedOutputJson(
     writer: anytype,
     allocator: std.mem.Allocator,
@@ -2688,6 +3186,7 @@ test "abi adapter parses abi document json and finds function" {
         \\  "events": [
         \\    {
         \\      "name": "Transfer",
+        \\      "opcode": "0x11223344",
         \\      "inputs": [
         \\        {"name": "from", "type": "address"}
         \\      ]
@@ -2703,8 +3202,88 @@ test "abi adapter parses abi document json and finds function" {
     try std.testing.expectEqual(@as(usize, 2), parsed.abi.functions.len);
     try std.testing.expectEqual(@as(usize, 1), parsed.abi.events.len);
     try std.testing.expectEqualStrings("Transfer", parsed.abi.events[0].name);
+    try std.testing.expectEqual(@as(u32, 0x11223344), parsed.abi.events[0].opcode.?);
     try std.testing.expectEqual(@as(u32, 0x0f8a7ea5), findFunction(&parsed.abi, "transfer").?.opcode.?);
     try std.testing.expect(findFunction(&parsed.abi, "missing") == null);
+}
+
+test "abi adapter builds event selector and resolves event by signature" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "events": [
+        \\    {
+        \\      "name": "Transfer",
+        \\      "opcode": "0x11223344",
+        \\      "inputs": [
+        \\        {"name": "from", "type": "address"},
+        \\        {"name": "amount", "type": "coins"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var parsed = try parseAbiInfoJsonAlloc(allocator, json);
+    defer parsed.deinit(allocator);
+
+    const selector = try buildEventSelectorAlloc(allocator, parsed.abi.events[0]);
+    defer allocator.free(selector);
+
+    try std.testing.expectEqualStrings("Transfer(address,coins)", selector);
+    try std.testing.expectEqualStrings(
+        "Transfer",
+        findEvent(&parsed.abi, "Transfer(address,coins)").?.name,
+    );
+}
+
+test "abi adapter decodes event body from abi by opcode" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "events": [
+        \\    {
+        \\      "name": "Transfer",
+        \\      "opcode": "0x11223344",
+        \\      "inputs": [
+        \\        {"name": "from", "type": "address"},
+        \\        {"name": "amount", "type": "coins"},
+        \\        {"name": "active", "type": "bool"}
+        \\      ]
+        \\    },
+        \\    {
+        \\      "name": "Burn",
+        \\      "opcode": "0x55667788",
+        \\      "inputs": [
+        \\        {"name": "amount", "type": "coins"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var parsed = try parseAbiInfoJsonAlloc(allocator, json);
+    defer parsed.deinit(allocator);
+
+    var builder = cell.Builder.init();
+    try builder.storeUint(0x11223344, 32);
+    try builder.storeAddress(@as([]const u8, "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8"));
+    try builder.storeCoins(1234);
+    try builder.storeUint(1, 1);
+    const body = try builder.toCell(allocator);
+    defer body.deinit(allocator);
+    const body_boc = try boc.serializeBoc(allocator, body);
+    defer allocator.free(body_boc);
+
+    const decoded = try decodeEventBodyFromAbiJsonAlloc(allocator, &parsed.abi, null, body_boc);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqualStrings(
+        "{\"from\":\"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8\",\"amount\":1234,\"active\":true}",
+        decoded,
+    );
 }
 
 test "abi adapter resolves overloaded functions by full selector" {
