@@ -47,6 +47,34 @@ pub const DecodedBodyResult = struct {
     error_message: ?[]const u8 = null,
 };
 
+pub const MessageResult = struct {
+    hash: []const u8,
+    source: ?[]const u8,
+    destination: ?[]const u8,
+    value: u64,
+    body_bits: u16,
+    body_refs: u8,
+    body_boc: ?[]const u8,
+    raw_body_utf8: ?[]const u8,
+    raw_body_base64: ?[]const u8,
+    decoded_body: ?DecodedBodyResult,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.hash.len > 0) allocator.free(self.hash);
+        if (self.source) |value| allocator.free(value);
+        if (self.destination) |value| allocator.free(value);
+        if (self.body_boc) |value| allocator.free(value);
+        if (self.raw_body_utf8) |value| allocator.free(value);
+        if (self.raw_body_base64) |value| allocator.free(value);
+        if (self.decoded_body) |*value| {
+            if (value.address.len > 0) allocator.free(value.address);
+            if (value.selector.len > 0) allocator.free(value.selector);
+            if (value.decoded_json.len > 0) allocator.free(value.decoded_json);
+        }
+        self.* = undefined;
+    }
+};
+
 pub const AddressResult = struct {
     raw_address: []const u8,
     user_friendly_address: []const u8,
@@ -87,6 +115,44 @@ pub const TxResult = struct {
     status: TxStatus,
     success: bool,
     error_message: ?[]const u8 = null,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.hash.len > 0) allocator.free(self.hash);
+        if (self.from) |value| allocator.free(value);
+        if (self.to) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
+pub const TransactionListResult = struct {
+    address: []const u8,
+    items: []TxResult,
+    success: bool,
+    error_message: ?[]const u8 = null,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        for (self.items) |*item| item.deinit(allocator);
+        if (self.items.len > 0) allocator.free(self.items);
+        self.* = undefined;
+    }
+};
+
+pub const TransactionDetailResult = struct {
+    hash: []const u8,
+    lt: i64,
+    timestamp: i64,
+    in_message: ?MessageResult,
+    out_messages: []MessageResult,
+    success: bool,
+    error_message: ?[]const u8 = null,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.hash.len > 0) allocator.free(self.hash);
+        if (self.in_message) |*msg| msg.deinit(allocator);
+        for (self.out_messages) |*msg| msg.deinit(allocator);
+        if (self.out_messages.len > 0) allocator.free(self.out_messages);
+        self.* = undefined;
+    }
 };
 
 pub const TxStatus = enum {
@@ -176,6 +242,8 @@ pub const ToolResponse = union(enum) {
     invoice: InvoiceResult,
     verify: VerifyResult,
     transaction: TxResult,
+    transaction_list: TransactionListResult,
+    transaction_detail: TransactionDetailResult,
     jetton_balance: JettonBalanceResult,
     jetton_info: JettonInfoResult,
     jetton_wallet_address: JettonWalletAddressResult,

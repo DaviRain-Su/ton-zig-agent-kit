@@ -122,6 +122,28 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             return out;
         }
 
+        fn encodeBase64Alloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+            const encoded_len = std.base64.standard.Encoder.calcSize(bytes.len);
+            const out = try allocator.alloc(u8, encoded_len);
+            errdefer allocator.free(out);
+            _ = std.base64.standard.Encoder.encode(out, bytes);
+            return out;
+        }
+
+        fn freeDecodedBodyAlloc(allocator: std.mem.Allocator, decoded: *tools_types.DecodedBodyResult) void {
+            if (decoded.address.len > 0) allocator.free(decoded.address);
+            if (decoded.selector.len > 0) allocator.free(decoded.selector);
+            if (decoded.decoded_json.len > 0) allocator.free(decoded.decoded_json);
+            decoded.* = undefined;
+        }
+
+        fn formatOptionalAddressAlloc(self: *@This(), maybe_addr: ?core_types.Address) !?[]u8 {
+            if (maybe_addr) |addr| {
+                return try address_mod.formatRaw(self.allocator, &addr);
+            }
+            return null;
+        }
+
         fn decodedBodyError(
             address: []const u8,
             kind: tools_types.DecodedBodyKind,
@@ -133,6 +155,245 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 .selector = "",
                 .opcode = null,
                 .decoded_json = "",
+                .success = false,
+                .error_message = error_message,
+            };
+        }
+
+        fn tryDecodeMessageFunctionAtAlloc(
+            self: *@This(),
+            owned_contract_address: []u8,
+            body_boc: []const u8,
+        ) ?tools_types.DecodedBodyResult {
+            var abi = abi_adapter.queryAbiDocumentAlloc(self.client, owned_contract_address) catch {
+                self.allocator.free(owned_contract_address);
+                return null;
+            } orelse {
+                self.allocator.free(owned_contract_address);
+                return null;
+            };
+            defer abi.deinit(self.allocator);
+
+            const function = abi_adapter.resolveFunctionByBodyBoc(&abi.abi, null, body_boc) catch {
+                self.allocator.free(owned_contract_address);
+                return null;
+            };
+
+            const selector = abi_adapter.buildFunctionSelectorAlloc(self.allocator, function.*) catch {
+                self.allocator.free(owned_contract_address);
+                return null;
+            };
+
+            const decoded_json = abi_adapter.decodeFunctionBodyJsonAlloc(self.allocator, function.*, body_boc) catch {
+                self.allocator.free(selector);
+                self.allocator.free(owned_contract_address);
+                return null;
+            };
+
+            return .{
+                .address = owned_contract_address,
+                .kind = .function,
+                .selector = selector,
+                .opcode = function.opcode,
+                .decoded_json = decoded_json,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
+        fn tryDecodeMessageEventAtAlloc(
+            self: *@This(),
+            owned_contract_address: []u8,
+            body_boc: []const u8,
+        ) ?tools_types.DecodedBodyResult {
+            var abi = abi_adapter.queryAbiDocumentAlloc(self.client, owned_contract_address) catch {
+                self.allocator.free(owned_contract_address);
+                return null;
+            } orelse {
+                self.allocator.free(owned_contract_address);
+                return null;
+            };
+            defer abi.deinit(self.allocator);
+
+            const event = abi_adapter.resolveEventByBodyBoc(&abi.abi, null, body_boc) catch {
+                self.allocator.free(owned_contract_address);
+                return null;
+            };
+
+            const selector = abi_adapter.buildEventSelectorAlloc(self.allocator, event.*) catch {
+                self.allocator.free(owned_contract_address);
+                return null;
+            };
+
+            const decoded_json = abi_adapter.decodeEventBodyJsonAlloc(self.allocator, event.*, body_boc) catch {
+                self.allocator.free(selector);
+                self.allocator.free(owned_contract_address);
+                return null;
+            };
+
+            return .{
+                .address = owned_contract_address,
+                .kind = .event,
+                .selector = selector,
+                .opcode = event.opcode,
+                .decoded_json = decoded_json,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
+        fn tryDecodeMessageBodyAutoAlloc(
+            self: *@This(),
+            msg: *const core_types.Message,
+        ) ?tools_types.DecodedBodyResult {
+            const body = msg.body orelse return null;
+            const body_boc = boc.serializeBoc(self.allocator, body) catch return null;
+            defer self.allocator.free(body_boc);
+
+            if (msg.destination) |addr| {
+                const raw = address_mod.formatRaw(self.allocator, &addr) catch return null;
+                if (self.tryDecodeMessageFunctionAtAlloc(raw, body_boc)) |decoded| {
+                    return decoded;
+                }
+            }
+
+            if (msg.source) |addr| {
+                const raw = address_mod.formatRaw(self.allocator, &addr) catch return null;
+                if (self.tryDecodeMessageEventAtAlloc(raw, body_boc)) |decoded| {
+                    return decoded;
+                }
+            }
+
+            return null;
+        }
+
+        fn buildMessageResultAlloc(self: *@This(), msg: *const core_types.Message) !tools_types.MessageResult {
+            const hash = try self.allocator.dupe(u8, msg.hash);
+            errdefer self.allocator.free(hash);
+
+            const source = try self.formatOptionalAddressAlloc(msg.source);
+            errdefer if (source) |value| self.allocator.free(value);
+
+            const destination = try self.formatOptionalAddressAlloc(msg.destination);
+            errdefer if (destination) |value| self.allocator.free(value);
+
+            const body_boc = if (msg.body) |body| blk: {
+                const serialized = try boc.serializeBoc(self.allocator, body);
+                defer self.allocator.free(serialized);
+                break :blk try encodeBase64Alloc(self.allocator, serialized);
+            } else null;
+            errdefer if (body_boc) |value| self.allocator.free(value);
+
+            const raw_body_utf8 = if (msg.raw_body.len > 0 and std.unicode.utf8ValidateSlice(msg.raw_body))
+                try self.allocator.dupe(u8, msg.raw_body)
+            else
+                null;
+            errdefer if (raw_body_utf8) |value| self.allocator.free(value);
+
+            const raw_body_base64 = if (msg.raw_body.len > 0 and !std.unicode.utf8ValidateSlice(msg.raw_body))
+                try encodeBase64Alloc(self.allocator, msg.raw_body)
+            else
+                null;
+            errdefer if (raw_body_base64) |value| self.allocator.free(value);
+
+            var decoded_body = self.tryDecodeMessageBodyAutoAlloc(msg);
+            errdefer if (decoded_body) |*value| freeDecodedBodyAlloc(self.allocator, value);
+
+            return .{
+                .hash = hash,
+                .source = source,
+                .destination = destination,
+                .value = msg.value,
+                .body_bits = if (msg.body) |body| body.bit_len else 0,
+                .body_refs = if (msg.body) |body| body.ref_cnt else 0,
+                .body_boc = body_boc,
+                .raw_body_utf8 = raw_body_utf8,
+                .raw_body_base64 = raw_body_base64,
+                .decoded_body = decoded_body,
+            };
+        }
+
+        fn buildTxSummaryResultAlloc(self: *@This(), tx: *const core_types.Transaction) !tools_types.TxResult {
+            const hash = try self.allocator.dupe(u8, tx.hash);
+            errdefer self.allocator.free(hash);
+
+            const from = if (tx.in_msg) |msg|
+                try self.formatOptionalAddressAlloc(msg.source)
+            else
+                null;
+            errdefer if (from) |value| self.allocator.free(value);
+
+            const to = if (tx.in_msg) |msg|
+                try self.formatOptionalAddressAlloc(msg.destination)
+            else
+                null;
+            errdefer if (to) |value| self.allocator.free(value);
+
+            return .{
+                .hash = hash,
+                .lt = tx.lt,
+                .timestamp = tx.timestamp,
+                .from = from,
+                .to = to,
+                .value = if (tx.in_msg) |msg| msg.value else 0,
+                .status = .confirmed,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
+        fn buildTransactionDetailResultAlloc(self: *@This(), tx: *const core_types.Transaction) !tools_types.TransactionDetailResult {
+            const hash = try self.allocator.dupe(u8, tx.hash);
+            errdefer self.allocator.free(hash);
+
+            const in_message = if (tx.in_msg) |msg|
+                try self.buildMessageResultAlloc(msg)
+            else
+                null;
+            errdefer if (in_message) |value| {
+                var owned = value;
+                owned.deinit(self.allocator);
+            };
+
+            const out_messages = try self.allocator.alloc(tools_types.MessageResult, tx.out_msgs.len);
+            var built: usize = 0;
+            errdefer {
+                for (out_messages[0..built]) |*msg| msg.deinit(self.allocator);
+                if (out_messages.len > 0) self.allocator.free(out_messages);
+            }
+
+            for (tx.out_msgs, 0..) |msg, idx| {
+                out_messages[idx] = try self.buildMessageResultAlloc(msg);
+                built += 1;
+            }
+
+            return .{
+                .hash = hash,
+                .lt = tx.lt,
+                .timestamp = tx.timestamp,
+                .in_message = in_message,
+                .out_messages = out_messages,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
+        fn transactionListError(address: []const u8, error_message: []const u8) tools_types.TransactionListResult {
+            return .{
+                .address = address,
+                .items = &.{},
+                .success = false,
+                .error_message = error_message,
+            };
+        }
+
+        fn transactionDetailError(lt: i64, error_message: []const u8) tools_types.TransactionDetailResult {
+            return .{
+                .hash = "",
+                .lt = lt,
+                .timestamp = 0,
+                .in_message = null,
+                .out_messages = &.{},
                 .success = false,
                 .error_message = error_message,
             };
@@ -289,6 +550,45 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 .decoded_json = decoded_json,
                 .success = true,
                 .error_message = null,
+            };
+        }
+
+        /// List recent transactions for an address using the current provider path.
+        pub fn getTransactions(self: *@This(), account_address: []const u8, limit: u32) !tools_types.TransactionListResult {
+            const txs = self.client.getTransactions(account_address, limit) catch |err| {
+                return transactionListError(account_address, @errorName(err));
+            };
+            defer self.client.freeTransactions(txs);
+
+            const items = try self.allocator.alloc(tools_types.TxResult, txs.len);
+            var built: usize = 0;
+            errdefer {
+                for (items[0..built]) |*item| item.deinit(self.allocator);
+                if (items.len > 0) self.allocator.free(items);
+            }
+
+            for (txs, 0..) |*tx, idx| {
+                items[idx] = try self.buildTxSummaryResultAlloc(tx);
+                built += 1;
+            }
+
+            return .{
+                .address = account_address,
+                .items = items,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
+        /// Lookup one transaction and best-effort decode its message bodies via ABI discovery.
+        pub fn lookupTransaction(self: *@This(), lt: i64, hash: []const u8) !tools_types.TransactionDetailResult {
+            var tx = (self.client.lookupTx(lt, hash) catch |err| {
+                return transactionDetailError(lt, @errorName(err));
+            }) orelse return transactionDetailError(lt, "NotFound");
+            defer self.client.freeTransaction(&tx);
+
+            return self.buildTransactionDetailResultAlloc(&tx) catch |err| {
+                return transactionDetailError(lt, @errorName(err));
             };
         }
 
@@ -1561,9 +1861,12 @@ pub const SendResult = tools_types.SendResult;
 pub const RunMethodResult = tools_types.RunMethodResult;
 pub const DecodedBodyKind = tools_types.DecodedBodyKind;
 pub const DecodedBodyResult = tools_types.DecodedBodyResult;
+pub const MessageResult = tools_types.MessageResult;
 pub const InvoiceResult = tools_types.InvoiceResult;
 pub const VerifyResult = tools_types.VerifyResult;
 pub const TxResult = tools_types.TxResult;
+pub const TransactionListResult = tools_types.TransactionListResult;
+pub const TransactionDetailResult = tools_types.TransactionDetailResult;
 pub const JettonBalanceResult = tools_types.JettonBalanceResult;
 pub const JettonInfoResult = tools_types.JettonInfoResult;
 pub const JettonWalletAddressResult = tools_types.JettonWalletAddressResult;
@@ -1952,11 +2255,235 @@ test "agent tools decodeEventBodyAuto discovers abi and decodes event body" {
     try std.testing.expectEqualStrings("{\"amount\":99,\"active\":true}", result.decoded_json);
 }
 
+test "agent tools getTransactions returns summary results" {
+    const allocator = std.testing.allocator;
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+
+        fn freeMessage(self: *@This(), msg: *core_types.Message) void {
+            if (msg.hash.len > 0) self.allocator.free(msg.hash);
+            if (msg.raw_body.len > 0) self.allocator.free(msg.raw_body);
+            if (msg.body) |body| body.deinit(self.allocator);
+            self.allocator.destroy(msg);
+        }
+
+        pub fn getTransactions(self: *@This(), addr: []const u8, limit: u32) ![]core_types.Transaction {
+            _ = addr;
+            _ = limit;
+
+            const txs = try self.allocator.alloc(core_types.Transaction, 1);
+            errdefer self.allocator.free(txs);
+
+            const in_msg = try self.allocator.create(core_types.Message);
+            errdefer self.allocator.destroy(in_msg);
+
+            in_msg.* = .{
+                .hash = try self.allocator.dupe(u8, "msg-summary"),
+                .source = try address_mod.parseAddress("0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8"),
+                .destination = try address_mod.parseAddress("EQCD39VS5jcptHL8vMjEXrzGaRcCVYto7HUn4bpAOg8xqB2N"),
+                .value = 777,
+                .body = null,
+                .raw_body = &.{},
+            };
+
+            txs[0] = .{
+                .hash = try self.allocator.dupe(u8, "tx-summary"),
+                .lt = 42,
+                .timestamp = 99,
+                .in_msg = in_msg,
+                .out_msgs = &.{},
+            };
+            return txs;
+        }
+
+        pub fn freeTransactions(self: *@This(), txs: []core_types.Transaction) void {
+            for (txs) |*tx| self.freeTransaction(tx);
+            if (txs.len > 0) self.allocator.free(txs);
+        }
+
+        pub fn freeTransaction(self: *@This(), tx: *core_types.Transaction) void {
+            if (tx.hash.len > 0) self.allocator.free(tx.hash);
+            if (tx.in_msg) |msg| self.freeMessage(msg);
+            if (tx.out_msgs.len > 0) self.allocator.free(tx.out_msgs);
+            tx.* = undefined;
+        }
+    };
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    var client = FakeClient{ .allocator = allocator };
+    var tools = FakeTools.init(allocator, &client, .{ .rpc_url = "https://example.invalid" });
+
+    var result = try tools.getTransactions("0:1111111111111111111111111111111111111111111111111111111111111111", 5);
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqual(@as(usize, 1), result.items.len);
+    try std.testing.expectEqualStrings("tx-summary", result.items[0].hash);
+    try std.testing.expectEqual(@as(i64, 42), result.items[0].lt);
+    try std.testing.expectEqualStrings(
+        "0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8",
+        result.items[0].from.?,
+    );
+    try std.testing.expectEqualStrings(
+        "0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8",
+        result.items[0].to.?,
+    );
+    try std.testing.expectEqual(@as(u64, 777), result.items[0].value);
+    try std.testing.expectEqual(tools_types.TxStatus.confirmed, result.items[0].status);
+}
+
+test "agent tools lookupTransaction decodes message bodies automatically" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const abi_json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "transfer",
+        \\      "opcode": "0x11223344",
+        \\      "inputs": [
+        \\        {"name": "to", "type": "address"},
+        \\        {"name": "amount", "type": "coins"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "abi.json", .data = abi_json });
+    const abi_path = try tmp.dir.realpathAlloc(allocator, "abi.json");
+    defer allocator.free(abi_path);
+    const abi_uri = try std.fmt.allocPrint(allocator, "file://{s}", .{abi_path});
+    defer allocator.free(abi_uri);
+
+    var parsed_abi = try abi_adapter.parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer parsed_abi.deinit(allocator);
+    const body_boc = try abi_adapter.buildFunctionBodyFromAbiAlloc(
+        allocator,
+        &parsed_abi.abi,
+        "transfer",
+        &.{
+            .{ .text = "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8" },
+            .{ .uint = 1234 },
+        },
+    );
+    defer allocator.free(body_boc);
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+        abi_uri: []const u8,
+        body_boc: []const u8,
+
+        fn freeMessage(self: *@This(), msg: *core_types.Message) void {
+            if (msg.hash.len > 0) self.allocator.free(msg.hash);
+            if (msg.raw_body.len > 0) self.allocator.free(msg.raw_body);
+            if (msg.body) |body| body.deinit(self.allocator);
+            self.allocator.destroy(msg);
+        }
+
+        pub fn lookupTx(self: *@This(), lt: i64, hash: []const u8) !?core_types.Transaction {
+            _ = lt;
+            _ = hash;
+
+            const in_msg = try self.allocator.create(core_types.Message);
+            errdefer self.allocator.destroy(in_msg);
+
+            const body_cell = try boc.deserializeBoc(self.allocator, self.body_boc);
+            errdefer body_cell.deinit(self.allocator);
+
+            in_msg.* = .{
+                .hash = try self.allocator.dupe(u8, "msg-detail"),
+                .source = try address_mod.parseAddress("0:9999999999999999999999999999999999999999999999999999999999999999"),
+                .destination = try address_mod.parseAddress("0:2222222222222222222222222222222222222222222222222222222222222222"),
+                .value = 321,
+                .body = body_cell,
+                .raw_body = try self.allocator.dupe(u8, "hello tx"),
+            };
+
+            return .{
+                .hash = try self.allocator.dupe(u8, "tx-detail"),
+                .lt = 777,
+                .timestamp = 888,
+                .in_msg = in_msg,
+                .out_msgs = &.{},
+            };
+        }
+
+        pub fn freeTransaction(self: *@This(), tx: *core_types.Transaction) void {
+            if (tx.hash.len > 0) self.allocator.free(tx.hash);
+            if (tx.in_msg) |msg| self.freeMessage(msg);
+            if (tx.out_msgs.len > 0) self.allocator.free(tx.out_msgs);
+            tx.* = undefined;
+        }
+
+        pub fn runGetMethod(self: *@This(), addr: []const u8, method: []const u8, stack: []const []const u8) anyerror!core_types.RunGetMethodResponse {
+            _ = addr;
+            _ = method;
+            _ = stack;
+
+            var builder = core_types.Builder.init();
+            try builder.storeUint(0x01, 8);
+            try builder.storeBits(self.abi_uri, @intCast(self.abi_uri.len * 8));
+            const cell_value = try builder.toCell(self.allocator);
+
+            const entries = try self.allocator.alloc(core_types.StackEntry, 1);
+            entries[0] = .{ .cell = cell_value };
+            return .{
+                .exit_code = 0,
+                .stack = entries,
+                .logs = "",
+            };
+        }
+
+        pub fn freeRunGetMethodResponse(self: *@This(), response: *core_types.RunGetMethodResponse) void {
+            for (response.stack) |*entry| {
+                switch (entry.*) {
+                    .cell => |value| value.deinit(self.allocator),
+                    else => {},
+                }
+            }
+            if (response.stack.len > 0) self.allocator.free(response.stack);
+        }
+    };
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    var client = FakeClient{
+        .allocator = allocator,
+        .abi_uri = abi_uri,
+        .body_boc = body_boc,
+    };
+    var tools = FakeTools.init(allocator, &client, .{ .rpc_url = "https://example.invalid" });
+
+    var result = try tools.lookupTransaction(777, "tx-detail");
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqualStrings("tx-detail", result.hash);
+    try std.testing.expect(result.in_message != null);
+    try std.testing.expectEqualStrings("hello tx", result.in_message.?.raw_body_utf8.?);
+    try std.testing.expect(result.in_message.?.body_boc != null);
+    try std.testing.expect(result.in_message.?.decoded_body != null);
+    try std.testing.expectEqualStrings(
+        "transfer(address,coins)",
+        result.in_message.?.decoded_body.?.selector,
+    );
+    try std.testing.expectEqualStrings(
+        "{\"to\":\"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8\",\"amount\":1234}",
+        result.in_message.?.decoded_body.?.decoded_json,
+    );
+}
+
 test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.decodeFunctionBodyAbi;
     _ = AgentTools.decodeFunctionBodyAuto;
     _ = AgentTools.decodeEventBodyAbi;
     _ = AgentTools.decodeEventBodyAuto;
+    _ = AgentTools.getTransactions;
+    _ = AgentTools.lookupTransaction;
     _ = AgentTools.runGetMethod;
     _ = AgentTools.runGetMethodAbi;
     _ = AgentTools.runGetMethodAuto;
@@ -1978,6 +2505,8 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = ProviderAgentTools.runGetMethod;
     _ = ProviderAgentTools.runGetMethodAbi;
     _ = ProviderAgentTools.runGetMethodAuto;
+    _ = ProviderAgentTools.getTransactions;
+    _ = ProviderAgentTools.lookupTransaction;
     _ = ProviderAgentTools.decodeFunctionBodyAbi;
     _ = ProviderAgentTools.decodeFunctionBodyAuto;
     _ = ProviderAgentTools.decodeEventBodyAbi;
@@ -1998,7 +2527,10 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = ProviderAgentTools.sendInitialTransfer;
     _ = AddressResult;
     _ = DecodedBodyResult;
+    _ = MessageResult;
     _ = RunMethodResult;
+    _ = TransactionListResult;
+    _ = TransactionDetailResult;
     _ = WalletInitResult;
     _ = JettonInfoResult;
     _ = JettonWalletAddressResult;
