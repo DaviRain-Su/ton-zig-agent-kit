@@ -2668,7 +2668,16 @@ fn writeDecodedBodyJsonType(
         return;
     }
 
-    if (isInlineCellLikeAbiType(type_name) or isRefCellLikeAbiType(type_name)) {
+    if (isRefCellLikeAbiType(type_name)) {
+        const body = try loadRefBodyBocAlloc(allocator, slice);
+        defer allocator.free(body);
+        const encoded = try base64EncodeAlloc(allocator, body);
+        defer allocator.free(encoded);
+        try writeJsonString(writer, encoded);
+        return;
+    }
+
+    if (isInlineCellLikeAbiType(type_name)) {
         if (!is_last) return error.UnsupportedAbiType;
         const body = try buildRemainingBodyBocAlloc(allocator, slice);
         defer allocator.free(body);
@@ -2701,7 +2710,11 @@ fn paramIsBodySelfDelimited(param: ParamDef) bool {
         return false;
     }
 
-    if (isInlineCellLikeAbiType(param.type_name) or isRefCellLikeAbiType(param.type_name)) {
+    if (isRefCellLikeAbiType(param.type_name)) {
+        return true;
+    }
+
+    if (isInlineCellLikeAbiType(param.type_name)) {
         return false;
     }
 
@@ -2837,6 +2850,11 @@ fn loadRemainingBodyBytesAlloc(allocator: std.mem.Allocator, slice: *cell.Slice)
     if (slice.remainingRefs() != 0) return error.UnsupportedAbiType;
     if (slice.remainingBits() % 8 != 0) return error.InvalidAbiOutputs;
     return loadBitsRightAlignedAlloc(allocator, slice, slice.remainingBits());
+}
+
+fn loadRefBodyBocAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) ![]u8 {
+    const value = try slice.loadRef();
+    return boc.serializeBoc(allocator, value);
 }
 
 fn buildRemainingBodyBocAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) ![]u8 {
@@ -3450,6 +3468,56 @@ test "abi adapter decodes function body from abi by opcode" {
     );
 }
 
+test "abi adapter decodes function body with ref payload before trailing scalar" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "set_payload",
+        \\      "opcode": "0xAA55AA55",
+        \\      "inputs": [
+        \\        {"name": "count", "type": "uint16"},
+        \\        {"name": "payload", "type": "ref"},
+        \\        {"name": "enabled", "type": "bool"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var payload_builder = cell.Builder.init();
+    try payload_builder.storeUint(0xABCD, 16);
+    const payload = try payload_builder.toCell(allocator);
+    defer payload.deinit(allocator);
+    const payload_boc = try boc.serializeBoc(allocator, payload);
+    defer allocator.free(payload_boc);
+    const payload_b64 = try base64EncodeAlloc(allocator, payload_boc);
+    defer allocator.free(payload_b64);
+
+    var parsed = try parseAbiInfoJsonAlloc(allocator, json);
+    defer parsed.deinit(allocator);
+
+    const body = try buildFunctionBodyBocAlloc(allocator, parsed.abi.functions[0], &.{
+        .{ .uint = 9 },
+        .{ .boc = payload_boc },
+        .{ .uint = 1 },
+    });
+    defer allocator.free(body);
+
+    const decoded = try decodeFunctionBodyFromAbiJsonAlloc(allocator, &parsed.abi, null, body);
+    defer allocator.free(decoded);
+
+    const expected = try std.fmt.allocPrint(
+        allocator,
+        "{{\"count\":9,\"payload\":\"{s}\",\"enabled\":true}}",
+        .{payload_b64},
+    );
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, decoded);
+}
+
 test "abi adapter decodes opcode-less function body by explicit selector" {
     const allocator = std.testing.allocator;
     const json =
@@ -3495,6 +3563,57 @@ test "abi adapter decodes opcode-less function body by explicit selector" {
         "{\"enabled\":true,\"limit\":42}",
         decoded,
     );
+}
+
+test "abi adapter decodes event body with ref payload before trailing scalar" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "events": [
+        \\    {
+        \\      "name": "PayloadSet",
+        \\      "opcode": "0x01020304",
+        \\      "inputs": [
+        \\        {"name": "payload", "type": "ref"},
+        \\        {"name": "enabled", "type": "bool"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var payload_builder = cell.Builder.init();
+    try payload_builder.storeUint(0xCAFE, 16);
+    const payload = try payload_builder.toCell(allocator);
+    defer payload.deinit(allocator);
+    const payload_boc = try boc.serializeBoc(allocator, payload);
+    defer allocator.free(payload_boc);
+    const payload_b64 = try base64EncodeAlloc(allocator, payload_boc);
+    defer allocator.free(payload_b64);
+
+    var parsed = try parseAbiInfoJsonAlloc(allocator, json);
+    defer parsed.deinit(allocator);
+
+    var builder = cell.Builder.init();
+    try builder.storeUint(0x01020304, 32);
+    try body_builder.storeRefBoc(&builder, allocator, payload_boc);
+    try builder.storeUint(1, 1);
+    const body_cell = try builder.toCell(allocator);
+    defer body_cell.deinit(allocator);
+    const body_boc = try boc.serializeBoc(allocator, body_cell);
+    defer allocator.free(body_boc);
+
+    const decoded = try decodeEventBodyFromAbiJsonAlloc(allocator, &parsed.abi, null, body_boc);
+    defer allocator.free(decoded);
+
+    const expected = try std.fmt.allocPrint(
+        allocator,
+        "{{\"payload\":\"{s}\",\"enabled\":true}}",
+        .{payload_b64},
+    );
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, decoded);
 }
 
 test "abi adapter resolves overloaded functions by full selector" {
