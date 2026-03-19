@@ -7,80 +7,90 @@ const cell = @import("../core/cell.zig");
 const body_builder = @import("../core/body_builder.zig");
 const address_mod = @import("../core/address.zig");
 const http_client = @import("../core/http_client.zig");
+const provider_mod = @import("../core/provider.zig");
 const generic_contract = @import("contract.zig");
 
-pub const JettonMaster = struct {
-    address: []const u8,
-    client: *http_client.TonHttpClient,
+pub fn JettonMasterType(comptime ClientType: type) type {
+    return struct {
+        address: []const u8,
+        client: ClientType,
 
-    pub fn init(contract_address: []const u8, client: *http_client.TonHttpClient) JettonMaster {
-        return .{
-            .address = contract_address,
-            .client = client,
-        };
-    }
-
-    /// Get Jetton metadata (total_supply, mintable, admin, content)
-    pub fn getJettonData(self: *JettonMaster) !JettonData {
-        var result = try self.client.runGetMethod(self.address, "get_jetton_data", &.{});
-        defer self.client.freeRunGetMethodResponse(&result);
-
-        if (result.exit_code != 0) {
-            return error.ContractError;
+        pub fn init(contract_address: []const u8, client: ClientType) @This() {
+            return .{
+                .address = contract_address,
+                .client = client,
+            };
         }
 
-        return parseJettonData(self.client.allocator, result.stack);
-    }
+        /// Get Jetton metadata (total_supply, mintable, admin, content)
+        pub fn getJettonData(self: *@This()) !JettonData {
+            var result = try self.client.runGetMethod(self.address, "get_jetton_data", &.{});
+            defer self.client.freeRunGetMethodResponse(&result);
 
-    /// Get wallet address for owner
-    pub fn getWalletAddress(self: *JettonMaster, owner_address: []const u8) ![]const u8 {
-        const stack_json = try generic_contract.buildStackArgsJsonAlloc(self.client.allocator, &.{
-            .{ .address = owner_address },
-        });
-        defer self.client.allocator.free(stack_json);
+            if (result.exit_code != 0) {
+                return error.ContractError;
+            }
 
-        var result = try self.client.runGetMethodJson(self.address, "get_wallet_address", stack_json);
-        defer self.client.freeRunGetMethodResponse(&result);
-
-        if (result.exit_code != 0) {
-            return error.ContractError;
+            return parseJettonData(self.client.allocator, result.stack);
         }
 
-        if (result.stack.len < 1) return error.InvalidResponse;
-        const wallet_address = (try generic_contract.stackEntryAsOptionalAddress(&result.stack[0])) orelse return error.InvalidAddress;
-        return address_mod.formatRaw(self.client.allocator, &wallet_address);
-    }
-};
+        /// Get wallet address for owner
+        pub fn getWalletAddress(self: *@This(), owner_address: []const u8) ![]const u8 {
+            const stack_json = try generic_contract.buildStackArgsJsonAlloc(self.client.allocator, &.{
+                .{ .address = owner_address },
+            });
+            defer self.client.allocator.free(stack_json);
 
-pub const JettonWallet = struct {
-    address: []const u8,
-    client: *http_client.TonHttpClient,
+            var result = try self.client.runGetMethodJson(self.address, "get_wallet_address", stack_json);
+            defer self.client.freeRunGetMethodResponse(&result);
 
-    pub fn init(contract_address: []const u8, client: *http_client.TonHttpClient) JettonWallet {
-        return .{
-            .address = contract_address,
-            .client = client,
-        };
-    }
+            if (result.exit_code != 0) {
+                return error.ContractError;
+            }
 
-    /// Get wallet data (balance, owner, master, code)
-    pub fn getWalletData(self: *JettonWallet) !WalletData {
-        var result = try self.client.runGetMethod(self.address, "get_wallet_data", &.{});
-        defer self.client.freeRunGetMethodResponse(&result);
+            if (result.stack.len < 1) return error.InvalidResponse;
+            const wallet_address = (try generic_contract.stackEntryAsOptionalAddress(&result.stack[0])) orelse return error.InvalidAddress;
+            return address_mod.formatRaw(self.client.allocator, &wallet_address);
+        }
+    };
+}
 
-        if (result.exit_code != 0) {
-            return error.ContractError;
+pub fn JettonWalletType(comptime ClientType: type) type {
+    return struct {
+        address: []const u8,
+        client: ClientType,
+
+        pub fn init(contract_address: []const u8, client: ClientType) @This() {
+            return .{
+                .address = contract_address,
+                .client = client,
+            };
         }
 
-        return parseJettonWalletData(self.client.allocator, result.stack);
-    }
+        /// Get wallet data (balance, owner, master, code)
+        pub fn getWalletData(self: *@This()) !WalletData {
+            var result = try self.client.runGetMethod(self.address, "get_wallet_data", &.{});
+            defer self.client.freeRunGetMethodResponse(&result);
 
-    /// Get balance
-    pub fn getBalance(self: *JettonWallet) !u256 {
-        const data = try self.getWalletData();
-        return data.balance;
-    }
-};
+            if (result.exit_code != 0) {
+                return error.ContractError;
+            }
+
+            return parseJettonWalletData(self.client.allocator, result.stack);
+        }
+
+        /// Get balance
+        pub fn getBalance(self: *@This()) !u256 {
+            const data = try self.getWalletData();
+            return data.balance;
+        }
+    };
+}
+
+pub const JettonMaster = JettonMasterType(*http_client.TonHttpClient);
+pub const ProviderJettonMaster = JettonMasterType(*provider_mod.MultiProvider);
+pub const JettonWallet = JettonWalletType(*http_client.TonHttpClient);
+pub const ProviderJettonWallet = JettonWalletType(*provider_mod.MultiProvider);
 
 pub const JettonData = struct {
     total_supply: u256,
@@ -222,12 +232,32 @@ test "jetton master" {
     _ = master;
 }
 
+test "provider jetton master" {
+    const allocator = std.testing.allocator;
+    var provider = try provider_mod.MultiProvider.init(allocator, &.{
+        .{ .url = "https://toncenter.com/api/v2/jsonRPC" },
+    });
+
+    const master = ProviderJettonMaster.init("EQBlqsm144Dq6SjbPIPcQWL1rzbDF7CWeYmpE6FsiVreAYeY", &provider);
+    _ = master;
+}
+
 test "jetton wallet" {
     const allocator = std.testing.allocator;
     var client = try http_client.TonHttpClient.init(allocator, "https://toncenter.com/api/v2/jsonRPC", null);
     defer client.deinit();
 
     const wallet = JettonWallet.init("EQ...", &client);
+    _ = wallet;
+}
+
+test "provider jetton wallet" {
+    const allocator = std.testing.allocator;
+    var provider = try provider_mod.MultiProvider.init(allocator, &.{
+        .{ .url = "https://toncenter.com/api/v2/jsonRPC" },
+    });
+
+    const wallet = ProviderJettonWallet.init("EQ...", &provider);
     _ = wallet;
 }
 

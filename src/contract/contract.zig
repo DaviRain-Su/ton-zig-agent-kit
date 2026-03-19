@@ -5,45 +5,51 @@ const types = @import("../core/types.zig");
 const cell = @import("../core/cell.zig");
 const boc = @import("../core/boc.zig");
 const http_client = @import("../core/http_client.zig");
+const provider_mod = @import("../core/provider.zig");
 
-pub const GenericContract = struct {
-    client: *http_client.TonHttpClient,
-    address: []const u8,
+pub fn GenericContractType(comptime ClientType: type) type {
+    return struct {
+        client: ClientType,
+        address: []const u8,
 
-    pub fn init(client: *http_client.TonHttpClient, address: []const u8) GenericContract {
-        return .{
-            .client = client,
-            .address = address,
-        };
-    }
+        pub fn init(client: ClientType, address: []const u8) @This() {
+            return .{
+                .client = client,
+                .address = address,
+            };
+        }
 
-    pub fn callGetMethod(self: *GenericContract, method: []const u8, args: []const []const u8) !types.RunGetMethodResponse {
-        return self.client.runGetMethod(self.address, method, args);
-    }
+        pub fn callGetMethod(self: *@This(), method: []const u8, args: []const []const u8) !types.RunGetMethodResponse {
+            return self.client.runGetMethod(self.address, method, args);
+        }
 
-    pub fn callGetMethodJson(self: *GenericContract, method: []const u8, stack_json: []const u8) !types.RunGetMethodResponse {
-        return self.client.runGetMethodJson(self.address, method, stack_json);
-    }
+        pub fn callGetMethodJson(self: *@This(), method: []const u8, stack_json: []const u8) !types.RunGetMethodResponse {
+            return self.client.runGetMethodJson(self.address, method, stack_json);
+        }
 
-    pub fn callGetMethodArgs(self: *GenericContract, method: []const u8, args: []const StackArg) !types.RunGetMethodResponse {
-        const stack_json = try buildStackArgsJsonAlloc(self.client.allocator, args);
-        defer self.client.allocator.free(stack_json);
+        pub fn callGetMethodArgs(self: *@This(), method: []const u8, args: []const StackArg) !types.RunGetMethodResponse {
+            const stack_json = try buildStackArgsJsonAlloc(self.client.allocator, args);
+            defer self.client.allocator.free(stack_json);
 
-        return self.callGetMethodJson(method, stack_json);
-    }
+            return self.callGetMethodJson(method, stack_json);
+        }
 
-    pub fn sendMessage(self: *GenericContract, body: []const u8) !types.SendBocResponse {
-        return self.client.sendBoc(body);
-    }
+        pub fn sendMessage(self: *@This(), body: []const u8) !types.SendBocResponse {
+            return self.client.sendBoc(body);
+        }
 
-    pub fn sendMessageBase64(self: *GenericContract, body_base64: []const u8) !types.SendBocResponse {
-        return self.client.sendBocBase64(body_base64);
-    }
+        pub fn sendMessageBase64(self: *@This(), body_base64: []const u8) !types.SendBocResponse {
+            return self.client.sendBocBase64(body_base64);
+        }
 
-    pub fn sendMessageHex(self: *GenericContract, body_hex: []const u8) !types.SendBocResponse {
-        return self.client.sendBocHex(body_hex);
-    }
-};
+        pub fn sendMessageHex(self: *@This(), body_hex: []const u8) !types.SendBocResponse {
+            return self.client.sendBocHex(body_hex);
+        }
+    };
+}
+
+pub const GenericContract = GenericContractType(*http_client.TonHttpClient);
+pub const ProviderGenericContract = GenericContractType(*provider_mod.MultiProvider);
 
 pub const StackArg = union(enum) {
     null: void,
@@ -332,6 +338,16 @@ test "generic contract init" {
     defer client.deinit();
 
     const contract = GenericContract.init(&client, "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c");
+    try std.testing.expectEqualStrings("EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c", contract.address);
+}
+
+test "provider generic contract init" {
+    const allocator = std.testing.allocator;
+    var provider = try provider_mod.MultiProvider.init(allocator, &.{
+        .{ .url = "https://toncenter.com/api/v2/jsonRPC" },
+    });
+
+    const contract = ProviderGenericContract.init(&provider, "EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c");
     try std.testing.expectEqualStrings("EQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM9c", contract.address);
 }
 

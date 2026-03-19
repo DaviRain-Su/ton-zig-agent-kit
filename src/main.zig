@@ -1598,10 +1598,9 @@ fn runBotDemo() !void {
     // Demo 4: Check balance
     std.debug.print("4. User sends /balance EQCD39vd5kB8FW5w6KH7HpNmP8GCvGajvLKGPMgY4sUXJyxqH\n", .{});
 
-    var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-    defer client.deinit();
+    var provider = try initDefaultProvider(allocator);
 
-    const balance_result = client.getBalance("EQCD39vd5kB8FW5w6KH7HpNmP8GCvGajvLKGPMgY4sUXJyxqH") catch |err| {
+    const balance_result = provider.getBalance("EQCD39vd5kB8FW5w6KH7HpNmP8GCvGajvLKGPMgY4sUXJyxqH") catch |err| {
         std.debug.print("Bot: Error checking balance: {s}\n", .{@errorName(err)});
         return;
     };

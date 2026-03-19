@@ -4,43 +4,53 @@ const std = @import("std");
 const types = @import("../core/types.zig");
 const cell = @import("../core/cell.zig");
 const http_client = @import("../core/http_client.zig");
+const provider_mod = @import("../core/provider.zig");
 const generic_contract = @import("contract.zig");
 
-pub const NFTItem = struct {
-    contract: generic_contract.GenericContract,
+pub fn NFTItemType(comptime ClientType: type) type {
+    return struct {
+        contract: generic_contract.GenericContractType(ClientType),
 
-    pub fn init(address: []const u8, client: *http_client.TonHttpClient) NFTItem {
-        return .{
-            .contract = generic_contract.GenericContract.init(client, address),
-        };
-    }
+        pub fn init(address: []const u8, client: ClientType) @This() {
+            return .{
+                .contract = generic_contract.GenericContractType(ClientType).init(client, address),
+            };
+        }
 
-    pub fn getNFTData(self: *NFTItem) !NFTData {
-        var result = try self.contract.callGetMethod("get_nft_data", &.{});
-        defer self.contract.client.freeRunGetMethodResponse(&result);
+        pub fn getNFTData(self: *@This()) !NFTData {
+            var result = try self.contract.callGetMethod("get_nft_data", &.{});
+            defer self.contract.client.freeRunGetMethodResponse(&result);
 
-        if (result.exit_code != 0) return error.ContractError;
-        return parseNFTData(self.contract.client.allocator, result.stack);
-    }
-};
+            if (result.exit_code != 0) return error.ContractError;
+            return parseNFTData(self.contract.client.allocator, result.stack);
+        }
+    };
+}
 
-pub const NFTCollection = struct {
-    contract: generic_contract.GenericContract,
+pub fn NFTCollectionType(comptime ClientType: type) type {
+    return struct {
+        contract: generic_contract.GenericContractType(ClientType),
 
-    pub fn init(address: []const u8, client: *http_client.TonHttpClient) NFTCollection {
-        return .{
-            .contract = generic_contract.GenericContract.init(client, address),
-        };
-    }
+        pub fn init(address: []const u8, client: ClientType) @This() {
+            return .{
+                .contract = generic_contract.GenericContractType(ClientType).init(client, address),
+            };
+        }
 
-    pub fn getCollectionData(self: *NFTCollection) !CollectionData {
-        var result = try self.contract.callGetMethod("get_collection_data", &.{});
-        defer self.contract.client.freeRunGetMethodResponse(&result);
+        pub fn getCollectionData(self: *@This()) !CollectionData {
+            var result = try self.contract.callGetMethod("get_collection_data", &.{});
+            defer self.contract.client.freeRunGetMethodResponse(&result);
 
-        if (result.exit_code != 0) return error.ContractError;
-        return parseCollectionData(self.contract.client.allocator, result.stack);
-    }
-};
+            if (result.exit_code != 0) return error.ContractError;
+            return parseCollectionData(self.contract.client.allocator, result.stack);
+        }
+    };
+}
+
+pub const NFTItem = NFTItemType(*http_client.TonHttpClient);
+pub const ProviderNFTItem = NFTItemType(*provider_mod.MultiProvider);
+pub const NFTCollection = NFTCollectionType(*http_client.TonHttpClient);
+pub const ProviderNFTCollection = NFTCollectionType(*provider_mod.MultiProvider);
 
 pub fn getNFTData(item: *NFTItem) !NFTData {
     return item.getNFTData();
@@ -82,6 +92,20 @@ pub const CollectionData = struct {
 test "nft basic" {
     _ = getNFTData;
     _ = getCollectionData;
+    _ = ProviderNFTItem;
+    _ = ProviderNFTCollection;
+}
+
+test "provider nft wrappers init" {
+    const allocator = std.testing.allocator;
+    var provider = try provider_mod.MultiProvider.init(allocator, &.{
+        .{ .url = "https://toncenter.com/api/v2/jsonRPC" },
+    });
+
+    const item = ProviderNFTItem.init("EQ...", &provider);
+    const collection = ProviderNFTCollection.init("EQ...", &provider);
+    _ = item;
+    _ = collection;
 }
 
 pub fn parseNFTData(allocator: std.mem.Allocator, stack: []const types.StackEntry) !NFTData {
