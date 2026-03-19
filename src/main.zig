@@ -887,7 +887,7 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "cell")) {
         if (args.len < 3) {
-            std.debug.print("Usage: ton-zig-agent-kit cell <create|encode|decode|hash|build-typed|build-function|build-abi|build-state-init|state-init-address>\n", .{});
+            std.debug.print("Usage: ton-zig-agent-kit cell <create|encode|decode|hash|inspect-body|build-typed|build-function|build-abi|build-state-init|state-init-address>\n", .{});
             return;
         }
         const cell_cmd = args[2];
@@ -961,6 +961,36 @@ pub fn main() !void {
                 std.debug.print("{X:0>2}", .{byte});
             }
             std.debug.print("\n", .{});
+            return;
+        }
+
+        if (std.mem.eql(u8, cell_cmd, "inspect-body")) {
+            if (args.len < 4) {
+                std.debug.print("Usage: ton-zig-agent-kit cell inspect-body <body_b64>\n", .{});
+                return;
+            }
+
+            const body_boc = try decodeBase64FlexibleAlloc(allocator, args[3]);
+            defer allocator.free(body_boc);
+
+            var analysis = try ton_zig_agent_kit.core.body_inspector.inspectBodyBocAlloc(allocator, body_boc);
+            defer analysis.deinit(allocator);
+
+            std.debug.print("Body analysis:\n", .{});
+            if (analysis.opcode) |opcode| {
+                std.debug.print("  Opcode: 0x{X}\n", .{opcode});
+            } else {
+                std.debug.print("  Opcode: (none)\n", .{});
+            }
+            if (analysis.comment) |value| {
+                std.debug.print("  Comment: {s}\n", .{value});
+            }
+            if (analysis.tail_utf8) |value| {
+                std.debug.print("  UTF-8 tail: {s}\n", .{value});
+            }
+            if (analysis.empty()) {
+                std.debug.print("  No obvious UTF-8/comment payload detected\n", .{});
+            }
             return;
         }
 
@@ -3261,6 +3291,9 @@ fn printMessageDetails(
             std.debug.print("  Raw body text: {s}\n", .{msg.raw_body});
         }
     }
+    if (msg.body) |body| {
+        printBodyAnalysis(allocator, body);
+    }
 
     if (tryDecodeMessageBodyAutoAlloc(allocator, provider, msg)) |decoded| {
         defer {
@@ -3279,6 +3312,21 @@ fn printMessageDetails(
             std.debug.print("  ABI opcode: 0x{X}\n", .{opcode});
         }
         std.debug.print("  ABI json:\n{s}\n", .{decoded.decoded_json});
+    }
+}
+
+fn printBodyAnalysis(allocator: std.mem.Allocator, body: *const Cell) void {
+    var analysis = ton_zig_agent_kit.core.body_inspector.inspectBodyCellAlloc(allocator, body) catch return;
+    defer analysis.deinit(allocator);
+
+    if (analysis.opcode) |opcode| {
+        std.debug.print("  Body opcode: 0x{X}\n", .{opcode});
+    }
+    if (analysis.comment) |value| {
+        std.debug.print("  Body comment: {s}\n", .{value});
+    }
+    if (analysis.tail_utf8) |value| {
+        std.debug.print("  Body UTF-8 tail: {s}\n", .{value});
     }
 }
 
@@ -4228,6 +4276,7 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit cell create                  Create test cell\n", .{});
     std.debug.print("  ton-zig-agent-kit cell encode <hex>            Encode data to BoC\n", .{});
     std.debug.print("  ton-zig-agent-kit cell hash <hex>              Get cell hash\n", .{});
+    std.debug.print("  ton-zig-agent-kit cell inspect-body <body_b64> Best-effort inspect an unknown message body\n", .{});
     std.debug.print("  ton-zig-agent-kit cell build-typed <ops...>    Build body BoC from typed ops\n", .{});
     std.debug.print("  ton-zig-agent-kit cell build-function <function_json> <values...>  Build body from function schema\n", .{});
     std.debug.print("  ton-zig-agent-kit cell build-abi <abi_json|@file|file://|http(s)://|ipfs://> <function_or_signature> <values...>  Build body from ABI doc\n", .{});

@@ -4,7 +4,9 @@
 const std = @import("std");
 const address_mod = @import("../core/address.zig");
 const boc = @import("../core/boc.zig");
+const body_inspector = @import("../core/body_inspector.zig");
 const body_builder = @import("../core/body_builder.zig");
+const cell = @import("../core/cell.zig");
 const external_message = @import("../core/external_message.zig");
 const core_types = @import("../core/types.zig");
 const http_client = @import("../core/http_client.zig");
@@ -734,6 +736,34 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             decoded.* = undefined;
         }
 
+        fn freeBodyAnalysisAlloc(allocator: std.mem.Allocator, analysis: *tools_types.BodyAnalysisResult) void {
+            if (analysis.comment) |value| allocator.free(value);
+            if (analysis.tail_utf8) |value| allocator.free(value);
+            analysis.* = undefined;
+        }
+
+        fn buildBodyAnalysisResultAlloc(
+            self: *@This(),
+            body: *const cell.Cell,
+        ) !?tools_types.BodyAnalysisResult {
+            var analysis = try body_inspector.inspectBodyCellAlloc(self.allocator, body);
+            errdefer analysis.deinit(self.allocator);
+
+            if (analysis.empty()) {
+                analysis.deinit(self.allocator);
+                return null;
+            }
+
+            const result = tools_types.BodyAnalysisResult{
+                .opcode = analysis.opcode,
+                .comment = analysis.comment,
+                .tail_utf8 = analysis.tail_utf8,
+            };
+            analysis.comment = null;
+            analysis.tail_utf8 = null;
+            return result;
+        }
+
         fn formatOptionalAddressAlloc(self: *@This(), maybe_addr: ?core_types.Address) !?[]u8 {
             if (maybe_addr) |addr| {
                 return try address_mod.formatRaw(self.allocator, &addr);
@@ -1414,6 +1444,12 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 null;
             errdefer if (raw_body_base64) |value| self.allocator.free(value);
 
+            const body_analysis = if (msg.body) |body|
+                try self.buildBodyAnalysisResultAlloc(body)
+            else
+                null;
+            errdefer if (body_analysis) |*value| freeBodyAnalysisAlloc(self.allocator, value);
+
             var decoded_body = self.tryDecodeMessageBodyAutoAlloc(msg);
             errdefer if (decoded_body) |*value| freeDecodedBodyAlloc(self.allocator, value);
 
@@ -1427,6 +1463,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 .body_boc = body_boc,
                 .raw_body_utf8 = raw_body_utf8,
                 .raw_body_base64 = raw_body_base64,
+                .body_analysis = body_analysis,
                 .decoded_body = decoded_body,
             };
         }
@@ -3492,6 +3529,7 @@ pub const SendResult = tools_types.SendResult;
 pub const RunMethodResult = tools_types.RunMethodResult;
 pub const DecodedBodyKind = tools_types.DecodedBodyKind;
 pub const DecodedBodyResult = tools_types.DecodedBodyResult;
+pub const BodyAnalysisResult = tools_types.BodyAnalysisResult;
 pub const BuiltBodyResult = tools_types.BuiltBodyResult;
 pub const BuiltExternalMessageResult = tools_types.BuiltExternalMessageResult;
 pub const BuiltWalletMessageResult = tools_types.BuiltWalletMessageResult;
@@ -4911,6 +4949,8 @@ test "agent tools lookupTransaction decodes message bodies automatically" {
     try std.testing.expect(result.in_message != null);
     try std.testing.expectEqualStrings("hello tx", result.in_message.?.raw_body_utf8.?);
     try std.testing.expect(result.in_message.?.body_boc != null);
+    try std.testing.expect(result.in_message.?.body_analysis != null);
+    try std.testing.expectEqual(@as(?u32, 0x11223344), result.in_message.?.body_analysis.?.opcode);
     try std.testing.expect(result.in_message.?.decoded_body != null);
     try std.testing.expectEqualStrings(
         "transfer(address,coins)",
@@ -5305,6 +5345,7 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = ProviderAgentTools.deployWalletSelf;
     _ = ProviderAgentTools.sendInitialTransfer;
     _ = AddressResult;
+    _ = BodyAnalysisResult;
     _ = DecodedBodyResult;
     _ = BuiltBodyResult;
     _ = BuiltExternalMessageResult;

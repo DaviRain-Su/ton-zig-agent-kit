@@ -47,6 +47,18 @@ pub const DecodedBodyResult = struct {
     error_message: ?[]const u8 = null,
 };
 
+pub const BodyAnalysisResult = struct {
+    opcode: ?u32,
+    comment: ?[]const u8,
+    tail_utf8: ?[]const u8,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.comment) |value| allocator.free(value);
+        if (self.tail_utf8) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
 pub const MessageResult = struct {
     hash: []const u8,
     source: ?[]const u8,
@@ -57,6 +69,7 @@ pub const MessageResult = struct {
     body_boc: ?[]const u8,
     raw_body_utf8: ?[]const u8,
     raw_body_base64: ?[]const u8,
+    body_analysis: ?BodyAnalysisResult,
     decoded_body: ?DecodedBodyResult,
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
@@ -66,6 +79,7 @@ pub const MessageResult = struct {
         if (self.body_boc) |value| allocator.free(value);
         if (self.raw_body_utf8) |value| allocator.free(value);
         if (self.raw_body_base64) |value| allocator.free(value);
+        if (self.body_analysis) |*value| value.deinit(allocator);
         if (self.decoded_body) |*value| {
             if (value.address.len > 0) allocator.free(value.address);
             if (value.selector.len > 0) allocator.free(value.selector);
