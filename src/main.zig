@@ -14,6 +14,7 @@ const boc = ton_zig_agent_kit.core.boc;
 const signing = ton_zig_agent_kit.wallet.signing;
 const default_rpc_url = "https://toncenter.com/api/v2/jsonRPC";
 const inspect_abi_list_limit: usize = 12;
+const inspect_abi_template_limit: usize = 3;
 
 fn initDefaultProvider(allocator: std.mem.Allocator) !ton_zig_agent_kit.core.MultiProvider {
     return ton_zig_agent_kit.core.MultiProvider.init(allocator, &.{
@@ -147,7 +148,7 @@ pub fn main() !void {
             }
         }
 
-        printInspectCommandHints(addr, if (abi_doc) |*loaded| &loaded.abi else null);
+        printInspectCommandHints(allocator, addr, if (abi_doc) |*loaded| &loaded.abi else null);
         return;
     }
 
@@ -1844,7 +1845,11 @@ fn printAbiParamList(params: []const contract_mod.abi_adapter.ParamDef) void {
     }
 }
 
-fn printInspectCommandHints(addr: []const u8, abi: ?*const contract_mod.abi_adapter.AbiInfo) void {
+fn printInspectCommandHints(
+    allocator: std.mem.Allocator,
+    addr: []const u8,
+    abi: ?*const contract_mod.abi_adapter.AbiInfo,
+) void {
     std.debug.print("Command hints:\n", .{});
     std.debug.print("  Raw read: ton-zig-agent-kit runGetMethod {s} <method> [stack_json]\n", .{addr});
     std.debug.print("  Typed read: ton-zig-agent-kit runGetMethodTyped {s} <method> [typed_args...]\n", .{addr});
@@ -1854,7 +1859,7 @@ fn printInspectCommandHints(addr: []const u8, abi: ?*const contract_mod.abi_adap
         std.debug.print("  ABI write: ton-zig-agent-kit wallet send-auto-abi <wallet_addr> {s} <amount_nanoton> <function_name> [values...]\n", .{addr});
 
         if (value.functions.len > 0) {
-            const shown = @min(value.functions.len, @as(usize, 3));
+            const shown = @min(value.functions.len, inspect_abi_template_limit);
             std.debug.print("  ABI function names:", .{});
             for (value.functions[0..shown], 0..) |function, idx| {
                 std.debug.print("{s}{s}", .{ if (idx == 0) " " else ", ", function.name });
@@ -1863,8 +1868,290 @@ fn printInspectCommandHints(addr: []const u8, abi: ?*const contract_mod.abi_adap
                 std.debug.print(", ...", .{});
             }
             std.debug.print("\n", .{});
+
+            std.debug.print("  ABI templates:\n", .{});
+            for (value.functions[0..shown]) |function| {
+                const template_args = buildInspectCliArgsTemplateAlloc(allocator, function.inputs) catch |err| {
+                    std.debug.print("    {s}: template build failed ({s})\n", .{ function.name, @errorName(err) });
+                    continue;
+                };
+                defer allocator.free(template_args);
+
+                std.debug.print("    {s} args: {s}\n", .{
+                    function.name,
+                    if (template_args.len == 0) "(no args)" else template_args,
+                });
+                std.debug.print("      read: ton-zig-agent-kit runGetMethodAuto {s} {s}{s}{s}\n", .{
+                    addr,
+                    function.name,
+                    if (template_args.len == 0) "" else " ",
+                    template_args,
+                });
+                std.debug.print("      write: ton-zig-agent-kit wallet send-auto-abi <wallet_addr> {s} <amount_nanoton> {s}{s}{s}\n", .{
+                    addr,
+                    function.name,
+                    if (template_args.len == 0) "" else " ",
+                    template_args,
+                });
+            }
         }
     }
+}
+
+fn buildInspectCliArgsTemplateAlloc(
+    allocator: std.mem.Allocator,
+    params: []const contract_mod.abi_adapter.ParamDef,
+) ![]u8 {
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    for (params, 0..) |param, idx| {
+        if (idx != 0) try writer.writer.writeByte(' ');
+        const value = try buildInspectCliValueTemplateAlloc(allocator, param);
+        defer allocator.free(value);
+        try writer.writer.writeAll(value);
+    }
+
+    return try writer.toOwnedSlice();
+}
+
+fn buildInspectCliValueTemplateAlloc(
+    allocator: std.mem.Allocator,
+    param: contract_mod.abi_adapter.ParamDef,
+) anyerror![]u8 {
+    if (inspectOptionalInnerType(param.type_name) != null) {
+        return allocator.dupe(u8, "null");
+    }
+
+    if (inspectArrayInnerType(param.type_name)) |inner_type| {
+        const value = try buildInspectJsonValueTemplateAlloc(allocator, inspectParamWithType(param, inner_type));
+        defer allocator.free(value);
+        return std.fmt.allocPrint(allocator, "json:[{s}]", .{value});
+    }
+
+    if (inspectIsCompositeParam(param)) {
+        const value = try buildInspectJsonValueTemplateAlloc(allocator, param);
+        defer allocator.free(value);
+        return std.fmt.allocPrint(allocator, "json:{s}", .{value});
+    }
+
+    if (std.mem.eql(u8, param.type_name, "bool")) {
+        return allocator.dupe(u8, "num:1");
+    }
+
+    if (std.mem.eql(u8, param.type_name, "address")) {
+        return allocator.dupe(u8, "addr:EQ...");
+    }
+
+    if (std.mem.eql(u8, param.type_name, "string")) {
+        return allocator.dupe(u8, "str:text");
+    }
+
+    if (std.mem.eql(u8, param.type_name, "bytes")) {
+        return allocator.dupe(u8, "hex:CAFE");
+    }
+
+    if (inspectIsCellLikeType(param.type_name)) {
+        return allocator.dupe(u8, "boc:<base64_boc>");
+    }
+
+    if (inspectIsNumericType(param.type_name)) {
+        return allocator.dupe(u8, "num:0");
+    }
+
+    return allocator.dupe(u8, "json:null");
+}
+
+fn buildInspectJsonValueTemplateAlloc(
+    allocator: std.mem.Allocator,
+    param: contract_mod.abi_adapter.ParamDef,
+) anyerror![]u8 {
+    if (inspectOptionalInnerType(param.type_name) != null) {
+        return allocator.dupe(u8, "null");
+    }
+
+    if (inspectArrayInnerType(param.type_name)) |inner_type| {
+        const value = try buildInspectJsonValueTemplateAlloc(allocator, inspectParamWithType(param, inner_type));
+        defer allocator.free(value);
+        return std.fmt.allocPrint(allocator, "[{s}]", .{value});
+    }
+
+    if (inspectIsCompositeParam(param)) {
+        return buildInspectCompositeJsonTemplateAlloc(allocator, param.components);
+    }
+
+    if (inspectIsNumericType(param.type_name)) {
+        return allocator.dupe(u8, if (std.mem.eql(u8, param.type_name, "bool")) "true" else "0");
+    }
+
+    if (std.mem.eql(u8, param.type_name, "address")) {
+        return allocator.dupe(u8, "\"EQ...\"");
+    }
+
+    if (std.mem.eql(u8, param.type_name, "string")) {
+        return allocator.dupe(u8, "\"text\"");
+    }
+
+    if (std.mem.eql(u8, param.type_name, "bytes")) {
+        return allocator.dupe(u8, "{\"hex\":\"CAFE\"}");
+    }
+
+    if (inspectIsCellLikeType(param.type_name)) {
+        return allocator.dupe(u8, "{\"boc\":\"<base64_boc>\"}");
+    }
+
+    return allocator.dupe(u8, "null");
+}
+
+fn buildInspectCompositeJsonTemplateAlloc(
+    allocator: std.mem.Allocator,
+    components: []const contract_mod.abi_adapter.ParamDef,
+) anyerror![]u8 {
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    var has_named_components = true;
+    for (components) |component| {
+        if (component.name.len == 0) {
+            has_named_components = false;
+            break;
+        }
+    }
+
+    if (has_named_components) {
+        try writer.writer.writeByte('{');
+        for (components, 0..) |component, idx| {
+            if (idx != 0) try writer.writer.writeByte(',');
+            try writeInspectJsonString(&writer.writer, component.name);
+            try writer.writer.writeByte(':');
+            const value = try buildInspectJsonValueTemplateAlloc(allocator, component);
+            defer allocator.free(value);
+            try writer.writer.writeAll(value);
+        }
+        try writer.writer.writeByte('}');
+    } else {
+        try writer.writer.writeByte('[');
+        for (components, 0..) |component, idx| {
+            if (idx != 0) try writer.writer.writeByte(',');
+            const value = try buildInspectJsonValueTemplateAlloc(allocator, component);
+            defer allocator.free(value);
+            try writer.writer.writeAll(value);
+        }
+        try writer.writer.writeByte(']');
+    }
+
+    return try writer.toOwnedSlice();
+}
+
+fn inspectParamWithType(
+    param: contract_mod.abi_adapter.ParamDef,
+    type_name: []const u8,
+) contract_mod.abi_adapter.ParamDef {
+    return .{
+        .name = param.name,
+        .type_name = type_name,
+        .components = param.components,
+    };
+}
+
+fn inspectIsCompositeParam(param: contract_mod.abi_adapter.ParamDef) bool {
+    return param.components.len > 0 or
+        std.mem.eql(u8, param.type_name, "tuple") or
+        std.mem.eql(u8, param.type_name, "struct");
+}
+
+fn inspectIsNumericType(type_name: []const u8) bool {
+    return std.mem.eql(u8, type_name, "bool") or
+        std.mem.eql(u8, type_name, "coins") or
+        std.mem.startsWith(u8, type_name, "uint") or
+        std.mem.startsWith(u8, type_name, "int");
+}
+
+fn inspectIsCellLikeType(type_name: []const u8) bool {
+    return inspectMatchesAbiTypeBase(type_name, "cell") or
+        inspectMatchesAbiTypeBase(type_name, "slice") or
+        inspectMatchesAbiTypeBase(type_name, "builder") or
+        inspectMatchesAbiTypeBase(type_name, "ref") or
+        inspectMatchesAbiTypeBase(type_name, "boc") or
+        inspectMatchesAbiTypeBase(type_name, "ref_boc") or
+        inspectMatchesAbiTypeBase(type_name, "cell_ref") or
+        inspectMatchesAbiTypeBase(type_name, "dict") or
+        inspectMatchesAbiTypeBase(type_name, "map") or
+        inspectMatchesAbiTypeBase(type_name, "hashmap") or
+        inspectMatchesAbiTypeBase(type_name, "hashmape") or
+        inspectMatchesAbiTypeBase(type_name, "dict_ref") or
+        inspectMatchesAbiTypeBase(type_name, "map_ref") or
+        inspectMatchesAbiTypeBase(type_name, "hashmap_ref") or
+        inspectMatchesAbiTypeBase(type_name, "hashmape_ref");
+}
+
+fn inspectMatchesAbiTypeBase(type_name: []const u8, base: []const u8) bool {
+    const trimmed = std.mem.trim(u8, type_name, " \t\r\n");
+    if (trimmed.len < base.len) return false;
+    if (!std.ascii.eqlIgnoreCase(trimmed[0..base.len], base)) return false;
+    return trimmed.len == base.len or trimmed[base.len] == '<' or trimmed[base.len] == ' ';
+}
+
+fn inspectOptionalInnerType(type_name: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, type_name, " \t\r\n");
+
+    if (std.mem.startsWith(u8, trimmed, "maybe<") and trimmed.len > "maybe<>".len and trimmed[trimmed.len - 1] == '>') {
+        return std.mem.trim(u8, trimmed["maybe<".len .. trimmed.len - 1], " \t\r\n");
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "optional<") and trimmed.len > "optional<>".len and trimmed[trimmed.len - 1] == '>') {
+        return std.mem.trim(u8, trimmed["optional<".len .. trimmed.len - 1], " \t\r\n");
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "maybe ")) {
+        return std.mem.trim(u8, trimmed["maybe ".len..], " \t\r\n");
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "optional ")) {
+        return std.mem.trim(u8, trimmed["optional ".len..], " \t\r\n");
+    }
+
+    return null;
+}
+
+fn inspectArrayInnerType(type_name: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, type_name, " \t\r\n");
+
+    if (trimmed.len > 2 and std.mem.endsWith(u8, trimmed, "[]")) {
+        return std.mem.trim(u8, trimmed[0 .. trimmed.len - 2], " \t\r\n");
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "array<") and trimmed.len > "array<>".len and trimmed[trimmed.len - 1] == '>') {
+        return std.mem.trim(u8, trimmed["array<".len .. trimmed.len - 1], " \t\r\n");
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "list<") and trimmed.len > "list<>".len and trimmed[trimmed.len - 1] == '>') {
+        return std.mem.trim(u8, trimmed["list<".len .. trimmed.len - 1], " \t\r\n");
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "array ")) {
+        return std.mem.trim(u8, trimmed["array ".len..], " \t\r\n");
+    }
+
+    return null;
+}
+
+fn writeInspectJsonString(writer: anytype, value: []const u8) !void {
+    try writer.writeByte('"');
+    for (value) |char| {
+        switch (char) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            0x08 => try writer.writeAll("\\b"),
+            0x0c => try writer.writeAll("\\f"),
+            0x00...0x07, 0x0b, 0x0e...0x1f => try writer.print("\\u00{X:0>2}", .{char}),
+            else => try writer.writeByte(char),
+        }
+    }
+    try writer.writeByte('"');
 }
 
 fn printUsage() !void {
@@ -2097,4 +2384,42 @@ test "load cli text alloc supports inline and file specs" {
     const file_text = try loadCliTextAlloc(allocator, path_spec);
     defer allocator.free(file_text);
     try std.testing.expectEqualStrings("{\"version\":\"1.0\"}", file_text);
+}
+
+test "inspect cli template builds composite json args" {
+    const allocator = std.testing.allocator;
+
+    const param = contract_mod.abi_adapter.ParamDef{
+        .name = "payload",
+        .type_name = "tuple",
+        .components = &.{
+            .{ .name = "owner", .type_name = "address" },
+            .{ .name = "amount", .type_name = "uint128" },
+            .{ .name = "note", .type_name = "optional<string>" },
+            .{ .name = "meta", .type_name = "bytes" },
+        },
+    };
+
+    const template = try buildInspectCliValueTemplateAlloc(allocator, param);
+    defer allocator.free(template);
+
+    try std.testing.expectEqualStrings(
+        "json:{\"owner\":\"EQ...\",\"amount\":0,\"note\":null,\"meta\":{\"hex\":\"CAFE\"}}",
+        template,
+    );
+}
+
+test "inspect cli template joins scalars and arrays" {
+    const allocator = std.testing.allocator;
+
+    const params = [_]contract_mod.abi_adapter.ParamDef{
+        .{ .name = "enabled", .type_name = "bool" },
+        .{ .name = "recipient", .type_name = "address" },
+        .{ .name = "items", .type_name = "uint16[]" },
+    };
+
+    const template = try buildInspectCliArgsTemplateAlloc(allocator, params[0..]);
+    defer allocator.free(template);
+
+    try std.testing.expectEqualStrings("num:1 addr:EQ... json:[0]", template);
 }
