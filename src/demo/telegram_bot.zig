@@ -92,19 +92,18 @@ pub const DemoBot = struct {
     merchant_address: []const u8,
 
     pub fn init(allocator: std.mem.Allocator, merchant_address: []const u8) !DemoBot {
-        const config = AgentToolsConfig{
-            .rpc_url = "https://toncenter.com/api/v2/jsonRPC",
-            .wallet_address = merchant_address,
-        };
-
         var bot = DemoBot{
             .allocator = allocator,
             .state = BotState.init(allocator),
-            .client = try core.provider.MultiProvider.init(allocator, &.{
-                .{ .url = "https://toncenter.com/api/v2/jsonRPC" },
-            }),
+            .client = try core.provider.createProviderFromProcessEnv(allocator),
             .tools = undefined,
             .merchant_address = merchant_address,
+        };
+
+        const config = AgentToolsConfig{
+            .rpc_url = bot.client.providers[0].url,
+            .api_key = bot.client.providers[0].api_key,
+            .wallet_address = merchant_address,
         };
 
         bot.tools = AgentTools.init(allocator, &bot.client, config);
@@ -113,6 +112,7 @@ pub const DemoBot = struct {
 
     pub fn deinit(self: *DemoBot) void {
         self.state.deinit();
+        self.client.deinit();
     }
 
     /// Handle /start command

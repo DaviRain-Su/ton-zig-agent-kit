@@ -12,9 +12,13 @@ const contract_mod = ton_zig_agent_kit.contract;
 const AbiValue = contract_mod.abi_adapter.AbiValue;
 const boc = ton_zig_agent_kit.core.boc;
 const signing = ton_zig_agent_kit.wallet.signing;
-const default_rpc_url = "https://toncenter.com/api/v2/jsonRPC";
 const inspect_abi_list_limit: usize = 12;
 const inspect_abi_template_limit: usize = 3;
+const rpc_url_env = "TON_RPC_URL";
+const rpc_urls_env = "TON_RPC_URLS";
+const api_key_env = "TON_API_KEY";
+const api_keys_env = "TON_API_KEYS";
+const network_env = "TON_NETWORK";
 const wallet_private_key_hex_env = "TON_PRIVATE_KEY_HEX";
 const wallet_seed_env = "TON_SEED";
 const wallet_seed_file_env = "TON_SEED_FILE";
@@ -29,9 +33,7 @@ const LoadedCliAbi = struct {
 };
 
 fn initDefaultProvider(allocator: std.mem.Allocator) !ton_zig_agent_kit.core.MultiProvider {
-    return ton_zig_agent_kit.core.MultiProvider.init(allocator, &.{
-        .{ .url = default_rpc_url },
-    });
+    return ton_zig_agent_kit.core.provider.createProviderFromProcessEnv(allocator);
 }
 
 pub fn main() !void {
@@ -3052,6 +3054,13 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit wallet send-auto-abi <src> <dst> <amount> <function_or_signature> <values...>  Discover ABI and send function body\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-deploy <src> <dst> <amount> <state_init_b64> [body_b64]  Deploy contract with StateInit\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-deploy-auto <src> <workchain> <amount> <state_init_b64> [body_b64]  Derive destination from StateInit and deploy\n", .{});
+    std.debug.print("    provider env: {s}, {s}, {s}, {s}, {s}\n", .{
+        rpc_url_env,
+        rpc_urls_env,
+        api_key_env,
+        api_keys_env,
+        network_env,
+    });
     std.debug.print("    wallet key env: {s}, {s}, {s}\n", .{
         wallet_private_key_hex_env,
         wallet_seed_env,

@@ -9,17 +9,68 @@ pub const ProviderConfig = struct {
     api_key: ?[]const u8 = null,
 };
 
+pub const Network = enum {
+    mainnet,
+    testnet,
+};
+
 pub const MultiProvider = struct {
     allocator: std.mem.Allocator,
     providers: []const ProviderConfig,
     current_index: usize = 0,
+    owned_providers: ?[]ProviderConfig = null,
 
     pub fn init(allocator: std.mem.Allocator, providers: []const ProviderConfig) !MultiProvider {
+        if (providers.len == 0) return error.NoProvidersConfigured;
         return MultiProvider{
             .allocator = allocator,
             .providers = providers,
             .current_index = 0,
+            .owned_providers = null,
         };
+    }
+
+    pub fn initOwned(allocator: std.mem.Allocator, providers: []const ProviderConfig) !MultiProvider {
+        if (providers.len == 0) return error.NoProvidersConfigured;
+
+        const owned = try allocator.alloc(ProviderConfig, providers.len);
+        var built: usize = 0;
+        errdefer {
+            for (owned[0..built]) |provider| {
+                allocator.free(provider.url);
+                if (provider.api_key) |api_key| allocator.free(api_key);
+            }
+            allocator.free(owned);
+        }
+
+        for (providers, 0..) |provider, idx| {
+            owned[idx] = .{
+                .url = try allocator.dupe(u8, provider.url),
+                .api_key = if (provider.api_key) |api_key| try allocator.dupe(u8, api_key) else null,
+            };
+            built += 1;
+        }
+
+        return .{
+            .allocator = allocator,
+            .providers = owned,
+            .current_index = 0,
+            .owned_providers = owned,
+        };
+    }
+
+    pub fn deinit(self: *MultiProvider) void {
+        if (self.owned_providers) |providers| {
+            for (providers) |provider| {
+                self.allocator.free(provider.url);
+                if (provider.api_key) |api_key| self.allocator.free(api_key);
+            }
+            self.allocator.free(providers);
+        }
+
+        self.providers = &.{};
+        self.current_index = 0;
+        self.owned_providers = null;
     }
 
     pub fn getClient(self: *MultiProvider) !http_client.TonHttpClient {
@@ -248,10 +299,104 @@ fn freeStackEntry(allocator: std.mem.Allocator, entry: *types.StackEntry) void {
 }
 
 pub fn createDefaultProvider(allocator: std.mem.Allocator) !MultiProvider {
+    return createProviderForNetwork(allocator, .mainnet);
+}
+
+pub fn createProviderForNetwork(allocator: std.mem.Allocator, network: Network) !MultiProvider {
+    const default_url = switch (network) {
+        .mainnet => "https://toncenter.com/api/v2/jsonRPC",
+        .testnet => "https://testnet.toncenter.com/api/v2/jsonRPC",
+    };
+
     return MultiProvider.init(allocator, &.{
-        .{ .url = "https://toncenter.com/api/v2/jsonRPC" },
-        .{ .url = "https://testnet.toncenter.com/api/v2/jsonRPC" },
+        .{ .url = default_url },
     });
+}
+
+pub fn createProviderFromProcessEnv(allocator: std.mem.Allocator) !MultiProvider {
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+    return createProviderFromEnvMap(allocator, &env_map);
+}
+
+pub fn createProviderFromEnvMap(allocator: std.mem.Allocator, env_map: *const std.process.EnvMap) !MultiProvider {
+    if (env_map.get("TON_RPC_URLS")) |rpc_urls| {
+        if (env_map.get("TON_API_KEYS")) |api_keys| {
+            return createProviderFromCsvAlloc(allocator, rpc_urls, api_keys, null);
+        }
+        return createProviderFromCsvAlloc(allocator, rpc_urls, null, env_map.get("TON_API_KEY"));
+    }
+
+    if (env_map.get("TON_RPC_URL")) |rpc_url| {
+        const trimmed = std.mem.trim(u8, rpc_url, " \t\r\n");
+        if (trimmed.len == 0) return error.InvalidProviderConfig;
+
+        return MultiProvider.initOwned(allocator, &.{
+            .{
+                .url = trimmed,
+                .api_key = if (env_map.get("TON_API_KEY")) |api_key|
+                    if (std.mem.trim(u8, api_key, " \t\r\n").len > 0) std.mem.trim(u8, api_key, " \t\r\n") else null
+                else
+                    null,
+            },
+        });
+    }
+
+    return createProviderForNetwork(allocator, try parseNetworkEnv(env_map.get("TON_NETWORK")));
+}
+
+fn createProviderFromCsvAlloc(
+    allocator: std.mem.Allocator,
+    rpc_urls: []const u8,
+    api_keys_csv: ?[]const u8,
+    shared_api_key: ?[]const u8,
+) !MultiProvider {
+    var list = std.array_list.Managed(ProviderConfig).init(allocator);
+    defer list.deinit();
+
+    var key_iter = if (api_keys_csv) |value|
+        std.mem.splitScalar(u8, value, ',')
+    else
+        std.mem.splitScalar(u8, "", ',');
+    const has_aligned_keys = api_keys_csv != null;
+    const trimmed_shared_api_key = if (shared_api_key) |value|
+        std.mem.trim(u8, value, " \t\r\n")
+    else
+        "";
+
+    var url_iter = std.mem.splitScalar(u8, rpc_urls, ',');
+    while (url_iter.next()) |raw_url| {
+        const trimmed_url = std.mem.trim(u8, raw_url, " \t\r\n");
+        if (trimmed_url.len == 0) continue;
+
+        const next_key = if (has_aligned_keys) key_iter.next() else null;
+        const trimmed_key = if (has_aligned_keys)
+            if (next_key) |value| std.mem.trim(u8, value, " \t\r\n") else ""
+        else
+            trimmed_shared_api_key;
+
+        try list.append(.{
+            .url = trimmed_url,
+            .api_key = if (trimmed_key.len > 0) trimmed_key else null,
+        });
+    }
+
+    if (list.items.len == 0) return error.InvalidProviderConfig;
+
+    if (has_aligned_keys) {
+        while (key_iter.next()) |extra_key| {
+            if (std.mem.trim(u8, extra_key, " \t\r\n").len > 0) return error.InvalidProviderConfig;
+        }
+    }
+
+    return MultiProvider.initOwned(allocator, list.items);
+}
+
+fn parseNetworkEnv(value: ?[]const u8) !Network {
+    const trimmed = std.mem.trim(u8, value orelse "", " \t\r\n");
+    if (trimmed.len == 0 or std.ascii.eqlIgnoreCase(trimmed, "mainnet")) return .mainnet;
+    if (std.ascii.eqlIgnoreCase(trimmed, "testnet")) return .testnet;
+    return error.InvalidProviderConfig;
 }
 
 test "multi provider failover selects next provider on error" {
@@ -305,4 +450,78 @@ test "multi provider public methods are exported" {
     _ = MultiProvider.freeSendBocResponse;
     _ = MultiProvider.freeTransaction;
     _ = MultiProvider.freeTransactions;
+}
+
+test "provider env supports rpc url list and aligned api keys" {
+    const allocator = std.testing.allocator;
+
+    var env_map = std.process.EnvMap.init(allocator);
+    defer env_map.deinit();
+    try env_map.put("TON_RPC_URLS", "https://rpc-a.example/jsonRPC, https://rpc-b.example/jsonRPC");
+    try env_map.put("TON_API_KEYS", "key-a,");
+
+    var provider = try createProviderFromEnvMap(allocator, &env_map);
+    defer provider.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), provider.providers.len);
+    try std.testing.expectEqualStrings("https://rpc-a.example/jsonRPC", provider.providers[0].url);
+    try std.testing.expectEqualStrings("https://rpc-b.example/jsonRPC", provider.providers[1].url);
+    try std.testing.expectEqualStrings("key-a", provider.providers[0].api_key.?);
+    try std.testing.expect(provider.providers[1].api_key == null);
+}
+
+test "provider env supports singular rpc url and api key" {
+    const allocator = std.testing.allocator;
+
+    var env_map = std.process.EnvMap.init(allocator);
+    defer env_map.deinit();
+    try env_map.put("TON_RPC_URL", " https://single.example/jsonRPC ");
+    try env_map.put("TON_API_KEY", " secret ");
+
+    var provider = try createProviderFromEnvMap(allocator, &env_map);
+    defer provider.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), provider.providers.len);
+    try std.testing.expectEqualStrings("https://single.example/jsonRPC", provider.providers[0].url);
+    try std.testing.expectEqualStrings("secret", provider.providers[0].api_key.?);
+}
+
+test "provider env applies shared api key to rpc url list" {
+    const allocator = std.testing.allocator;
+
+    var env_map = std.process.EnvMap.init(allocator);
+    defer env_map.deinit();
+    try env_map.put("TON_RPC_URLS", "https://rpc-a.example/jsonRPC,https://rpc-b.example/jsonRPC");
+    try env_map.put("TON_API_KEY", "shared-key");
+
+    var provider = try createProviderFromEnvMap(allocator, &env_map);
+    defer provider.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), provider.providers.len);
+    try std.testing.expectEqualStrings("shared-key", provider.providers[0].api_key.?);
+    try std.testing.expectEqualStrings("shared-key", provider.providers[1].api_key.?);
+}
+
+test "provider env falls back to selected network" {
+    const allocator = std.testing.allocator;
+
+    var env_map = std.process.EnvMap.init(allocator);
+    defer env_map.deinit();
+    try env_map.put("TON_NETWORK", "testnet");
+
+    var provider = try createProviderFromEnvMap(allocator, &env_map);
+    defer provider.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), provider.providers.len);
+    try std.testing.expectEqualStrings("https://testnet.toncenter.com/api/v2/jsonRPC", provider.providers[0].url);
+}
+
+test "provider env rejects invalid network values" {
+    const allocator = std.testing.allocator;
+
+    var env_map = std.process.EnvMap.init(allocator);
+    defer env_map.deinit();
+    try env_map.put("TON_NETWORK", "devnet");
+
+    try std.testing.expectError(error.InvalidProviderConfig, createProviderFromEnvMap(allocator, &env_map));
 }
