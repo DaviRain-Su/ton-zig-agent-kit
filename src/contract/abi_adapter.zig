@@ -3194,7 +3194,10 @@ fn decodeBodyFieldsJsonAlloc(
     var writer = std.io.Writer.Allocating.init(allocator);
     errdefer writer.deinit();
 
-    try writeDecodedBodyFieldsJson(&writer.writer, allocator, params, slice, allow_tail_variable);
+    try writeDecodedBodyFieldsJson(&writer.writer, allocator, params, slice, .{
+        .terminal = allow_tail_variable,
+        .trailing_exact = if (allow_tail_variable) zero_body_footprint else null,
+    });
     return try writer.toOwnedSlice();
 }
 
@@ -3207,16 +3210,34 @@ fn decodeBodyParamJsonAlloc(
     var writer = std.io.Writer.Allocating.init(allocator);
     errdefer writer.deinit();
 
-    try writeDecodedBodyParamJson(&writer.writer, allocator, param, slice, is_last);
+    try writeDecodedBodyParamJson(&writer.writer, allocator, param, slice, .{
+        .terminal = is_last,
+        .trailing_exact = if (is_last) zero_body_footprint else null,
+    });
     return try writer.toOwnedSlice();
 }
+
+const BodyFootprint = struct {
+    bits: u16,
+    refs: u8,
+};
+
+const BodyDecodeContext = struct {
+    terminal: bool,
+    trailing_exact: ?BodyFootprint,
+};
+
+const zero_body_footprint = BodyFootprint{
+    .bits = 0,
+    .refs = 0,
+};
 
 fn writeDecodedBodyFieldsJson(
     writer: anytype,
     allocator: std.mem.Allocator,
     params: []const ParamDef,
     slice: *cell.Slice,
-    allow_tail_variable: bool,
+    context: BodyDecodeContext,
 ) anyerror!void {
     if (allParamNamesMissing(params)) {
         try writer.writeByte('[');
@@ -3227,7 +3248,7 @@ fn writeDecodedBodyFieldsJson(
                 allocator,
                 param,
                 slice,
-                allow_tail_variable and idx + 1 == params.len,
+                bodyFieldDecodeContext(params[idx + 1 ..], context),
             );
         }
         try writer.writeByte(']');
@@ -3244,7 +3265,7 @@ fn writeDecodedBodyFieldsJson(
             allocator,
             param,
             slice,
-            allow_tail_variable and idx + 1 == params.len,
+            bodyFieldDecodeContext(params[idx + 1 ..], context),
         );
     }
     try writer.writeByte('}');
@@ -3255,7 +3276,7 @@ fn writeDecodedBodyParamJson(
     allocator: std.mem.Allocator,
     param: ParamDef,
     slice: *cell.Slice,
-    is_last: bool,
+    context: BodyDecodeContext,
 ) anyerror!void {
     if (optionalInnerType(param.type_name)) |inner_type| {
         const present = try loadUintDynamic(slice, 1);
@@ -3264,14 +3285,14 @@ fn writeDecodedBodyParamJson(
             return;
         }
 
-        return writeDecodedBodyParamJson(writer, allocator, paramWithType(param, inner_type), slice, is_last);
+        return writeDecodedBodyParamJson(writer, allocator, paramWithType(param, inner_type), slice, context);
     }
 
     if (arrayInnerType(param.type_name)) |inner_type| {
         const inner_param = paramWithType(param, inner_type);
         const length = try loadUintDynamic(slice, abi_array_length_bits);
         if (!paramIsBodySelfDelimited(inner_param)) {
-            if (!is_last or length > 1) return error.UnsupportedAbiType;
+            if (length > 1) return error.UnsupportedAbiType;
         }
 
         try writer.writeByte('[');
@@ -3283,7 +3304,10 @@ fn writeDecodedBodyParamJson(
                 allocator,
                 inner_param,
                 slice,
-                is_last and idx + 1 == length,
+                .{
+                    .terminal = context.terminal and idx + 1 == length,
+                    .trailing_exact = if (idx + 1 == length) context.trailing_exact else null,
+                },
             );
         }
         try writer.writeByte(']');
@@ -3291,10 +3315,10 @@ fn writeDecodedBodyParamJson(
     }
 
     if (isCompositeParam(param)) {
-        return writeDecodedBodyFieldsJson(writer, allocator, param.components, slice, is_last);
+        return writeDecodedBodyFieldsJson(writer, allocator, param.components, slice, context);
     }
 
-    return writeDecodedBodyJsonType(writer, allocator, param.type_name, slice, is_last);
+    return writeDecodedBodyJsonType(writer, allocator, param.type_name, slice, context);
 }
 
 fn writeDecodedBodyJsonType(
@@ -3302,7 +3326,7 @@ fn writeDecodedBodyJsonType(
     allocator: std.mem.Allocator,
     type_name: []const u8,
     slice: *cell.Slice,
-    is_last: bool,
+    context: BodyDecodeContext,
 ) anyerror!void {
     if (std.mem.eql(u8, type_name, "bool")) {
         const value = (try loadUintDynamic(slice, 1)) != 0;
@@ -3363,8 +3387,7 @@ fn writeDecodedBodyJsonType(
     }
 
     if (std.mem.eql(u8, type_name, "string")) {
-        if (!is_last) return error.UnsupportedAbiType;
-        const bytes = try loadRemainingBodyBytesAlloc(allocator, slice);
+        const bytes = try loadVariableBodyBytesAlloc(allocator, slice, context);
         defer allocator.free(bytes);
         if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidAbiOutputs;
         try writeJsonString(writer, bytes);
@@ -3372,8 +3395,7 @@ fn writeDecodedBodyJsonType(
     }
 
     if (std.mem.eql(u8, type_name, "bytes")) {
-        if (!is_last) return error.UnsupportedAbiType;
-        const bytes = try loadRemainingBodyBytesAlloc(allocator, slice);
+        const bytes = try loadVariableBodyBytesAlloc(allocator, slice, context);
         defer allocator.free(bytes);
         const encoded = try base64EncodeAlloc(allocator, bytes);
         defer allocator.free(encoded);
@@ -3385,8 +3407,7 @@ fn writeDecodedBodyJsonType(
         const body_boc = switch (dict.storage) {
             .by_ref => try loadRefBodyBocAlloc(allocator, slice),
             .in_cell => blk: {
-                if (!is_last) return error.UnsupportedAbiType;
-                break :blk try buildRemainingBodyBocAlloc(allocator, slice);
+                break :blk try buildVariableBodyBocAlloc(allocator, slice, context);
             },
         };
         defer allocator.free(body_boc);
@@ -3413,8 +3434,7 @@ fn writeDecodedBodyJsonType(
     }
 
     if (isInlineCellLikeAbiType(type_name)) {
-        if (!is_last) return error.UnsupportedAbiType;
-        const body = try buildRemainingBodyBocAlloc(allocator, slice);
+        const body = try buildVariableBodyBocAlloc(allocator, slice, context);
         defer allocator.free(body);
         const encoded = try base64EncodeAlloc(allocator, body);
         defer allocator.free(encoded);
@@ -3454,6 +3474,121 @@ fn paramIsBodySelfDelimited(param: ParamDef) bool {
     }
 
     return true;
+}
+
+fn bodyFieldDecodeContext(params_after: []const ParamDef, inherited: BodyDecodeContext) BodyDecodeContext {
+    return .{
+        .terminal = inherited.terminal and params_after.len == 0,
+        .trailing_exact = exactTrailingBodyFootprint(params_after, inherited.trailing_exact),
+    };
+}
+
+fn exactTrailingBodyFootprint(params: []const ParamDef, inherited: ?BodyFootprint) ?BodyFootprint {
+    var total = inherited orelse return null;
+    for (params) |param| {
+        const footprint = exactBodyFootprint(param) orelse return null;
+        total = addBodyFootprint(total, footprint) orelse return null;
+    }
+    return total;
+}
+
+fn exactBodyFootprint(param: ParamDef) ?BodyFootprint {
+    if (optionalInnerType(param.type_name) != null) return null;
+    if (arrayInnerType(param.type_name) != null) return null;
+
+    if (isCompositeParam(param)) {
+        var total = zero_body_footprint;
+        for (param.components) |component| {
+            const footprint = exactBodyFootprint(component) orelse return null;
+            total = addBodyFootprint(total, footprint) orelse return null;
+        }
+        return total;
+    }
+
+    if (std.mem.eql(u8, param.type_name, "bool")) return .{ .bits = 1, .refs = 0 };
+    if (std.mem.eql(u8, param.type_name, "address")) return .{ .bits = 267, .refs = 0 };
+    if (fixedBytesLength(param.type_name)) |byte_len| return .{ .bits = @intCast(byte_len * 8), .refs = 0 };
+
+    if (std.mem.startsWith(u8, param.type_name, "uint")) {
+        return .{ .bits = parseSizedTypeBits(param.type_name, "uint", 64) catch return null, .refs = 0 };
+    }
+    if (std.mem.startsWith(u8, param.type_name, "int")) {
+        return .{ .bits = parseSizedTypeBits(param.type_name, "int", 64) catch return null, .refs = 0 };
+    }
+
+    if (dictionaryTypeInfo(param.type_name)) |dict| {
+        return switch (dict.storage) {
+            .by_ref => .{ .bits = 0, .refs = 1 },
+            .in_cell => null,
+        };
+    }
+
+    if (isRefCellLikeAbiType(param.type_name)) return .{ .bits = 0, .refs = 1 };
+
+    return null;
+}
+
+fn addBodyFootprint(lhs: BodyFootprint, rhs: BodyFootprint) ?BodyFootprint {
+    const bits = @as(u32, lhs.bits) + rhs.bits;
+    const refs = @as(u16, lhs.refs) + rhs.refs;
+    if (bits > std.math.maxInt(u16) or refs > std.math.maxInt(u8)) return null;
+    return .{
+        .bits = @intCast(bits),
+        .refs = @intCast(refs),
+    };
+}
+
+fn loadVariableBodyBytesAlloc(
+    allocator: std.mem.Allocator,
+    slice: *cell.Slice,
+    context: BodyDecodeContext,
+) ![]u8 {
+    const trailing = context.trailing_exact orelse {
+        if (!context.terminal) return error.UnsupportedAbiType;
+        return loadRemainingBodyBytesAlloc(allocator, slice);
+    };
+
+    if (slice.remainingRefs() != trailing.refs) return error.InvalidAbiOutputs;
+    if (slice.remainingBits() < trailing.bits) return error.InvalidAbiOutputs;
+
+    const bits = slice.remainingBits() - trailing.bits;
+    if (bits % 8 != 0) return error.InvalidAbiOutputs;
+    return loadBitsRightAlignedAlloc(allocator, slice, bits);
+}
+
+fn buildVariableBodyBocAlloc(
+    allocator: std.mem.Allocator,
+    slice: *cell.Slice,
+    context: BodyDecodeContext,
+) ![]u8 {
+    const trailing = context.trailing_exact orelse {
+        if (!context.terminal) return error.UnsupportedAbiType;
+        return buildRemainingBodyBocAlloc(allocator, slice);
+    };
+
+    if (slice.remainingBits() < trailing.bits or slice.remainingRefs() < trailing.refs) {
+        return error.InvalidAbiOutputs;
+    }
+
+    const prefix_bits = slice.remainingBits() - trailing.bits;
+    const prefix_refs: u8 = slice.remainingRefs() - trailing.refs;
+
+    var builder = cell.Builder.init();
+    const data = try loadBitsRightAlignedAlloc(allocator, slice, prefix_bits);
+    defer allocator.free(data);
+    try builder.storeBits(data, prefix_bits);
+
+    var idx: u8 = 0;
+    while (idx < prefix_refs) : (idx += 1) {
+        try builder.storeRef(try slice.loadRef());
+    }
+
+    const value = try builder.toCell(allocator);
+    defer {
+        value.ref_cnt = 0;
+        value.deinit(allocator);
+    }
+    return boc.serializeBoc(allocator, value);
 }
 
 fn loadUintDynamic(slice: *cell.Slice, bits: u16) !u64 {
@@ -4276,6 +4411,42 @@ test "abi adapter decodes function body with ref payload before trailing scalar"
     try std.testing.expectEqualStrings(expected, decoded);
 }
 
+test "abi adapter decodes function body with string before trailing scalar" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "set_note",
+        \\      "opcode": "0x0BADF00D",
+        \\      "inputs": [
+        \\        {"name": "note", "type": "string"},
+        \\        {"name": "enabled", "type": "bool"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var parsed = try parseAbiInfoJsonAlloc(allocator, json);
+    defer parsed.deinit(allocator);
+
+    const body = try buildFunctionBodyBocAlloc(allocator, parsed.abi.functions[0], &.{
+        .{ .text = "hello tail" },
+        .{ .uint = 1 },
+    });
+    defer allocator.free(body);
+
+    const decoded = try decodeFunctionBodyFromAbiJsonAlloc(allocator, &parsed.abi, null, body);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqualStrings(
+        "{\"note\":\"hello tail\",\"enabled\":true}",
+        decoded,
+    );
+}
+
 test "abi adapter decodes opcode-less function body by explicit selector" {
     const allocator = std.testing.allocator;
     const json =
@@ -4356,6 +4527,57 @@ test "abi adapter decodes event body with ref payload before trailing scalar" {
     var builder = cell.Builder.init();
     try builder.storeUint(0x01020304, 32);
     try body_builder.storeRefBoc(&builder, allocator, payload_boc);
+    try builder.storeUint(1, 1);
+    const body_cell = try builder.toCell(allocator);
+    defer body_cell.deinit(allocator);
+    const body_boc = try boc.serializeBoc(allocator, body_cell);
+    defer allocator.free(body_boc);
+
+    const decoded = try decodeEventBodyFromAbiJsonAlloc(allocator, &parsed.abi, null, body_boc);
+    defer allocator.free(decoded);
+
+    const expected = try std.fmt.allocPrint(
+        allocator,
+        "{{\"payload\":\"{s}\",\"enabled\":true}}",
+        .{payload_b64},
+    );
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, decoded);
+}
+
+test "abi adapter decodes event body with inline cell before trailing scalar" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "events": [
+        \\    {
+        \\      "name": "InlinePayloadSet",
+        \\      "opcode": "0x0A0B0C0D",
+        \\      "inputs": [
+        \\        {"name": "payload", "type": "cell"},
+        \\        {"name": "enabled", "type": "bool"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var payload_builder = cell.Builder.init();
+    try payload_builder.storeUint(0xBEEF, 16);
+    const payload = try payload_builder.toCell(allocator);
+    defer payload.deinit(allocator);
+    const payload_boc = try boc.serializeBoc(allocator, payload);
+    defer allocator.free(payload_boc);
+    const payload_b64 = try base64EncodeAlloc(allocator, payload_boc);
+    defer allocator.free(payload_b64);
+
+    var parsed = try parseAbiInfoJsonAlloc(allocator, json);
+    defer parsed.deinit(allocator);
+
+    var builder = cell.Builder.init();
+    try builder.storeUint(0x0A0B0C0D, 32);
+    try storeInlineBoc(&builder, allocator, payload_boc);
     try builder.storeUint(1, 1);
     const body_cell = try builder.toCell(allocator);
     defer body_cell.deinit(allocator);
