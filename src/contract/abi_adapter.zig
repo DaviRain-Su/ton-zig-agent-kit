@@ -100,6 +100,7 @@ pub const ContractAdapter = struct {
 
 const max_abi_source_bytes: usize = 1 << 20;
 const default_ipfs_gateway = "https://ipfs.io";
+const abi_array_length_bits: u16 = 32;
 
 pub fn querySupportedInterfaces(client: *http_client.TonHttpClient, addr: []const u8) !?SupportedInterfaces {
     const supported = supportedInterfacesFromMethodSupport(
@@ -746,7 +747,13 @@ fn storeAbiValue(
         return storeAbiValue(builder, allocator, paramWithType(param, inner_type), value);
     }
 
-    if (arrayInnerType(param.type_name) != null) return error.UnsupportedAbiType;
+    if (arrayInnerType(param.type_name)) |inner_type| {
+        const json_text = switch (value) {
+            .json => |text| text,
+            else => return error.InvalidAbiArguments,
+        };
+        return storeArrayJsonText(builder, allocator, paramWithType(param, inner_type), json_text);
+    }
 
     if (isCompositeParam(param)) {
         const json_text = switch (value) {
@@ -1170,6 +1177,18 @@ fn storeCompositeJsonText(
     try storeAbiJsonValue(builder, allocator, param, parsed.value);
 }
 
+fn storeArrayJsonText(
+    builder: *cell.Builder,
+    allocator: std.mem.Allocator,
+    element_param: ParamDef,
+    json_text: []const u8,
+) anyerror!void {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_text, .{});
+    defer parsed.deinit();
+
+    try storeAbiArrayJsonValue(builder, allocator, element_param, parsed.value);
+}
+
 fn buildCompositeStackArgJsonAlloc(
     allocator: std.mem.Allocator,
     param: ParamDef,
@@ -1216,7 +1235,9 @@ fn storeAbiJsonValue(
         return storeAbiJsonValue(builder, allocator, paramWithType(param, inner_type), json_value);
     }
 
-    if (arrayInnerType(param.type_name) != null) return error.UnsupportedAbiType;
+    if (arrayInnerType(param.type_name)) |inner_type| {
+        return storeAbiArrayJsonValue(builder, allocator, paramWithType(param, inner_type), json_value);
+    }
 
     if (isCompositeParam(param)) {
         return storeCompositeFieldsJsonValue(builder, allocator, param.components, json_value);
@@ -1303,6 +1324,25 @@ fn storeAbiJsonValue(
     }
 
     return error.UnsupportedAbiType;
+}
+
+fn storeAbiArrayJsonValue(
+    builder: *cell.Builder,
+    allocator: std.mem.Allocator,
+    element_param: ParamDef,
+    json_value: std.json.Value,
+) anyerror!void {
+    const items = switch (json_value) {
+        .array => |value| value.items,
+        else => return error.InvalidAbiArguments,
+    };
+
+    if (items.len > std.math.maxInt(u32)) return error.InvalidAbiArguments;
+
+    try builder.storeUint(items.len, abi_array_length_bits);
+    for (items) |item| {
+        try storeAbiJsonValue(builder, allocator, element_param, item);
+    }
 }
 
 fn storeCompositeFieldsJsonValue(
@@ -2470,6 +2510,50 @@ test "abi adapter supports large numeric text in body encoding" {
     for ([_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F }) |byte| {
         try std.testing.expectEqual(byte, try slice.loadUint8());
     }
+}
+
+test "abi adapter supports scalar and tuple arrays in body encoding" {
+    const allocator = std.testing.allocator;
+
+    const function = FunctionDef{
+        .name = "set_many",
+        .opcode = 0x13572468,
+        .inputs = &.{
+            .{ .name = "values", .type_name = "uint16[]" },
+            .{
+                .name = "configs",
+                .type_name = "tuple[]",
+                .components = &.{
+                    .{ .name = "enabled", .type_name = "bool" },
+                    .{ .name = "index", .type_name = "uint8" },
+                },
+            },
+        },
+        .outputs = &.{},
+    };
+
+    const built = try buildFunctionBodyBocAlloc(allocator, function, &.{
+        .{ .json = "[1,2,3]" },
+        .{ .json = "[{\"enabled\":true,\"index\":7},{\"enabled\":false,\"index\":9}]" },
+    });
+    defer allocator.free(built);
+
+    const root = try boc.deserializeBoc(allocator, built);
+    defer root.deinit(allocator);
+
+    var slice = root.toSlice();
+    try std.testing.expectEqual(@as(u64, 0x13572468), try slice.loadUint(32));
+
+    try std.testing.expectEqual(@as(u64, 3), try slice.loadUint(abi_array_length_bits));
+    try std.testing.expectEqual(@as(u64, 1), try slice.loadUint(16));
+    try std.testing.expectEqual(@as(u64, 2), try slice.loadUint(16));
+    try std.testing.expectEqual(@as(u64, 3), try slice.loadUint(16));
+
+    try std.testing.expectEqual(@as(u64, 2), try slice.loadUint(abi_array_length_bits));
+    try std.testing.expectEqual(@as(u64, 1), try slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 7), try slice.loadUint(8));
+    try std.testing.expectEqual(@as(u64, 0), try slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 9), try slice.loadUint(8));
 }
 
 test "abi adapter supports optional and string stack args" {
