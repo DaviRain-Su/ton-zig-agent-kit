@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const address_mod = @import("../core/address.zig");
+const boc = @import("../core/boc.zig");
 const body_builder = @import("../core/body_builder.zig");
 const external_message = @import("../core/external_message.zig");
 const core_types = @import("../core/types.zig");
@@ -119,6 +120,176 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             }
 
             return out;
+        }
+
+        fn decodedBodyError(
+            address: []const u8,
+            kind: tools_types.DecodedBodyKind,
+            error_message: []const u8,
+        ) tools_types.DecodedBodyResult {
+            return .{
+                .address = address,
+                .kind = kind,
+                .selector = "",
+                .opcode = null,
+                .decoded_json = "",
+                .success = false,
+                .error_message = error_message,
+            };
+        }
+
+        /// Decode a function body using a provided ABI document.
+        pub fn decodeFunctionBodyAbi(
+            self: *@This(),
+            contract_address: []const u8,
+            abi_json: []const u8,
+            body_boc: []const u8,
+            function_selector: ?[]const u8,
+        ) !tools_types.DecodedBodyResult {
+            var abi = abi_adapter.loadAbiInfoSourceAlloc(self.allocator, abi_json) catch |err| {
+                return decodedBodyError(contract_address, .function, @errorName(err));
+            };
+            defer abi.deinit(self.allocator);
+
+            const function = abi_adapter.resolveFunctionByBodyBoc(&abi.abi, function_selector, body_boc) catch |err| {
+                return decodedBodyError(contract_address, .function, @errorName(err));
+            };
+
+            const selector = abi_adapter.buildFunctionSelectorAlloc(self.allocator, function.*) catch |err| {
+                return decodedBodyError(contract_address, .function, @errorName(err));
+            };
+            errdefer self.allocator.free(selector);
+
+            const decoded_json = abi_adapter.decodeFunctionBodyJsonAlloc(self.allocator, function.*, body_boc) catch |err| {
+                self.allocator.free(selector);
+                return decodedBodyError(contract_address, .function, @errorName(err));
+            };
+            errdefer self.allocator.free(decoded_json);
+
+            return .{
+                .address = contract_address,
+                .kind = .function,
+                .selector = selector,
+                .opcode = function.opcode,
+                .decoded_json = decoded_json,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
+        /// Discover ABI on-chain and decode a function body.
+        pub fn decodeFunctionBodyAuto(
+            self: *@This(),
+            contract_address: []const u8,
+            body_boc: []const u8,
+            function_selector: ?[]const u8,
+        ) !tools_types.DecodedBodyResult {
+            var abi = abi_adapter.queryAbiDocumentAlloc(self.client, contract_address) catch |err| {
+                return decodedBodyError(contract_address, .function, @errorName(err));
+            } orelse return decodedBodyError(contract_address, .function, "AbiNotFound");
+            defer abi.deinit(self.allocator);
+
+            const function = abi_adapter.resolveFunctionByBodyBoc(&abi.abi, function_selector, body_boc) catch |err| {
+                return decodedBodyError(contract_address, .function, @errorName(err));
+            };
+
+            const selector = abi_adapter.buildFunctionSelectorAlloc(self.allocator, function.*) catch |err| {
+                return decodedBodyError(contract_address, .function, @errorName(err));
+            };
+            errdefer self.allocator.free(selector);
+
+            const decoded_json = abi_adapter.decodeFunctionBodyJsonAlloc(self.allocator, function.*, body_boc) catch |err| {
+                self.allocator.free(selector);
+                return decodedBodyError(contract_address, .function, @errorName(err));
+            };
+            errdefer self.allocator.free(decoded_json);
+
+            return .{
+                .address = contract_address,
+                .kind = .function,
+                .selector = selector,
+                .opcode = function.opcode,
+                .decoded_json = decoded_json,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
+        /// Decode an event body using a provided ABI document.
+        pub fn decodeEventBodyAbi(
+            self: *@This(),
+            contract_address: []const u8,
+            abi_json: []const u8,
+            body_boc: []const u8,
+            event_selector: ?[]const u8,
+        ) !tools_types.DecodedBodyResult {
+            var abi = abi_adapter.loadAbiInfoSourceAlloc(self.allocator, abi_json) catch |err| {
+                return decodedBodyError(contract_address, .event, @errorName(err));
+            };
+            defer abi.deinit(self.allocator);
+
+            const event = abi_adapter.resolveEventByBodyBoc(&abi.abi, event_selector, body_boc) catch |err| {
+                return decodedBodyError(contract_address, .event, @errorName(err));
+            };
+
+            const selector = abi_adapter.buildEventSelectorAlloc(self.allocator, event.*) catch |err| {
+                return decodedBodyError(contract_address, .event, @errorName(err));
+            };
+            errdefer self.allocator.free(selector);
+
+            const decoded_json = abi_adapter.decodeEventBodyJsonAlloc(self.allocator, event.*, body_boc) catch |err| {
+                self.allocator.free(selector);
+                return decodedBodyError(contract_address, .event, @errorName(err));
+            };
+            errdefer self.allocator.free(decoded_json);
+
+            return .{
+                .address = contract_address,
+                .kind = .event,
+                .selector = selector,
+                .opcode = event.opcode,
+                .decoded_json = decoded_json,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
+        /// Discover ABI on-chain and decode an event body.
+        pub fn decodeEventBodyAuto(
+            self: *@This(),
+            contract_address: []const u8,
+            body_boc: []const u8,
+            event_selector: ?[]const u8,
+        ) !tools_types.DecodedBodyResult {
+            var abi = abi_adapter.queryAbiDocumentAlloc(self.client, contract_address) catch |err| {
+                return decodedBodyError(contract_address, .event, @errorName(err));
+            } orelse return decodedBodyError(contract_address, .event, "AbiNotFound");
+            defer abi.deinit(self.allocator);
+
+            const event = abi_adapter.resolveEventByBodyBoc(&abi.abi, event_selector, body_boc) catch |err| {
+                return decodedBodyError(contract_address, .event, @errorName(err));
+            };
+
+            const selector = abi_adapter.buildEventSelectorAlloc(self.allocator, event.*) catch |err| {
+                return decodedBodyError(contract_address, .event, @errorName(err));
+            };
+            errdefer self.allocator.free(selector);
+
+            const decoded_json = abi_adapter.decodeEventBodyJsonAlloc(self.allocator, event.*, body_boc) catch |err| {
+                self.allocator.free(selector);
+                return decodedBodyError(contract_address, .event, @errorName(err));
+            };
+            errdefer self.allocator.free(decoded_json);
+
+            return .{
+                .address = contract_address,
+                .kind = .event,
+                .selector = selector,
+                .opcode = event.opcode,
+                .decoded_json = decoded_json,
+                .success = true,
+                .error_message = null,
+            };
         }
 
         /// Compute the deployed contract address for a StateInit BoC and workchain.
@@ -1388,6 +1559,8 @@ pub const BalanceResult = tools_types.BalanceResult;
 pub const AddressResult = tools_types.AddressResult;
 pub const SendResult = tools_types.SendResult;
 pub const RunMethodResult = tools_types.RunMethodResult;
+pub const DecodedBodyKind = tools_types.DecodedBodyKind;
+pub const DecodedBodyResult = tools_types.DecodedBodyResult;
 pub const InvoiceResult = tools_types.InvoiceResult;
 pub const VerifyResult = tools_types.VerifyResult;
 pub const TxResult = tools_types.TxResult;
@@ -1634,7 +1807,156 @@ test "agent tools sendExternalMessage wraps body without wallet" {
     try std.testing.expect(client.last_boc != null);
 }
 
+test "agent tools decodeFunctionBodyAbi decodes function input json" {
+    const allocator = std.testing.allocator;
+
+    const FakeClient = struct {};
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    const abi_json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "transfer",
+        \\      "opcode": "0x11223344",
+        \\      "inputs": [
+        \\        {"name": "to", "type": "address"},
+        \\        {"name": "amount", "type": "coins"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var parsed_abi = try abi_adapter.parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer parsed_abi.deinit(allocator);
+
+    const body_boc = try abi_adapter.buildFunctionBodyFromAbiAlloc(
+        allocator,
+        &parsed_abi.abi,
+        "transfer",
+        &.{
+            .{ .text = "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8" },
+            .{ .uint = 1234 },
+        },
+    );
+    defer allocator.free(body_boc);
+
+    var client = FakeClient{};
+    var tools = FakeTools.init(allocator, &client, .{ .rpc_url = "https://example.invalid" });
+    const result = try tools.decodeFunctionBodyAbi(
+        "0:1111111111111111111111111111111111111111111111111111111111111111",
+        abi_json,
+        body_boc,
+        null,
+    );
+    defer allocator.free(result.selector);
+    defer allocator.free(result.decoded_json);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqual(tools_types.DecodedBodyKind.function, result.kind);
+    try std.testing.expectEqual(@as(?u32, 0x11223344), result.opcode);
+    try std.testing.expectEqualStrings("transfer(address,coins)", result.selector);
+    try std.testing.expectEqualStrings(
+        "{\"to\":\"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8\",\"amount\":1234}",
+        result.decoded_json,
+    );
+}
+
+test "agent tools decodeEventBodyAuto discovers abi and decodes event body" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const abi_json =
+        \\{
+        \\  "version": "1.0",
+        \\  "events": [
+        \\    {
+        \\      "name": "Transfer",
+        \\      "opcode": "0x01020304",
+        \\      "inputs": [
+        \\        {"name": "amount", "type": "coins"},
+        \\        {"name": "active", "type": "bool"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "abi.json", .data = abi_json });
+    const abi_path = try tmp.dir.realpathAlloc(allocator, "abi.json");
+    defer allocator.free(abi_path);
+    const abi_uri = try std.fmt.allocPrint(allocator, "file://{s}", .{abi_path});
+    defer allocator.free(abi_uri);
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+        abi_uri: []const u8,
+
+        pub fn runGetMethod(self: *@This(), addr: []const u8, method: []const u8, stack: []const []const u8) anyerror!core_types.RunGetMethodResponse {
+            _ = addr;
+            _ = method;
+            _ = stack;
+
+            var builder = core_types.Builder.init();
+            try builder.storeUint(0x01, 8);
+            try builder.storeBits(self.abi_uri, @intCast(self.abi_uri.len * 8));
+            const cell_value = try builder.toCell(self.allocator);
+
+            const entries = try self.allocator.alloc(core_types.StackEntry, 1);
+            entries[0] = .{ .cell = cell_value };
+            return .{
+                .exit_code = 0,
+                .stack = entries,
+                .logs = "",
+            };
+        }
+
+        pub fn freeRunGetMethodResponse(self: *@This(), response: *core_types.RunGetMethodResponse) void {
+            for (response.stack) |*entry| {
+                switch (entry.*) {
+                    .cell => |value| value.deinit(self.allocator),
+                    else => {},
+                }
+            }
+            if (response.stack.len > 0) self.allocator.free(response.stack);
+        }
+    };
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    var event_builder = core_types.Builder.init();
+    try event_builder.storeUint(0x01020304, 32);
+    try event_builder.storeCoins(99);
+    try event_builder.storeUint(1, 1);
+    const event_cell = try event_builder.toCell(allocator);
+    defer event_cell.deinit(allocator);
+    const event_body_boc = try boc.serializeBoc(allocator, event_cell);
+    defer allocator.free(event_body_boc);
+
+    var client = FakeClient{ .allocator = allocator, .abi_uri = abi_uri };
+    var tools = FakeTools.init(allocator, &client, .{ .rpc_url = "https://example.invalid" });
+    const result = try tools.decodeEventBodyAuto(
+        "0:2222222222222222222222222222222222222222222222222222222222222222",
+        event_body_boc,
+        null,
+    );
+    defer allocator.free(result.selector);
+    defer allocator.free(result.decoded_json);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqual(tools_types.DecodedBodyKind.event, result.kind);
+    try std.testing.expectEqual(@as(?u32, 0x01020304), result.opcode);
+    try std.testing.expectEqualStrings("Transfer(coins,bool)", result.selector);
+    try std.testing.expectEqualStrings("{\"amount\":99,\"active\":true}", result.decoded_json);
+}
+
 test "agent tools generic runGetMethod result type is exported" {
+    _ = AgentTools.decodeFunctionBodyAbi;
+    _ = AgentTools.decodeFunctionBodyAuto;
+    _ = AgentTools.decodeEventBodyAbi;
+    _ = AgentTools.decodeEventBodyAuto;
     _ = AgentTools.runGetMethod;
     _ = AgentTools.runGetMethodAbi;
     _ = AgentTools.runGetMethodAuto;
@@ -1656,6 +1978,10 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = ProviderAgentTools.runGetMethod;
     _ = ProviderAgentTools.runGetMethodAbi;
     _ = ProviderAgentTools.runGetMethodAuto;
+    _ = ProviderAgentTools.decodeFunctionBodyAbi;
+    _ = ProviderAgentTools.decodeFunctionBodyAuto;
+    _ = ProviderAgentTools.decodeEventBodyAbi;
+    _ = ProviderAgentTools.decodeEventBodyAuto;
     _ = ProviderAgentTools.deriveWalletInit;
     _ = ProviderAgentTools.verifyPayment;
     _ = ProviderAgentTools.waitPayment;
@@ -1671,6 +1997,7 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = ProviderAgentTools.deployWalletSelf;
     _ = ProviderAgentTools.sendInitialTransfer;
     _ = AddressResult;
+    _ = DecodedBodyResult;
     _ = RunMethodResult;
     _ = WalletInitResult;
     _ = JettonInfoResult;

@@ -32,6 +32,21 @@ pub const RunMethodResult = struct {
     error_message: ?[]const u8 = null,
 };
 
+pub const DecodedBodyKind = enum {
+    function,
+    event,
+};
+
+pub const DecodedBodyResult = struct {
+    address: []const u8,
+    kind: DecodedBodyKind,
+    selector: []const u8,
+    opcode: ?u32,
+    decoded_json: []const u8,
+    success: bool,
+    error_message: ?[]const u8 = null,
+};
+
 pub const AddressResult = struct {
     raw_address: []const u8,
     user_friendly_address: []const u8,
@@ -157,6 +172,7 @@ pub const ToolResponse = union(enum) {
     wallet_init: WalletInitResult,
     send: SendResult,
     run_method: RunMethodResult,
+    decoded_body: DecodedBodyResult,
     invoice: InvoiceResult,
     verify: VerifyResult,
     transaction: TxResult,
