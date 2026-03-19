@@ -385,7 +385,7 @@ fn parseStackEntry(allocator: std.mem.Allocator, value: std.json.Value) anyerror
         return .{ .builder = parsed_cell };
     }
 
-    return error.UnsupportedStackEntry;
+    return .{ .unsupported = try stringifyJsonValueAlloc(allocator, value) };
 }
 
 const NormalizedStackEntry = struct {
@@ -542,6 +542,7 @@ fn freeStackEntry(allocator: std.mem.Allocator, entry: *types.StackEntry) void {
             allocator.free(items);
         },
         .big_number => |value| if (value.len > 0) allocator.free(value),
+        .unsupported => |value| if (value.len > 0) allocator.free(value),
         .cell => |value| value.deinit(allocator),
         .slice => |value| value.deinit(allocator),
         .builder => |value| value.deinit(allocator),
@@ -582,6 +583,13 @@ fn dupStackString(allocator: std.mem.Allocator, value: std.json.Value) ![]u8 {
             error.InvalidResponse,
         else => error.InvalidResponse,
     };
+}
+
+fn stringifyJsonValueAlloc(allocator: std.mem.Allocator, value: std.json.Value) ![]u8 {
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+    try std.json.Stringify.value(value, .{}, &writer.writer);
+    return try writer.toOwnedSlice();
 }
 
 fn parseTonNumber(allocator: std.mem.Allocator, value: std.json.Value) !types.StackEntry {
@@ -1147,6 +1155,46 @@ test "parse runGetMethod stack supports tonlib stackentry objects" {
     try std.testing.expectEqual(@as(usize, 1), stack[2].tuple.len);
     try std.testing.expectEqual(@as(usize, 1), stack[2].tuple[0].list.len);
     try std.testing.expectEqual(@as(i64, 2), stack[2].tuple[0].list[0].number);
+}
+
+test "parse runGetMethod stack preserves unsupported entries" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "result": {
+        \\    "exit_code": 0,
+        \\    "stack": [
+        \\      {"@type":"tvm.stackEntryUnsupported","value":{"kind":"continuation","pc":7}},
+        \\      ["num","0x2"]
+        \\    ],
+        \\    "logs": ""
+        \\  }
+        \\}
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+
+    const stack = try parseStack(allocator, parsed.value.object.get("result").?.object.get("stack").?);
+    defer {
+        var client = TonHttpClient{
+            .allocator = allocator,
+            .base_url = "",
+            .api_key = null,
+            .http_client = .{ .allocator = allocator },
+        };
+        var response = types.RunGetMethodResponse{
+            .exit_code = 0,
+            .stack = stack,
+            .logs = "",
+        };
+        client.freeRunGetMethodResponse(&response);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), stack.len);
+    try std.testing.expect(stack[0] == .unsupported);
+    try std.testing.expect(std.mem.indexOf(u8, stack[0].unsupported, "\"continuation\"") != null);
+    try std.testing.expectEqual(@as(i64, 2), stack[1].number);
 }
 
 test "decode base64 flexible accepts standard and url safe" {

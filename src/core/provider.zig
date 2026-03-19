@@ -282,7 +282,9 @@ const LookupTxOp = struct {
 
 fn freeStackEntry(allocator: std.mem.Allocator, entry: *types.StackEntry) void {
     switch (entry.*) {
-        .null, .number, .big_number => {},
+        .null, .number => {},
+        .big_number => |value| if (value.len > 0) allocator.free(value),
+        .unsupported => |value| if (value.len > 0) allocator.free(value),
         .cell => |value| value.deinit(allocator),
         .slice => |value| value.deinit(allocator),
         .builder => |value| value.deinit(allocator),

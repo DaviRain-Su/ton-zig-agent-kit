@@ -265,6 +265,11 @@ fn writeStackEntryJson(writer: anytype, allocator: std.mem.Allocator, entry: *co
             try writeJsonString(writer, value);
             try writer.writeByte(']');
         },
+        .unsupported => |value| {
+            try writer.writeAll("[\"unsupported\",");
+            try writeJsonString(writer, value);
+            try writer.writeByte(']');
+        },
         .bytes => |value| {
             try writer.writeAll("[\"bytes\",");
             try writeJsonString(writer, value);
@@ -449,6 +454,7 @@ test "serialize stack entries to json" {
     var stack = [_]types.StackEntry{
         .{ .null = {} },
         .{ .builder = payload },
+        .{ .unsupported = "{\"@type\":\"tvm.stackEntryCont\"}" },
         .{ .tuple = nested[0..] },
         .{ .list = nested[0..] },
     };
@@ -458,6 +464,7 @@ test "serialize stack entries to json" {
 
     try std.testing.expect(std.mem.indexOf(u8, json, "[\"null\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "[\"builder\",\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "[\"unsupported\",\"{\\\"@type\\\":\\\"tvm.stackEntryCont\\\"}\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "[\"tuple\",[[\"num\",7],[\"num\",\"0x1234567890ABCDEF1234567890ABCDEF\"],[\"bytes\",\"line1\\n\\\"quoted\\\"\"]]]") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "[\"list\",[[\"num\",7],[\"num\",\"0x1234567890ABCDEF1234567890ABCDEF\"],[\"bytes\",\"line1\\n\\\"quoted\\\"\"]]]") != null);
 }

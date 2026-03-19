@@ -41,6 +41,7 @@ pub const StackEntry = union(enum) {
     null: void,
     number: i64,
     big_number: []const u8,
+    unsupported: []const u8,
     cell: *cell.Cell,
     slice: *cell.Cell,
     builder: *cell.Cell,
