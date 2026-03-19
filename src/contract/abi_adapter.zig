@@ -1218,6 +1218,20 @@ fn storeAbiValue(
         try builder.storeBits(bytes, @intCast(bytes.len * 8));
         return;
     }
+    if (dictionaryTypeInfo(param.type_name)) |dict| {
+        const dict_boc = if (std.meta.activeTag(value) == .json)
+            (try maybeBuildDictionaryBocFromJsonTextAlloc(allocator, dict, value.json)) orelse return error.InvalidAbiArguments
+        else
+            try allocator.dupe(u8, try abiValueAsBoc(value));
+        defer allocator.free(dict_boc);
+
+        if (dict.storage == .in_cell) {
+            try storeInlineBoc(builder, allocator, dict_boc);
+        } else {
+            try body_builder.storeRefBoc(builder, allocator, dict_boc);
+        }
+        return;
+    }
     if (isInlineCellLikeAbiType(param.type_name)) {
         try storeInlineBoc(builder, allocator, try abiValueAsBoc(value));
         return;
@@ -1349,6 +1363,22 @@ fn abiValueToStackArgAlloc(
     }
 
     if (stackCellLikeKind(param.type_name)) |kind| {
+        if (dictionaryTypeInfo(param.type_name)) |dict| {
+            const encoded = switch (value) {
+                .json => |text| (try maybeBuildDictionaryBocFromJsonTextAlloc(allocator, dict, text)) orelse return error.InvalidAbiArguments,
+                .boc => |v| try allocator.dupe(u8, v),
+                else => return error.InvalidAbiArguments,
+            };
+            return .{
+                .arg = switch (kind) {
+                    .cell => .{ .cell = encoded },
+                    .slice => .{ .slice = encoded },
+                    .builder => .{ .builder = encoded },
+                },
+                .owned_buffer = encoded,
+            };
+        }
+
         return switch (value) {
             .boc => |v| switch (kind) {
                 .cell => .{ .arg = .{ .cell = v } },
@@ -1972,16 +2002,24 @@ fn storeAbiJsonValue(
     }
 
     if (isInlineCellLikeAbiType(param.type_name)) {
-        const decoded = try decodeJsonBocAlloc(allocator, json_value);
-        defer decoded.deinit(allocator);
-        try storeInlineBoc(builder, allocator, decoded.value);
+        if (dictionaryTypeInfo(param.type_name) != null) {
+            try storeDictionaryJsonOrBoc(builder, allocator, param, json_value, .in_cell);
+        } else {
+            const decoded = try decodeJsonBocAlloc(allocator, json_value);
+            defer decoded.deinit(allocator);
+            try storeInlineBoc(builder, allocator, decoded.value);
+        }
         return;
     }
 
     if (isRefCellLikeAbiType(param.type_name)) {
-        const decoded = try decodeJsonBocAlloc(allocator, json_value);
-        defer decoded.deinit(allocator);
-        try body_builder.storeRefBoc(builder, allocator, decoded.value);
+        if (dictionaryTypeInfo(param.type_name) != null) {
+            try storeDictionaryJsonOrBoc(builder, allocator, param, json_value, .by_ref);
+        } else {
+            const decoded = try decodeJsonBocAlloc(allocator, json_value);
+            defer decoded.deinit(allocator);
+            try body_builder.storeRefBoc(builder, allocator, decoded.value);
+        }
         return;
     }
 
@@ -2247,6 +2285,40 @@ const OwnedDecodedBytes = struct {
     }
 };
 
+const DictionaryStorageKind = enum {
+    in_cell,
+    by_ref,
+};
+
+const DictionaryKeyKind = enum {
+    typed,
+    raw_bits,
+};
+
+const DictionaryTypeInfo = struct {
+    storage: DictionaryStorageKind,
+    key_kind: DictionaryKeyKind,
+    key_type: []const u8,
+    key_bits: u16,
+    value_type: []const u8,
+};
+
+const DictionaryEncodedEntry = struct {
+    key_bits: []u8,
+    value_cell: *cell.Cell,
+};
+
+const DictionaryDecodedEntry = struct {
+    key_json: []u8,
+    value_json: []u8,
+
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.key_json);
+        allocator.free(self.value_json);
+        self.* = undefined;
+    }
+};
+
 fn compositeStackTag(type_name: []const u8) []const u8 {
     const trimmed = std.mem.trim(u8, type_name, " \t\r\n");
     if (std.mem.eql(u8, trimmed, "list") or
@@ -2370,6 +2442,633 @@ fn decodeJsonBocAlloc(allocator: std.mem.Allocator, json_value: std.json.Value) 
         },
         else => error.InvalidAbiArguments,
     };
+}
+
+fn dictionaryTypeInfo(type_name: []const u8) ?DictionaryTypeInfo {
+    const trimmed = std.mem.trim(u8, type_name, " \t\r\n");
+
+    const inline_bases = [_][]const u8{ "dict", "map", "hashmap", "hashmape" };
+    const ref_bases = [_][]const u8{ "dict_ref", "map_ref", "hashmap_ref", "hashmape_ref" };
+
+    inline for (inline_bases) |base| {
+        if (parseDictionaryTypeInfo(trimmed, base, .in_cell)) |info| return info;
+    }
+    inline for (ref_bases) |base| {
+        if (parseDictionaryTypeInfo(trimmed, base, .by_ref)) |info| return info;
+    }
+
+    return null;
+}
+
+fn parseDictionaryTypeInfo(
+    trimmed: []const u8,
+    comptime base: []const u8,
+    storage: DictionaryStorageKind,
+) ?DictionaryTypeInfo {
+    if (!std.ascii.startsWithIgnoreCase(trimmed, base)) return null;
+    if (trimmed.len <= base.len) return null;
+
+    const suffix = std.mem.trim(u8, trimmed[base.len..], " \t\r\n");
+    if (suffix.len < 3 or suffix[0] != '<' or suffix[suffix.len - 1] != '>') return null;
+
+    const args = splitTopLevelGenericPair(suffix[1 .. suffix.len - 1]) orelse return null;
+    const first = std.mem.trim(u8, args.first, " \t\r\n");
+    const second = std.mem.trim(u8, args.second, " \t\r\n");
+    if (first.len == 0 or second.len == 0) return null;
+
+    if (std.mem.allEqual(u8, first, '0')) {
+        return .{
+            .storage = storage,
+            .key_kind = .raw_bits,
+            .key_type = first,
+            .key_bits = 0,
+            .value_type = second,
+        };
+    }
+
+    const raw_bits = std.fmt.parseInt(u16, first, 10) catch null;
+    if (raw_bits) |key_bits| {
+        return .{
+            .storage = storage,
+            .key_kind = .raw_bits,
+            .key_type = first,
+            .key_bits = key_bits,
+            .value_type = second,
+        };
+    }
+
+    const typed_bits = dictionaryTypedKeyBits(first) orelse return null;
+    return .{
+        .storage = storage,
+        .key_kind = .typed,
+        .key_type = first,
+        .key_bits = typed_bits,
+        .value_type = second,
+    };
+}
+
+fn splitTopLevelGenericPair(text: []const u8) ?struct { first: []const u8, second: []const u8 } {
+    var depth: i32 = 0;
+    for (text, 0..) |char, idx| {
+        switch (char) {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if (depth < 0) return null;
+            },
+            ',' => if (depth == 0) {
+                return .{
+                    .first = text[0..idx],
+                    .second = text[idx + 1 ..],
+                };
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+fn dictionaryTypedKeyBits(type_name: []const u8) ?u16 {
+    if (std.mem.eql(u8, type_name, "address")) return 267;
+    if (std.mem.eql(u8, type_name, "bool")) return 1;
+    if (fixedBytesLength(type_name)) |byte_len| return @intCast(byte_len * 8);
+    if (std.mem.startsWith(u8, type_name, "uint")) return parseSizedTypeBits(type_name, "uint", 64) catch null;
+    if (std.mem.startsWith(u8, type_name, "int")) return parseSizedTypeBits(type_name, "int", 64) catch null;
+    return null;
+}
+
+fn bitByteLen(bits: u16) usize {
+    return @intCast(@divTrunc(bits + 7, 8));
+}
+
+fn storeDictionaryJsonOrBoc(
+    builder: *cell.Builder,
+    allocator: std.mem.Allocator,
+    param: ParamDef,
+    json_value: std.json.Value,
+    storage: DictionaryStorageKind,
+) !void {
+    const dict = dictionaryTypeInfo(param.type_name) orelse return error.UnsupportedAbiType;
+    const maybe_boc = try maybeBuildDictionaryBocFromJsonValueAlloc(allocator, dict, json_value);
+    if (maybe_boc) |dict_boc| {
+        defer allocator.free(dict_boc);
+        switch (storage) {
+            .in_cell => try storeInlineBoc(builder, allocator, dict_boc),
+            .by_ref => try body_builder.storeRefBoc(builder, allocator, dict_boc),
+        }
+        return;
+    }
+
+    const decoded = try decodeJsonBocAlloc(allocator, json_value);
+    defer decoded.deinit(allocator);
+    switch (storage) {
+        .in_cell => try storeInlineBoc(builder, allocator, decoded.value),
+        .by_ref => try body_builder.storeRefBoc(builder, allocator, decoded.value),
+    }
+}
+
+fn maybeBuildDictionaryBocFromJsonTextAlloc(
+    allocator: std.mem.Allocator,
+    dict: DictionaryTypeInfo,
+    json_text: []const u8,
+) !?[]u8 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_text, .{});
+    defer parsed.deinit();
+    return maybeBuildDictionaryBocFromJsonValueAlloc(allocator, dict, parsed.value);
+}
+
+fn maybeBuildDictionaryBocFromJsonValueAlloc(
+    allocator: std.mem.Allocator,
+    dict: DictionaryTypeInfo,
+    json_value: std.json.Value,
+) !?[]u8 {
+    if (!jsonValueLooksLikeDictionaryEntries(json_value)) return null;
+    return try buildDictionaryBocFromJsonValueAlloc(allocator, dict, json_value);
+}
+
+fn jsonValueLooksLikeDictionaryEntries(json_value: std.json.Value) bool {
+    return switch (json_value) {
+        .array => true,
+        .object => |object| if (object.get("entries")) |entries_value|
+            std.meta.activeTag(entries_value) == .array
+        else
+            object.count() > 0 and object.get("boc") == null and object.get("base64") == null and object.get("hex") == null and object.get("boc_hex") == null,
+        else => false,
+    };
+}
+
+fn buildDictionaryBocFromJsonValueAlloc(
+    allocator: std.mem.Allocator,
+    dict: DictionaryTypeInfo,
+    json_value: std.json.Value,
+) ![]u8 {
+    var entries = try buildDictionaryEntriesFromJsonValueAlloc(allocator, dict, json_value);
+    defer entries.deinit();
+    defer deinitDictionaryEntries(allocator, entries.items);
+
+    return buildDictionaryBocAlloc(allocator, dict, entries.items);
+}
+
+fn buildDictionaryEntriesFromJsonValueAlloc(
+    allocator: std.mem.Allocator,
+    dict: DictionaryTypeInfo,
+    json_value: std.json.Value,
+) !std.array_list.Managed(DictionaryEncodedEntry) {
+    var entries = std.array_list.Managed(DictionaryEncodedEntry).init(allocator);
+    errdefer {
+        deinitDictionaryEntries(allocator, entries.items);
+        entries.deinit();
+    }
+
+    switch (json_value) {
+        .array => |array| {
+            for (array.items) |item| {
+                try entries.append(try buildDictionaryEntryAlloc(allocator, dict, item));
+            }
+        },
+        .object => |object| {
+            if (object.get("entries")) |entries_value| {
+                switch (entries_value) {
+                    .array => |array| {
+                        for (array.items) |item| {
+                            try entries.append(try buildDictionaryEntryAlloc(allocator, dict, item));
+                        }
+                    },
+                    else => return error.InvalidAbiArguments,
+                }
+            } else {
+                var iter = object.iterator();
+                while (iter.next()) |entry| {
+                    const key_value: std.json.Value = .{ .string = entry.key_ptr.* };
+                    try entries.append(try buildDictionaryEntryFromKeyValueAlloc(allocator, dict, key_value, entry.value_ptr.*));
+                }
+            }
+        },
+        else => return error.InvalidAbiArguments,
+    }
+
+    return entries;
+}
+
+fn buildDictionaryEntryAlloc(
+    allocator: std.mem.Allocator,
+    dict: DictionaryTypeInfo,
+    json_value: std.json.Value,
+) !DictionaryEncodedEntry {
+    return switch (json_value) {
+        .object => |object| {
+            const key_value = object.get("key") orelse return error.InvalidAbiArguments;
+            const value_value = object.get("value") orelse return error.InvalidAbiArguments;
+            return buildDictionaryEntryFromKeyValueAlloc(allocator, dict, key_value, value_value);
+        },
+        else => error.InvalidAbiArguments,
+    };
+}
+
+fn buildDictionaryEntryFromKeyValueAlloc(
+    allocator: std.mem.Allocator,
+    dict: DictionaryTypeInfo,
+    key_json: std.json.Value,
+    value_json: std.json.Value,
+) !DictionaryEncodedEntry {
+    return .{
+        .key_bits = try buildDictionaryKeyBitsAlloc(allocator, dict, key_json),
+        .value_cell = try buildDictionaryValueCellAlloc(allocator, dict.value_type, value_json),
+    };
+}
+
+fn deinitDictionaryEntries(allocator: std.mem.Allocator, entries: []DictionaryEncodedEntry) void {
+    for (entries) |entry| {
+        allocator.free(entry.key_bits);
+        entry.value_cell.deinit(allocator);
+    }
+}
+
+fn buildDictionaryKeyBitsAlloc(
+    allocator: std.mem.Allocator,
+    dict: DictionaryTypeInfo,
+    json_value: std.json.Value,
+) ![]u8 {
+    switch (dict.key_kind) {
+        .typed => {
+            var builder = cell.Builder.init();
+            try storeAbiJsonValue(&builder, allocator, .{
+                .name = "",
+                .type_name = dict.key_type,
+                .components = &.{},
+            }, json_value);
+            if (builder.ref_cnt != 0 or builder.bit_len != dict.key_bits) return error.InvalidAbiArguments;
+            return allocator.dupe(u8, builder.data[0..bitByteLen(dict.key_bits)]);
+        },
+        .raw_bits => {
+            var builder = cell.Builder.init();
+            try storeDictionaryRawKeyJsonValue(&builder, allocator, dict.key_bits, json_value);
+            if (builder.ref_cnt != 0 or builder.bit_len != dict.key_bits) return error.InvalidAbiArguments;
+            return allocator.dupe(u8, builder.data[0..bitByteLen(dict.key_bits)]);
+        },
+    }
+}
+
+fn storeDictionaryRawKeyJsonValue(
+    builder: *cell.Builder,
+    allocator: std.mem.Allocator,
+    bits: u16,
+    json_value: std.json.Value,
+) !void {
+    return switch (json_value) {
+        .integer => |value| {
+            if (value < 0) return error.InvalidAbiArguments;
+            if (bits <= 64) {
+                try builder.storeUint(@intCast(value), bits);
+            } else {
+                var type_buf: [24]u8 = undefined;
+                const type_name = try std.fmt.bufPrint(&type_buf, "uint{d}", .{bits});
+                var text_buf: [32]u8 = undefined;
+                const text = try formatUnsignedDecimalText(&text_buf, @intCast(value));
+                try storeNumericTextValue(builder, allocator, type_name, text);
+            }
+        },
+        .string => |value| {
+            var type_buf: [24]u8 = undefined;
+            const type_name = try std.fmt.bufPrint(&type_buf, "uint{d}", .{bits});
+            try storeNumericTextValue(builder, allocator, type_name, value);
+        },
+        else => error.InvalidAbiArguments,
+    };
+}
+
+fn buildDictionaryValueCellAlloc(
+    allocator: std.mem.Allocator,
+    value_type: []const u8,
+    json_value: std.json.Value,
+) !*cell.Cell {
+    var builder = cell.Builder.init();
+    try storeAbiJsonValue(&builder, allocator, .{
+        .name = "",
+        .type_name = value_type,
+        .components = &.{},
+    }, json_value);
+    return builder.toCell(allocator);
+}
+
+fn buildDictionaryBocAlloc(
+    allocator: std.mem.Allocator,
+    dict: DictionaryTypeInfo,
+    entries: []const DictionaryEncodedEntry,
+) ![]u8 {
+    var root_builder = cell.Builder.init();
+    if (entries.len == 0) {
+        try root_builder.storeUint(0, 1);
+    } else {
+        try root_builder.storeUint(1, 1);
+        const root_edge = try buildHashmapEdgeCellAlloc(allocator, dict.key_bits, 0, entries);
+        errdefer root_edge.deinit(allocator);
+        try root_builder.storeRef(root_edge);
+    }
+
+    const root = try root_builder.toCell(allocator);
+    defer root.deinit(allocator);
+    return boc.serializeBoc(allocator, root);
+}
+
+fn buildHashmapEdgeCellAlloc(
+    allocator: std.mem.Allocator,
+    key_bits: u16,
+    offset: u16,
+    entries: []const DictionaryEncodedEntry,
+) !*cell.Cell {
+    if (entries.len == 0) return error.InvalidAbiArguments;
+
+    var builder = cell.Builder.init();
+    const common_len = commonKeyPrefixLen(entries, offset, key_bits);
+    try storeHmLabelShort(&builder, entries[0].key_bits, offset, common_len);
+
+    const remaining = key_bits - offset - common_len;
+    if (remaining == 0) {
+        if (entries.len != 1) return error.InvalidAbiArguments;
+        var value_slice = entries[0].value_cell.toSlice();
+        try builder.storeSlice(&value_slice);
+        entries[0].value_cell.ref_cnt = 0;
+        return builder.toCell(allocator);
+    }
+
+    var left = std.array_list.Managed(DictionaryEncodedEntry).init(allocator);
+    defer left.deinit();
+    var right = std.array_list.Managed(DictionaryEncodedEntry).init(allocator);
+    defer right.deinit();
+
+    for (entries) |entry| {
+        if (getAlignedBit(entry.key_bits, offset + common_len) == 0) {
+            try left.append(entry);
+        } else {
+            try right.append(entry);
+        }
+    }
+
+    if (left.items.len == 0 or right.items.len == 0) return error.InvalidAbiArguments;
+
+    const left_cell = try buildHashmapEdgeCellAlloc(allocator, key_bits, offset + common_len + 1, left.items);
+    errdefer left_cell.deinit(allocator);
+    const right_cell = try buildHashmapEdgeCellAlloc(allocator, key_bits, offset + common_len + 1, right.items);
+    errdefer right_cell.deinit(allocator);
+
+    try builder.storeRef(left_cell);
+    try builder.storeRef(right_cell);
+    return builder.toCell(allocator);
+}
+
+fn commonKeyPrefixLen(entries: []const DictionaryEncodedEntry, offset: u16, key_bits: u16) u16 {
+    var common: u16 = 0;
+    while (offset + common < key_bits) : (common += 1) {
+        const bit = getAlignedBit(entries[0].key_bits, offset + common);
+        for (entries[1..]) |entry| {
+            if (getAlignedBit(entry.key_bits, offset + common) != bit) {
+                return common;
+            }
+        }
+    }
+    return common;
+}
+
+fn storeHmLabelShort(builder: *cell.Builder, key_bits: []const u8, offset: u16, len: u16) !void {
+    try builder.storeUint(0, 1);
+    var idx: u16 = 0;
+    while (idx < len) : (idx += 1) try builder.storeUint(1, 1);
+    try builder.storeUint(0, 1);
+
+    idx = 0;
+    while (idx < len) : (idx += 1) {
+        try builder.storeUint(getAlignedBit(key_bits, offset + idx), 1);
+    }
+}
+
+fn decodeDictionaryBocJsonAlloc(
+    allocator: std.mem.Allocator,
+    dict: DictionaryTypeInfo,
+    body_boc: []const u8,
+) ![]u8 {
+    const root = try boc.deserializeBoc(allocator, body_boc);
+    defer root.deinit(allocator);
+
+    var entries = try decodeDictionaryEntriesAlloc(allocator, dict, root);
+    defer {
+        for (entries.items) |*entry| entry.deinit(allocator);
+        entries.deinit();
+    }
+
+    const boc_b64 = try base64EncodeAlloc(allocator, body_boc);
+    defer allocator.free(boc_b64);
+
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    try writer.writer.writeByte('{');
+    var wrote_any = false;
+    try writeJsonFieldPrefix(&writer.writer, &wrote_any, "boc");
+    try writeJsonString(&writer.writer, boc_b64);
+    try writeJsonFieldPrefix(&writer.writer, &wrote_any, "entries");
+    try writer.writer.writeByte('[');
+    for (entries.items, 0..) |entry, idx| {
+        if (idx != 0) try writer.writer.writeByte(',');
+        try writer.writer.writeAll("{\"key\":");
+        try writer.writer.writeAll(entry.key_json);
+        try writer.writer.writeAll(",\"value\":");
+        try writer.writer.writeAll(entry.value_json);
+        try writer.writer.writeByte('}');
+    }
+    try writer.writer.writeAll("]}");
+    return try writer.toOwnedSlice();
+}
+
+fn decodeDictionaryEntriesAlloc(
+    allocator: std.mem.Allocator,
+    dict: DictionaryTypeInfo,
+    root: *cell.Cell,
+) !std.array_list.Managed(DictionaryDecodedEntry) {
+    var entries = std.array_list.Managed(DictionaryDecodedEntry).init(allocator);
+    errdefer {
+        for (entries.items) |*entry| entry.deinit(allocator);
+        entries.deinit();
+    }
+
+    var root_slice = root.toSlice();
+    const present = try loadUintDynamic(&root_slice, 1);
+    if (present == 0) return entries;
+
+    const edge = try root_slice.loadRef();
+    const key_buffer = try allocator.alloc(u8, bitByteLen(dict.key_bits));
+    defer allocator.free(key_buffer);
+    @memset(key_buffer, 0);
+
+    try decodeHashmapEdgeIntoEntries(allocator, dict, edge, dict.key_bits, 0, key_buffer, &entries);
+    return entries;
+}
+
+fn decodeHashmapEdgeIntoEntries(
+    allocator: std.mem.Allocator,
+    dict: DictionaryTypeInfo,
+    edge: *cell.Cell,
+    key_bits: u16,
+    offset: u16,
+    key_buffer: []u8,
+    out: *std.array_list.Managed(DictionaryDecodedEntry),
+) !void {
+    var slice = edge.toSlice();
+    const label = try loadHmLabelAlloc(allocator, &slice, key_bits - offset);
+    defer allocator.free(label.bits);
+
+    copyAlignedBits(key_buffer, offset, label.bits, 0, label.len);
+    const next_offset = offset + label.len;
+    if (next_offset == key_bits) {
+        const key_json = try formatDictionaryKeyJsonAlloc(allocator, dict, key_buffer);
+        errdefer allocator.free(key_json);
+        const value_json = try decodeDictionaryValueJsonAlloc(allocator, dict.value_type, &slice);
+        errdefer allocator.free(value_json);
+        try out.append(.{
+            .key_json = key_json,
+            .value_json = value_json,
+        });
+        return;
+    }
+
+    const left = try slice.loadRef();
+    setAlignedBit(key_buffer, next_offset, 0);
+    try decodeHashmapEdgeIntoEntries(allocator, dict, left, key_bits, next_offset + 1, key_buffer, out);
+
+    const right = try slice.loadRef();
+    setAlignedBit(key_buffer, next_offset, 1);
+    try decodeHashmapEdgeIntoEntries(allocator, dict, right, key_bits, next_offset + 1, key_buffer, out);
+}
+
+const LoadedHmLabel = struct {
+    bits: []u8,
+    len: u16,
+};
+
+fn loadHmLabelAlloc(allocator: std.mem.Allocator, slice: *cell.Slice, max_len: u16) !LoadedHmLabel {
+    const tag0 = try loadUintDynamic(slice, 1);
+    if (tag0 == 0) {
+        const len = try loadUnaryLength(slice, max_len);
+        return .{
+            .bits = try loadBitsAlignedAlloc(allocator, slice, len),
+            .len = len,
+        };
+    }
+
+    const tag1 = try loadUintDynamic(slice, 1);
+    const len = try loadBoundedNat(slice, max_len);
+    if (tag1 == 0) {
+        return .{
+            .bits = try loadBitsAlignedAlloc(allocator, slice, len),
+            .len = len,
+        };
+    }
+
+    const repeated = try loadUintDynamic(slice, 1);
+    const bits = try allocator.alloc(u8, bitByteLen(len));
+    errdefer allocator.free(bits);
+    @memset(bits, 0);
+    var idx: u16 = 0;
+    while (idx < len) : (idx += 1) {
+        setAlignedBit(bits, idx, @intCast(repeated));
+    }
+    return .{ .bits = bits, .len = len };
+}
+
+fn loadBitsAlignedAlloc(allocator: std.mem.Allocator, slice: *cell.Slice, bits: u16) ![]u8 {
+    if (slice.remainingBits() < bits) return error.NotEnoughData;
+
+    const byte_len = bitByteLen(bits);
+    const out = try allocator.alloc(u8, byte_len);
+    errdefer allocator.free(out);
+    @memset(out, 0);
+
+    var idx: u16 = 0;
+    while (idx < bits) : (idx += 1) {
+        setAlignedBit(out, idx, @intCast(try slice.loadUint(1)));
+    }
+
+    return out;
+}
+
+fn loadUnaryLength(slice: *cell.Slice, max_len: u16) !u16 {
+    var len: u16 = 0;
+    while (true) {
+        const bit = try loadUintDynamic(slice, 1);
+        if (bit == 0) break;
+        len += 1;
+        if (len > max_len) return error.InvalidAbiOutputs;
+    }
+    return len;
+}
+
+fn boundedNatBitLen(max_value: u16) u16 {
+    if (max_value == 0) return 0;
+    var bits: u16 = 0;
+    var value: u32 = max_value;
+    while (value > 0) : (value >>= 1) bits += 1;
+    return bits;
+}
+
+fn loadBoundedNat(slice: *cell.Slice, max_value: u16) !u16 {
+    const bits = boundedNatBitLen(max_value);
+    if (bits == 0) return 0;
+    const value = try loadUintDynamic(slice, bits);
+    if (value > max_value) return error.InvalidAbiOutputs;
+    return @intCast(value);
+}
+
+fn copyAlignedBits(dst: []u8, dst_offset: u16, src: []const u8, src_offset: u16, bit_len: u16) void {
+    var idx: u16 = 0;
+    while (idx < bit_len) : (idx += 1) {
+        setAlignedBit(dst, dst_offset + idx, getAlignedBit(src, src_offset + idx));
+    }
+}
+
+fn formatDictionaryKeyJsonAlloc(
+    allocator: std.mem.Allocator,
+    dict: DictionaryTypeInfo,
+    key_bits: []const u8,
+) ![]u8 {
+    switch (dict.key_kind) {
+        .typed => {
+            var builder = cell.Builder.init();
+            try builder.storeBits(key_bits, dict.key_bits);
+            const value = try builder.toCell(allocator);
+            defer value.deinit(allocator);
+            var slice = value.toSlice();
+            return decodeBodyParamJsonAlloc(allocator, .{
+                .name = "",
+                .type_name = dict.key_type,
+                .components = &.{},
+            }, &slice, true);
+        },
+        .raw_bits => {
+            if (dict.key_bits <= 64) {
+                var builder = cell.Builder.init();
+                try builder.storeBits(key_bits, dict.key_bits);
+                const value = try builder.toCell(allocator);
+                defer value.deinit(allocator);
+                var slice = value.toSlice();
+                return std.fmt.allocPrint(allocator, "{d}", .{try loadUintDynamic(&slice, dict.key_bits)});
+            }
+            const text = try formatTonNumTextAlloc(allocator, trimLeadingZeroBytesView(key_bits[0..bitByteLen(dict.key_bits)]), false);
+            defer allocator.free(text);
+            return std.fmt.allocPrint(allocator, "\"{s}\"", .{text});
+        },
+    }
+}
+
+fn decodeDictionaryValueJsonAlloc(
+    allocator: std.mem.Allocator,
+    value_type: []const u8,
+    slice: *cell.Slice,
+) ![]u8 {
+    return decodeBodyParamJsonAlloc(allocator, .{
+        .name = "",
+        .type_name = value_type,
+        .components = &.{},
+    }, slice, true);
 }
 
 fn storeInlineBoc(builder: *cell.Builder, allocator: std.mem.Allocator, body_boc: []const u8) !void {
@@ -2496,6 +3195,19 @@ fn decodeBodyFieldsJsonAlloc(
     errdefer writer.deinit();
 
     try writeDecodedBodyFieldsJson(&writer.writer, allocator, params, slice, allow_tail_variable);
+    return try writer.toOwnedSlice();
+}
+
+fn decodeBodyParamJsonAlloc(
+    allocator: std.mem.Allocator,
+    param: ParamDef,
+    slice: *cell.Slice,
+    is_last: bool,
+) ![]u8 {
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    try writeDecodedBodyParamJson(&writer.writer, allocator, param, slice, is_last);
     return try writer.toOwnedSlice();
 }
 
@@ -2664,6 +3376,28 @@ fn writeDecodedBodyJsonType(
         const bytes = try loadRemainingBodyBytesAlloc(allocator, slice);
         defer allocator.free(bytes);
         const encoded = try base64EncodeAlloc(allocator, bytes);
+        defer allocator.free(encoded);
+        try writeJsonString(writer, encoded);
+        return;
+    }
+
+    if (dictionaryTypeInfo(type_name)) |dict| {
+        const body_boc = switch (dict.storage) {
+            .by_ref => try loadRefBodyBocAlloc(allocator, slice),
+            .in_cell => blk: {
+                if (!is_last) return error.UnsupportedAbiType;
+                break :blk try buildRemainingBodyBocAlloc(allocator, slice);
+            },
+        };
+        defer allocator.free(body_boc);
+
+        if (decodeDictionaryBocJsonAlloc(allocator, dict, body_boc)) |decoded| {
+            defer allocator.free(decoded);
+            try writer.writeAll(decoded);
+            return;
+        } else |_| {}
+
+        const encoded = try base64EncodeAlloc(allocator, body_boc);
         defer allocator.free(encoded);
         try writeJsonString(writer, encoded);
         return;
@@ -2956,6 +3690,22 @@ fn writeDecodedOutputJsonType(
         return;
     }
 
+    if (dictionaryTypeInfo(type_name)) |dict| {
+        const body = try generic_contract.stackEntryToBocAlloc(allocator, entry);
+        defer allocator.free(body);
+
+        if (decodeDictionaryBocJsonAlloc(allocator, dict, body)) |decoded| {
+            defer allocator.free(decoded);
+            try writer.writeAll(decoded);
+            return;
+        } else |_| {}
+
+        const encoded = try base64EncodeAlloc(allocator, body);
+        defer allocator.free(encoded);
+        try writeJsonString(writer, encoded);
+        return;
+    }
+
     if (isInlineCellLikeAbiType(type_name) or isRefCellLikeAbiType(type_name)) {
         const body = try generic_contract.stackEntryToBocAlloc(allocator, entry);
         defer allocator.free(body);
@@ -3069,6 +3819,13 @@ fn writeDecodedFieldName(writer: anytype, name: []const u8, idx: usize) !void {
     var fallback_name_buf: [32]u8 = undefined;
     const fallback_name = try std.fmt.bufPrint(&fallback_name_buf, "value{d}", .{idx});
     try writeJsonString(writer, fallback_name);
+}
+
+fn writeJsonFieldPrefix(writer: anytype, wrote_any: *bool, name: []const u8) !void {
+    if (wrote_any.*) try writer.writeByte(',');
+    wrote_any.* = true;
+    try writeJsonString(writer, name);
+    try writer.writeByte(':');
 }
 
 fn writeJsonString(writer: anytype, value: []const u8) !void {
@@ -4039,6 +4796,83 @@ test "abi adapter supports dict aliases in body encoding" {
     try std.testing.expectEqual(@as(u64, 0xCAFE), try cache_slice.loadUint(16));
 }
 
+test "abi adapter supports schema-aware dict json in body encoding" {
+    const allocator = std.testing.allocator;
+
+    var value_builder = cell.Builder.init();
+    try value_builder.storeUint(0xCAFE, 16);
+    const value_cell = try value_builder.toCell(allocator);
+    defer value_cell.deinit(allocator);
+    const value_boc = try boc.serializeBoc(allocator, value_cell);
+    defer allocator.free(value_boc);
+    const value_b64 = try base64EncodeAlloc(allocator, value_boc);
+    defer allocator.free(value_b64);
+
+    const settings_json =
+        \\{"entries":[{"key":"0xA1B2C3D4","value":7}]}
+    ;
+    const cache_json = try std.fmt.allocPrint(
+        allocator,
+        "{{\"entries\":[{{\"key\":\"5\",\"value\":{{\"boc\":\"{s}\"}}}}]}}",
+        .{value_b64},
+    );
+    defer allocator.free(cache_json);
+
+    const function = FunctionDef{
+        .name = "set_dicts",
+        .opcode = 0x44556677,
+        .inputs = &.{
+            .{ .name = "settings", .type_name = "HashmapE<32, uint32>" },
+            .{ .name = "cache", .type_name = "map_ref<uint32, cell>" },
+        },
+        .outputs = &.{},
+    };
+
+    const built = try buildFunctionBodyBocAlloc(allocator, function, &.{
+        .{ .json = settings_json },
+        .{ .json = cache_json },
+    });
+    defer allocator.free(built);
+
+    const parsed_settings = try std.json.parseFromSlice(std.json.Value, allocator, settings_json, .{});
+    defer parsed_settings.deinit();
+    const settings_dict = try buildDictionaryBocFromJsonValueAlloc(
+        allocator,
+        dictionaryTypeInfo("HashmapE<32, uint32>").?,
+        parsed_settings.value,
+    );
+    defer allocator.free(settings_dict);
+    const expected_settings_root = try boc.deserializeBoc(allocator, settings_dict);
+    defer expected_settings_root.deinit(allocator);
+
+    const parsed_cache = try std.json.parseFromSlice(std.json.Value, allocator, cache_json, .{});
+    defer parsed_cache.deinit();
+    const cache_dict = try buildDictionaryBocFromJsonValueAlloc(
+        allocator,
+        dictionaryTypeInfo("map_ref<uint32, cell>").?,
+        parsed_cache.value,
+    );
+    defer allocator.free(cache_dict);
+    const expected_cache_root = try boc.deserializeBoc(allocator, cache_dict);
+    defer expected_cache_root.deinit(allocator);
+
+    const root = try boc.deserializeBoc(allocator, built);
+    defer root.deinit(allocator);
+
+    var slice = root.toSlice();
+    try std.testing.expectEqual(@as(u64, 0x44556677), try slice.loadUint(32));
+
+    try std.testing.expectEqual(@as(u64, 1), try slice.loadUint(1));
+    const settings_edge = try slice.loadRef();
+    var expected_settings_slice = expected_settings_root.toSlice();
+    try std.testing.expectEqual(@as(u64, 1), try expected_settings_slice.loadUint(1));
+    const expected_settings_edge = try expected_settings_slice.loadRef();
+    try std.testing.expectEqualSlices(u8, &expected_settings_edge.hash(), &settings_edge.hash());
+
+    const cache_root = try slice.loadRef();
+    try std.testing.expectEqualSlices(u8, &expected_cache_root.hash(), &cache_root.hash());
+}
+
 test "abi adapter builds stack args and decodes outputs for abi function" {
     const allocator = std.testing.allocator;
     const abi_json =
@@ -4636,6 +5470,75 @@ test "abi adapter supports dict aliases in stack args" {
     try std.testing.expectEqualSlices(u8, dict_boc, args.args[1].cell);
 }
 
+test "abi adapter supports schema-aware dict json in stack args" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "lookup_dicts",
+        \\      "inputs": [
+        \\        {"name": "settings", "type": "dict<address,uint32>"},
+        \\        {"name": "cache", "type": "HashmapE_ref<32,cell>"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var abi = try parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer abi.deinit(allocator);
+
+    var value_builder = cell.Builder.init();
+    try value_builder.storeUint(0xABCD, 16);
+    const value_cell = try value_builder.toCell(allocator);
+    defer value_cell.deinit(allocator);
+    const value_boc = try boc.serializeBoc(allocator, value_cell);
+    defer allocator.free(value_boc);
+    const value_b64 = try base64EncodeAlloc(allocator, value_boc);
+    defer allocator.free(value_b64);
+
+    const settings_json =
+        \\{"entries":[{"key":"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8","value":7}]}
+    ;
+    const cache_json = try std.fmt.allocPrint(
+        allocator,
+        "{{\"entries\":[{{\"key\":\"5\",\"value\":{{\"boc\":\"{s}\"}}}}]}}",
+        .{value_b64},
+    );
+    defer allocator.free(cache_json);
+
+    var args = try buildStackArgsFromAbiAlloc(allocator, &abi.abi, "lookup_dicts", &.{
+        .{ .json = settings_json },
+        .{ .json = cache_json },
+    });
+    defer args.deinit(allocator);
+
+    const parsed_settings = try std.json.parseFromSlice(std.json.Value, allocator, settings_json, .{});
+    defer parsed_settings.deinit();
+    const settings_dict = try buildDictionaryBocFromJsonValueAlloc(
+        allocator,
+        dictionaryTypeInfo("dict<address,uint32>").?,
+        parsed_settings.value,
+    );
+    defer allocator.free(settings_dict);
+
+    const parsed_cache = try std.json.parseFromSlice(std.json.Value, allocator, cache_json, .{});
+    defer parsed_cache.deinit();
+    const cache_dict = try buildDictionaryBocFromJsonValueAlloc(
+        allocator,
+        dictionaryTypeInfo("HashmapE_ref<32,cell>").?,
+        parsed_cache.value,
+    );
+    defer allocator.free(cache_dict);
+
+    try std.testing.expectEqual(@as(usize, 2), args.args.len);
+    try std.testing.expect(args.args[0] == .cell);
+    try std.testing.expect(args.args[1] == .cell);
+    try std.testing.expectEqualSlices(u8, settings_dict, args.args[0].cell);
+    try std.testing.expectEqualSlices(u8, cache_dict, args.args[1].cell);
+}
+
 test "abi adapter builds tuple and list get-method stack args from json" {
     const allocator = std.testing.allocator;
     const abi_json =
@@ -5021,6 +5924,88 @@ test "abi adapter decodes dict aliases as boc strings" {
         .{ dict_b64, dict_b64 },
     );
     defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, decoded);
+}
+
+test "abi adapter decodes dict aliases as structured json when schema-aware" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "get_dicts",
+        \\      "outputs": [
+        \\        {"name": "settings", "type": "dict<address,uint32>"},
+        \\        {"name": "cache", "type": "map_ref<uint32,cell>"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var abi = try parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer abi.deinit(allocator);
+
+    var value_builder = cell.Builder.init();
+    try value_builder.storeUint(0xCAFE, 16);
+    const value_cell = try value_builder.toCell(allocator);
+    defer value_cell.deinit(allocator);
+    const value_boc = try boc.serializeBoc(allocator, value_cell);
+    defer allocator.free(value_boc);
+    const value_b64 = try base64EncodeAlloc(allocator, value_boc);
+    defer allocator.free(value_b64);
+
+    const settings_json =
+        \\{"entries":[{"key":"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8","value":7}]}
+    ;
+    const cache_json = try std.fmt.allocPrint(
+        allocator,
+        "{{\"entries\":[{{\"key\":\"5\",\"value\":{{\"boc\":\"{s}\"}}}}]}}",
+        .{value_b64},
+    );
+    defer allocator.free(cache_json);
+
+    const parsed_settings = try std.json.parseFromSlice(std.json.Value, allocator, settings_json, .{});
+    defer parsed_settings.deinit();
+    const settings_dict = try buildDictionaryBocFromJsonValueAlloc(
+        allocator,
+        dictionaryTypeInfo("dict<address,uint32>").?,
+        parsed_settings.value,
+    );
+    defer allocator.free(settings_dict);
+    const settings_root = try boc.deserializeBoc(allocator, settings_dict);
+    defer settings_root.deinit(allocator);
+    const settings_b64 = try base64EncodeAlloc(allocator, settings_dict);
+    defer allocator.free(settings_b64);
+
+    const parsed_cache = try std.json.parseFromSlice(std.json.Value, allocator, cache_json, .{});
+    defer parsed_cache.deinit();
+    const cache_dict = try buildDictionaryBocFromJsonValueAlloc(
+        allocator,
+        dictionaryTypeInfo("map_ref<uint32,cell>").?,
+        parsed_cache.value,
+    );
+    defer allocator.free(cache_dict);
+    const cache_root = try boc.deserializeBoc(allocator, cache_dict);
+    defer cache_root.deinit(allocator);
+    const cache_b64 = try base64EncodeAlloc(allocator, cache_dict);
+    defer allocator.free(cache_b64);
+
+    const stack = [_]types.StackEntry{
+        .{ .cell = settings_root },
+        .{ .cell = cache_root },
+    };
+
+    const decoded = try decodeFunctionOutputsFromAbiJsonAlloc(allocator, &abi.abi, "get_dicts", stack[0..]);
+    defer allocator.free(decoded);
+
+    const expected = try std.fmt.allocPrint(
+        allocator,
+        "{{\"settings\":{{\"boc\":\"{s}\",\"entries\":[{{\"key\":\"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8\",\"value\":7}}]}},\"cache\":{{\"boc\":\"{s}\",\"entries\":[{{\"key\":5,\"value\":\"{s}\"}}]}}}}",
+        .{ settings_b64, cache_b64, value_b64 },
+    );
+    defer allocator.free(expected);
+
     try std.testing.expectEqualStrings(expected, decoded);
 }
 
