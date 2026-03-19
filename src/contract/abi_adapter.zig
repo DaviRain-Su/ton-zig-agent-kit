@@ -3,6 +3,8 @@
 const std = @import("std");
 const types = @import("../core/types.zig");
 const http_client = @import("../core/http_client.zig");
+const cell = @import("../core/cell.zig");
+const boc = @import("../core/boc.zig");
 const body_builder = @import("../core/body_builder.zig");
 const generic_contract = @import("contract.zig");
 
@@ -191,24 +193,21 @@ pub fn buildFunctionBodyBocAlloc(
 ) ![]u8 {
     if (function.inputs.len != values.len) return error.InvalidAbiArguments;
 
-    const extra_len: usize = if (function.opcode != null) 1 else 0;
-    const ops = try allocator.alloc(body_builder.BodyOp, function.inputs.len + extra_len);
-    defer allocator.free(ops);
+    var builder = cell.Builder.init();
+    errdefer deinitBuilderRefs(allocator, &builder);
 
-    var i: usize = 0;
     if (function.opcode) |opcode| {
-        ops[0] = .{ .uint = .{
-            .bits = 32,
-            .value = opcode,
-        } };
-        i = 1;
+        try builder.storeUint(opcode, 32);
     }
 
-    for (function.inputs, values, 0..) |param, value, idx| {
-        ops[i + idx] = try abiValueToBodyOp(param, value);
+    for (function.inputs, values) |param, value| {
+        try storeAbiValue(&builder, allocator, param.type_name, value);
     }
 
-    return body_builder.buildBodyBocAlloc(allocator, ops);
+    const root = try builder.toCell(allocator);
+    defer root.deinit(allocator);
+
+    return boc.serializeBoc(allocator, root);
 }
 
 pub fn buildFunctionBodyFromAbiAlloc(
@@ -247,7 +246,9 @@ pub fn buildStackArgsFromFunctionAlloc(
     }
 
     for (function.inputs, values, 0..) |param, value, idx| {
-        args[idx] = try abiValueToStackArg(param, value);
+        const built = try abiValueToStackArgAlloc(allocator, param.type_name, value);
+        args[idx] = built.arg;
+        owned_buffers[idx] = built.owned_buffer;
     }
 
     return .{
@@ -578,104 +579,129 @@ fn parseUintText(text: []const u8) !u32 {
     return std.fmt.parseInt(u32, text, 10);
 }
 
-fn abiValueToBodyOp(param: ParamDef, value: AbiValue) !body_builder.BodyOp {
-    if (std.mem.eql(u8, param.type_name, "maybe") or
-        std.mem.startsWith(u8, param.type_name, "maybe<") or
-        std.mem.startsWith(u8, param.type_name, "optional<"))
+const BuiltStackArg = struct {
+    arg: generic_contract.StackArg,
+    owned_buffer: ?[]u8 = null,
+};
+
+fn storeAbiValue(
+    builder: *cell.Builder,
+    allocator: std.mem.Allocator,
+    type_name: []const u8,
+    value: AbiValue,
+) !void {
+    if (optionalInnerType(type_name)) |inner_type| {
+        if (std.meta.activeTag(value) == .null) {
+            try builder.storeUint(0, 1);
+            return;
+        }
+
+        try builder.storeUint(1, 1);
+        return storeAbiValue(builder, allocator, inner_type, value);
+    }
+
+    if (std.mem.eql(u8, type_name, "coins")) {
+        try builder.storeCoins(try abiValueAsUint(value));
+        return;
+    }
+    if (std.mem.eql(u8, type_name, "address")) {
+        try builder.storeAddress(try abiValueAsText(value));
+        return;
+    }
+    if (std.mem.eql(u8, type_name, "bytes") or std.mem.eql(u8, type_name, "string")) {
+        const bytes = try abiValueAsBytes(value);
+        try builder.storeBits(bytes, @intCast(bytes.len * 8));
+        return;
+    }
+    if (std.mem.eql(u8, type_name, "ref") or
+        std.mem.eql(u8, type_name, "boc") or
+        std.mem.eql(u8, type_name, "ref_boc") or
+        std.mem.eql(u8, type_name, "cell_ref"))
     {
-        return switch (value) {
-            .null => .{ .uint = .{ .bits = 1, .value = 0 } },
-            else => error.UnsupportedAbiType,
-        };
+        try body_builder.storeRefBoc(builder, allocator, try abiValueAsBoc(value));
+        return;
     }
-    if (std.mem.eql(u8, param.type_name, "coins")) {
-        return .{ .coins = try abiValueAsUint(value) };
+    if (std.mem.eql(u8, type_name, "bool")) {
+        try builder.storeUint(if (try abiValueAsUint(value) == 0) 0 else 1, 1);
+        return;
     }
-    if (std.mem.eql(u8, param.type_name, "address")) {
-        return .{ .address = try abiValueAsText(value) };
-    }
-    if (std.mem.eql(u8, param.type_name, "bytes") or std.mem.eql(u8, param.type_name, "string")) {
-        return .{ .bytes = try abiValueAsBytes(value) };
-    }
-    if (std.mem.eql(u8, param.type_name, "ref") or
-        std.mem.eql(u8, param.type_name, "boc") or
-        std.mem.eql(u8, param.type_name, "ref_boc") or
-        std.mem.eql(u8, param.type_name, "cell_ref"))
-    {
-        return .{ .ref_boc = try abiValueAsBoc(value) };
-    }
-    if (std.mem.eql(u8, param.type_name, "bool")) {
-        return .{ .uint = .{
-            .bits = 1,
-            .value = if (try abiValueAsUint(value) == 0) 0 else 1,
-        } };
-    }
-    if (std.mem.startsWith(u8, param.type_name, "uint")) {
-        const bits = try parseSizedTypeBits(param.type_name, "uint", 64);
+    if (std.mem.startsWith(u8, type_name, "uint")) {
+        const bits = try parseSizedTypeBits(type_name, "uint", 64);
         if (bits > 64) return error.UnsupportedAbiType;
-        return .{ .uint = .{
-            .bits = bits,
-            .value = try abiValueAsUint(value),
-        } };
+        try builder.storeUint(try abiValueAsUint(value), bits);
+        return;
     }
-    if (std.mem.startsWith(u8, param.type_name, "int")) {
-        const bits = try parseSizedTypeBits(param.type_name, "int", 64);
+    if (std.mem.startsWith(u8, type_name, "int")) {
+        const bits = try parseSizedTypeBits(type_name, "int", 64);
         if (bits > 64) return error.UnsupportedAbiType;
-        return .{ .int = .{
-            .bits = bits,
-            .value = try abiValueAsInt(value),
-        } };
+        try builder.storeInt(try abiValueAsInt(value), bits);
+        return;
     }
 
     return error.UnsupportedAbiType;
 }
 
-fn abiValueToStackArg(param: ParamDef, value: AbiValue) !generic_contract.StackArg {
-    if (std.mem.eql(u8, param.type_name, "coins") or
-        std.mem.startsWith(u8, param.type_name, "uint") or
-        std.mem.startsWith(u8, param.type_name, "int") or
-        std.mem.eql(u8, param.type_name, "bool"))
+fn abiValueToStackArgAlloc(
+    allocator: std.mem.Allocator,
+    type_name: []const u8,
+    value: AbiValue,
+) !BuiltStackArg {
+    if (optionalInnerType(type_name)) |inner_type| {
+        if (std.meta.activeTag(value) == .null) {
+            return .{ .arg = .{ .null = {} } };
+        }
+
+        return abiValueToStackArgAlloc(allocator, inner_type, value);
+    }
+
+    if (std.mem.eql(u8, type_name, "coins") or
+        std.mem.startsWith(u8, type_name, "uint") or
+        std.mem.startsWith(u8, type_name, "int") or
+        std.mem.eql(u8, type_name, "bool"))
     {
         return switch (value) {
-            .null => .{ .null = {} },
-            .uint => |v| .{ .int = try checkedAbiUintToI64(v) },
-            .int => |v| .{ .int = v },
+            .uint => |v| .{ .arg = .{ .int = try checkedAbiUintToI64(v) } },
+            .int => |v| .{ .arg = .{ .int = v } },
             else => error.InvalidAbiArguments,
         };
     }
 
-    if (std.mem.eql(u8, param.type_name, "address")) {
+    if (std.mem.eql(u8, type_name, "address")) {
         return switch (value) {
-            .null => .{ .null = {} },
-            .text => |v| .{ .address = v },
+            .text => |v| .{ .arg = .{ .address = v } },
             else => error.InvalidAbiArguments,
         };
     }
 
-    if (std.mem.eql(u8, param.type_name, "cell") or
-        std.mem.eql(u8, param.type_name, "ref") or
-        std.mem.eql(u8, param.type_name, "boc") or
-        std.mem.eql(u8, param.type_name, "cell_ref"))
+    if (std.mem.eql(u8, type_name, "bytes") or std.mem.eql(u8, type_name, "string")) {
+        const encoded = try buildBytesSliceBocAlloc(allocator, try abiValueAsBytes(value));
+        return .{
+            .arg = .{ .slice = encoded },
+            .owned_buffer = encoded,
+        };
+    }
+
+    if (std.mem.eql(u8, type_name, "cell") or
+        std.mem.eql(u8, type_name, "ref") or
+        std.mem.eql(u8, type_name, "boc") or
+        std.mem.eql(u8, type_name, "cell_ref"))
     {
         return switch (value) {
-            .null => .{ .null = {} },
-            .boc => |v| .{ .cell = v },
+            .boc => |v| .{ .arg = .{ .cell = v } },
             else => error.InvalidAbiArguments,
         };
     }
 
-    if (std.mem.eql(u8, param.type_name, "slice")) {
+    if (std.mem.eql(u8, type_name, "slice")) {
         return switch (value) {
-            .null => .{ .null = {} },
-            .boc => |v| .{ .slice = v },
+            .boc => |v| .{ .arg = .{ .slice = v } },
             else => error.InvalidAbiArguments,
         };
     }
 
-    if (std.mem.eql(u8, param.type_name, "builder")) {
+    if (std.mem.eql(u8, type_name, "builder")) {
         return switch (value) {
-            .null => .{ .null = {} },
-            .boc => |v| .{ .builder = v },
+            .boc => |v| .{ .arg = .{ .builder = v } },
             else => error.InvalidAbiArguments,
         };
     }
@@ -737,28 +763,84 @@ fn checkedAbiUintToI64(value: u64) !i64 {
     return @intCast(value);
 }
 
+fn buildBytesSliceBocAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var builder = cell.Builder.init();
+    try builder.storeBits(bytes, @intCast(bytes.len * 8));
+
+    const value = try builder.toCell(allocator);
+    defer value.deinit(allocator);
+
+    return boc.serializeBoc(allocator, value);
+}
+
+fn deinitBuilderRefs(allocator: std.mem.Allocator, builder: *cell.Builder) void {
+    for (builder.refs[0..builder.ref_cnt]) |ref| {
+        if (ref) |value| value.deinit(allocator);
+    }
+}
+
+fn optionalInnerType(type_name: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, type_name, " \t\r\n");
+
+    if (std.mem.startsWith(u8, trimmed, "maybe<") and trimmed.len > "maybe<>".len and trimmed[trimmed.len - 1] == '>') {
+        return std.mem.trim(u8, trimmed["maybe<".len .. trimmed.len - 1], " \t\r\n");
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "optional<") and trimmed.len > "optional<>".len and trimmed[trimmed.len - 1] == '>') {
+        return std.mem.trim(u8, trimmed["optional<".len .. trimmed.len - 1], " \t\r\n");
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "maybe ")) {
+        return std.mem.trim(u8, trimmed["maybe ".len..], " \t\r\n");
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "optional ")) {
+        return std.mem.trim(u8, trimmed["optional ".len..], " \t\r\n");
+    }
+
+    return null;
+}
+
 fn writeDecodedOutputJson(
     writer: anytype,
     allocator: std.mem.Allocator,
     param: ParamDef,
     entry: *const types.StackEntry,
 ) !void {
-    if (std.mem.eql(u8, param.type_name, "coins") or
-        std.mem.startsWith(u8, param.type_name, "uint") or
-        std.mem.startsWith(u8, param.type_name, "int"))
+    if (optionalInnerType(param.type_name)) |inner_type| {
+        if (std.meta.activeTag(entry.*) == .null) {
+            try writer.writeAll("null");
+            return;
+        }
+
+        return writeDecodedOutputJsonType(writer, allocator, inner_type, entry);
+    }
+
+    return writeDecodedOutputJsonType(writer, allocator, param.type_name, entry);
+}
+
+fn writeDecodedOutputJsonType(
+    writer: anytype,
+    allocator: std.mem.Allocator,
+    type_name: []const u8,
+    entry: *const types.StackEntry,
+) !void {
+    if (std.mem.eql(u8, type_name, "coins") or
+        std.mem.startsWith(u8, type_name, "uint") or
+        std.mem.startsWith(u8, type_name, "int"))
     {
         const value = try generic_contract.stackEntryAsInt(entry);
         try writer.print("{d}", .{value});
         return;
     }
 
-    if (std.mem.eql(u8, param.type_name, "bool")) {
+    if (std.mem.eql(u8, type_name, "bool")) {
         const value = (try generic_contract.stackEntryAsInt(entry)) != 0;
         try writer.writeAll(if (value) "true" else "false");
         return;
     }
 
-    if (std.mem.eql(u8, param.type_name, "address")) {
+    if (std.mem.eql(u8, type_name, "address")) {
         const addr = try generic_contract.stackEntryAsOptionalAddress(entry);
         if (addr) |value| {
             const raw = try value.toRawAlloc(allocator);
@@ -770,14 +852,14 @@ fn writeDecodedOutputJson(
         return;
     }
 
-    if (std.mem.eql(u8, param.type_name, "string")) {
+    if (std.mem.eql(u8, type_name, "string")) {
         const text = try decodeStringOutputAlloc(allocator, entry);
         defer allocator.free(text);
         try writeJsonString(writer, text);
         return;
     }
 
-    if (std.mem.eql(u8, param.type_name, "bytes")) {
+    if (std.mem.eql(u8, type_name, "bytes")) {
         const bytes = try decodeBytesOutputAlloc(allocator, entry);
         defer allocator.free(bytes);
         const encoded = try base64EncodeAlloc(allocator, bytes);
@@ -786,12 +868,12 @@ fn writeDecodedOutputJson(
         return;
     }
 
-    if (std.mem.eql(u8, param.type_name, "cell") or
-        std.mem.eql(u8, param.type_name, "slice") or
-        std.mem.eql(u8, param.type_name, "builder") or
-        std.mem.eql(u8, param.type_name, "ref") or
-        std.mem.eql(u8, param.type_name, "boc") or
-        std.mem.eql(u8, param.type_name, "cell_ref"))
+    if (std.mem.eql(u8, type_name, "cell") or
+        std.mem.eql(u8, type_name, "slice") or
+        std.mem.eql(u8, type_name, "builder") or
+        std.mem.eql(u8, type_name, "ref") or
+        std.mem.eql(u8, type_name, "boc") or
+        std.mem.eql(u8, type_name, "cell_ref"))
     {
         const body = try generic_contract.stackEntryToBocAlloc(allocator, entry);
         defer allocator.free(body);
@@ -872,13 +954,13 @@ test "supported interface detection returns null when nothing matches" {
 
 test "abi adapter extracts offchain uri from stack cell" {
     const allocator = std.testing.allocator;
-    const cell = @import("../core/cell.zig");
+    const ton_cell = @import("../core/cell.zig");
 
-    var tail_builder = cell.Builder.init();
+    var tail_builder = ton_cell.Builder.init();
     try tail_builder.storeBits("abi.json", "abi.json".len * 8);
     const tail = try tail_builder.toCell(allocator);
 
-    var head_builder = cell.Builder.init();
+    var head_builder = ton_cell.Builder.init();
     try head_builder.storeUint(1, 8);
     try head_builder.storeBits("ipfs://example/", "ipfs://example/".len * 8);
     try head_builder.storeRef(tail);
@@ -1119,6 +1201,148 @@ test "abi adapter builds stack args and decodes outputs for abi function" {
 
     try std.testing.expectEqualStrings(
         "{\"enabled\":true,\"owner\":\"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8\",\"name\":\"demo\"}",
+        decoded,
+    );
+}
+
+test "abi adapter supports optional inputs in body encoding" {
+    const allocator = std.testing.allocator;
+
+    var payload_builder = cell.Builder.init();
+    try payload_builder.storeUint(0xCAFE, 16);
+    const payload = try payload_builder.toCell(allocator);
+    defer payload.deinit(allocator);
+
+    const payload_boc = try boc.serializeBoc(allocator, payload);
+    defer allocator.free(payload_boc);
+
+    const function = FunctionDef{
+        .name = "set_optional",
+        .opcode = 0xA1B2C3D4,
+        .inputs = &.{
+            .{ .name = "count", .type_name = "maybe<uint8>" },
+            .{ .name = "owner", .type_name = "optional<address>" },
+            .{ .name = "note", .type_name = "maybe<string>" },
+            .{ .name = "payload", .type_name = "optional<ref>" },
+        },
+        .outputs = &.{},
+    };
+
+    const built = try buildFunctionBodyBocAlloc(allocator, function, &.{
+        .{ .uint = 7 },
+        .{ .text = "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8" },
+        .{ .text = "ok" },
+        .{ .boc = payload_boc },
+    });
+    defer allocator.free(built);
+
+    const root = try boc.deserializeBoc(allocator, built);
+    defer root.deinit(allocator);
+
+    var slice = root.toSlice();
+    try std.testing.expectEqual(@as(u64, 0xA1B2C3D4), try slice.loadUint(32));
+    try std.testing.expectEqual(@as(u64, 1), try slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 7), try slice.loadUint(8));
+    try std.testing.expectEqual(@as(u64, 1), try slice.loadUint(1));
+    _ = try slice.loadAddress();
+    try std.testing.expectEqual(@as(u64, 1), try slice.loadUint(1));
+    try std.testing.expectEqual(@as(u8, 'o'), try slice.loadUint8());
+    try std.testing.expectEqual(@as(u8, 'k'), try slice.loadUint8());
+    try std.testing.expectEqual(@as(u64, 1), try slice.loadUint(1));
+
+    const payload_ref = try slice.loadRef();
+    var payload_slice = payload_ref.toSlice();
+    try std.testing.expectEqual(@as(u64, 0xCAFE), try payload_slice.loadUint(16));
+}
+
+test "abi adapter supports optional and string stack args" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "lookup",
+        \\      "inputs": [
+        \\        {"name": "key", "type": "string"},
+        \\        {"name": "owner", "type": "optional<address>"},
+        \\        {"name": "tag", "type": "maybe<bytes>"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var abi = try parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer abi.deinit(allocator);
+
+    var args = try buildStackArgsFromAbiAlloc(allocator, &abi.abi, "lookup", &.{
+        .{ .text = "demo" },
+        .{ .null = {} },
+        .{ .bytes = &.{ 0xCA, 0xFE } },
+    });
+    defer args.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 3), args.args.len);
+    try std.testing.expect(args.args[0] == .slice);
+    try std.testing.expect(args.args[1] == .null);
+    try std.testing.expect(args.args[2] == .slice);
+    try std.testing.expect(args.owned_buffers[0] != null);
+    try std.testing.expect(args.owned_buffers[2] != null);
+
+    const first = try boc.deserializeBoc(allocator, args.args[0].slice);
+    defer first.deinit(allocator);
+    var first_slice = first.toSlice();
+    try std.testing.expectEqualSlices(u8, "demo", try first_slice.loadBits(32));
+
+    const third = try boc.deserializeBoc(allocator, args.args[2].slice);
+    defer third.deinit(allocator);
+    var third_slice = third.toSlice();
+    try std.testing.expectEqualSlices(u8, &.{ 0xCA, 0xFE }, try third_slice.loadBits(16));
+}
+
+test "abi adapter decodes optional outputs" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "get_optional",
+        \\      "outputs": [
+        \\        {"name": "count", "type": "optional<uint32>"},
+        \\        {"name": "owner", "type": "maybe<address>"},
+        \\        {"name": "note", "type": "optional<string>"},
+        \\        {"name": "blob", "type": "maybe<bytes>"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var abi = try parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer abi.deinit(allocator);
+
+    var owner_builder = cell.Builder.init();
+    try owner_builder.storeAddress(@as([]const u8, "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8"));
+    const owner_cell = try owner_builder.toCell(allocator);
+    defer owner_cell.deinit(allocator);
+
+    var note_builder = cell.Builder.init();
+    try note_builder.storeBits("demo", 32);
+    const note_cell = try note_builder.toCell(allocator);
+    defer note_cell.deinit(allocator);
+
+    const stack = [_]types.StackEntry{
+        .{ .null = {} },
+        .{ .slice = owner_cell },
+        .{ .cell = note_cell },
+        .{ .bytes = &.{ 0xCA, 0xFE } },
+    };
+
+    const decoded = try decodeFunctionOutputsFromAbiJsonAlloc(allocator, &abi.abi, "get_optional", stack[0..]);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqualStrings(
+        "{\"count\":null,\"owner\":\"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8\",\"note\":\"demo\",\"blob\":\"yv4=\"}",
         decoded,
     );
 }
