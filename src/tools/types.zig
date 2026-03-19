@@ -84,6 +84,7 @@ pub const NFTInfoResult = struct {
     collection: ?[]const u8,
     index: u64,
     content: ?[]const u8,
+    content_uri: ?[]const u8,
     success: bool,
     error_message: ?[]const u8 = null,
 };

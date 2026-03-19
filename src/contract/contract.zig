@@ -52,6 +52,8 @@ pub const StackArg = union(enum) {
     address: []const u8,
 };
 
+const offchain_content_prefix: u8 = 0x01;
+
 pub fn stackEntryAsInt(entry: *const types.StackEntry) !i64 {
     return switch (entry.*) {
         .number => |value| value,
@@ -97,6 +99,39 @@ pub fn stackEntryToBocAlloc(allocator: std.mem.Allocator, entry: *const types.St
         .bytes => |value| allocator.dupe(u8, value),
         else => error.InvalidStackEntry,
     };
+}
+
+pub fn flattenSnakeBytesAlloc(allocator: std.mem.Allocator, root: *const cell.Cell) ![]u8 {
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    var current: ?*const cell.Cell = root;
+    while (current) |value| {
+        if (value.bit_len % 8 != 0) return error.InvalidSnakeData;
+        if (value.ref_cnt > 1) return error.InvalidSnakeData;
+
+        const byte_len: usize = @intCast(value.bit_len / 8);
+        try writer.writer.writeAll(value.data[0..byte_len]);
+        current = if (value.ref_cnt == 1)
+            value.refs[0] orelse return error.InvalidSnakeData
+        else
+            null;
+    }
+
+    return try writer.toOwnedSlice();
+}
+
+pub fn decodeOffchainContentUriCellAlloc(allocator: std.mem.Allocator, root: *const cell.Cell) !?[]u8 {
+    const flattened = try flattenSnakeBytesAlloc(allocator, root);
+    defer allocator.free(flattened);
+
+    if (flattened.len == 0 or flattened[0] != offchain_content_prefix) return null;
+    return try allocator.dupe(u8, flattened[1..]);
+}
+
+pub fn stackEntryAsOffchainContentUriAlloc(allocator: std.mem.Allocator, entry: *const types.StackEntry) !?[]u8 {
+    const value = try stackEntryAsCell(entry);
+    return decodeOffchainContentUriCellAlloc(allocator, value);
 }
 
 pub fn buildStackArgsJsonAlloc(allocator: std.mem.Allocator, args: []const StackArg) ![]u8 {
@@ -204,6 +239,26 @@ test "build stack args json" {
     try std.testing.expect(std.mem.indexOf(u8, stack_json, "[\"slice\",\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, stack_json, "[\"cell\",\"") != null);
     try std.testing.expect(std.mem.endsWith(u8, stack_json, "\"]]"));
+}
+
+test "decode offchain content uri from snake cell" {
+    const allocator = std.testing.allocator;
+
+    var tail_builder = cell.Builder.init();
+    try tail_builder.storeBits("meta.json", "meta.json".len * 8);
+    const tail = try tail_builder.toCell(allocator);
+
+    var head_builder = cell.Builder.init();
+    try head_builder.storeUint(offchain_content_prefix, 8);
+    try head_builder.storeBits("https://example.com/", "https://example.com/".len * 8);
+    try head_builder.storeRef(tail);
+    const root = try head_builder.toCell(allocator);
+    defer root.deinit(allocator);
+
+    const uri = (try decodeOffchainContentUriCellAlloc(allocator, root)).?;
+    defer allocator.free(uri);
+
+    try std.testing.expectEqualStrings("https://example.com/meta.json", uri);
 }
 
 test {

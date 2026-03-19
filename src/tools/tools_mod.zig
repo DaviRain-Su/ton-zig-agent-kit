@@ -207,6 +207,7 @@ pub const AgentTools = struct {
                 .collection = null,
                 .index = 0,
                 .content = null,
+                .content_uri = null,
                 .success = false,
                 .error_message = @errorName(err),
             };
@@ -221,6 +222,8 @@ pub const AgentTools = struct {
 
         const content = data.content;
         data.content = null;
+        const content_uri = data.content_uri;
+        data.content_uri = null;
 
         return tools_types.NFTInfoResult{
             .address = nft_address,
@@ -228,6 +231,7 @@ pub const AgentTools = struct {
             .collection = collection,
             .index = @intCast(data.index),
             .content = content,
+            .content_uri = content_uri,
             .success = true,
             .error_message = null,
         };

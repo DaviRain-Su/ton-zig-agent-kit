@@ -86,10 +86,13 @@ pub const JettonData = struct {
     mintable: bool,
     admin: ?types.Address,
     content: ?[]const u8,
+    content_uri: ?[]const u8,
 
     pub fn deinit(self: *JettonData, allocator: std.mem.Allocator) void {
         if (self.content) |content| allocator.free(content);
+        if (self.content_uri) |content_uri| allocator.free(content_uri);
         self.content = null;
+        self.content_uri = null;
     }
 };
 
@@ -117,6 +120,7 @@ fn parseJettonData(allocator: std.mem.Allocator, stack: []const types.StackEntry
         .mintable = (try generic_contract.stackEntryAsInt(&stack[1])) != 0,
         .admin = try generic_contract.stackEntryAsOptionalAddress(&stack[2]),
         .content = try generic_contract.stackEntryToBocAlloc(allocator, &stack[3]),
+        .content_uri = try generic_contract.stackEntryAsOffchainContentUriAlloc(allocator, &stack[3]),
     };
 }
 
@@ -239,8 +243,14 @@ test "parse jetton data stack" {
     const admin_cell = try admin_builder.toCell(allocator);
     defer admin_cell.deinit(allocator);
 
+    var content_tail_builder = cell.Builder.init();
+    try content_tail_builder.storeBits("jetton.json", "jetton.json".len * 8);
+    const content_tail = try content_tail_builder.toCell(allocator);
+
     var content_builder = cell.Builder.init();
-    try content_builder.storeUint(0xCAFE, 16);
+    try content_builder.storeUint(1, 8);
+    try content_builder.storeBits("https://example.com/", "https://example.com/".len * 8);
+    try content_builder.storeRef(content_tail);
     const content_cell = try content_builder.toCell(allocator);
     defer content_cell.deinit(allocator);
 
@@ -258,6 +268,7 @@ test "parse jetton data stack" {
     try std.testing.expect(data.mintable);
     try std.testing.expect(data.admin != null);
     try std.testing.expect(data.content != null);
+    try std.testing.expectEqualStrings("https://example.com/jetton.json", data.content_uri.?);
 }
 
 test "parse jetton wallet data stack" {

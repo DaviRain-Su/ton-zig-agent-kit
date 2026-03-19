@@ -55,10 +55,13 @@ pub const NFTData = struct {
     collection: ?types.Address,
     owner: ?types.Address,
     content: ?[]const u8,
+    content_uri: ?[]const u8,
 
     pub fn deinit(self: *NFTData, allocator: std.mem.Allocator) void {
         if (self.content) |content| allocator.free(content);
+        if (self.content_uri) |content_uri| allocator.free(content_uri);
         self.content = null;
+        self.content_uri = null;
     }
 };
 
@@ -66,10 +69,13 @@ pub const CollectionData = struct {
     next_item_index: u256,
     owner: ?types.Address,
     content: ?[]const u8,
+    content_uri: ?[]const u8,
 
     pub fn deinit(self: *CollectionData, allocator: std.mem.Allocator) void {
         if (self.content) |content| allocator.free(content);
+        if (self.content_uri) |content_uri| allocator.free(content_uri);
         self.content = null;
+        self.content_uri = null;
     }
 };
 
@@ -89,6 +95,7 @@ fn parseNFTData(allocator: std.mem.Allocator, stack: []const types.StackEntry) !
         .collection = try generic_contract.stackEntryAsOptionalAddress(&stack[2]),
         .owner = try generic_contract.stackEntryAsOptionalAddress(&stack[3]),
         .content = try generic_contract.stackEntryToBocAlloc(allocator, &stack[4]),
+        .content_uri = try generic_contract.stackEntryAsOffchainContentUriAlloc(allocator, &stack[4]),
     };
 }
 
@@ -102,6 +109,7 @@ fn parseCollectionData(allocator: std.mem.Allocator, stack: []const types.StackE
         .next_item_index = @intCast(next_item_index_raw),
         .owner = try generic_contract.stackEntryAsOptionalAddress(&stack[2]),
         .content = try generic_contract.stackEntryToBocAlloc(allocator, &stack[1]),
+        .content_uri = try generic_contract.stackEntryAsOffchainContentUriAlloc(allocator, &stack[1]),
     };
 }
 
@@ -118,8 +126,14 @@ test "parse nft data stack" {
     const owner_cell = try owner_builder.toCell(allocator);
     defer owner_cell.deinit(allocator);
 
+    var content_tail_builder = cell.Builder.init();
+    try content_tail_builder.storeBits("nft.json", "nft.json".len * 8);
+    const content_tail = try content_tail_builder.toCell(allocator);
+
     var content_builder = cell.Builder.init();
-    try content_builder.storeUint(0x1234, 16);
+    try content_builder.storeUint(1, 8);
+    try content_builder.storeBits("https://example.com/", "https://example.com/".len * 8);
+    try content_builder.storeRef(content_tail);
     const content_cell = try content_builder.toCell(allocator);
     defer content_cell.deinit(allocator);
 
@@ -138,6 +152,7 @@ test "parse nft data stack" {
     try std.testing.expect(data.collection != null);
     try std.testing.expect(data.owner != null);
     try std.testing.expect(data.content != null);
+    try std.testing.expectEqualStrings("https://example.com/nft.json", data.content_uri.?);
 }
 
 test "parse collection data stack" {
@@ -148,8 +163,14 @@ test "parse collection data stack" {
     const owner_cell = try owner_builder.toCell(allocator);
     defer owner_cell.deinit(allocator);
 
+    var content_tail_builder = cell.Builder.init();
+    try content_tail_builder.storeBits("collection.json", "collection.json".len * 8);
+    const content_tail = try content_tail_builder.toCell(allocator);
+
     var content_builder = cell.Builder.init();
-    try content_builder.storeUint(0x4321, 16);
+    try content_builder.storeUint(1, 8);
+    try content_builder.storeBits("https://example.com/", "https://example.com/".len * 8);
+    try content_builder.storeRef(content_tail);
     const content_cell = try content_builder.toCell(allocator);
     defer content_cell.deinit(allocator);
 
@@ -165,4 +186,5 @@ test "parse collection data stack" {
     try std.testing.expectEqual(@as(u256, 17), data.next_item_index);
     try std.testing.expect(data.owner != null);
     try std.testing.expect(data.content != null);
+    try std.testing.expectEqualStrings("https://example.com/collection.json", data.content_uri.?);
 }
