@@ -10,7 +10,11 @@ const generic_contract = @import("contract.zig");
 pub const SupportedInterfaces = struct {
     has_wallet: bool,
     has_jetton: bool,
+    has_jetton_master: bool,
+    has_jetton_wallet: bool,
     has_nft: bool,
+    has_nft_item: bool,
+    has_nft_collection: bool,
     has_abi: bool,
 };
 
@@ -397,7 +401,11 @@ fn supportedInterfacesFromMethodSupport(
     const supported = SupportedInterfaces{
         .has_wallet = has_seqno,
         .has_jetton = has_jetton_master or has_jetton_wallet,
+        .has_jetton_master = has_jetton_master,
+        .has_jetton_wallet = has_jetton_wallet,
         .has_nft = has_nft_item or has_nft_collection,
+        .has_nft_item = has_nft_item,
+        .has_nft_collection = has_nft_collection,
         .has_abi = has_abi,
     };
 
@@ -2092,7 +2100,11 @@ test "supported interface detection combines standard probes" {
     const supported = supportedInterfacesFromMethodSupport(true, false, true, false, true, true).?;
     try std.testing.expect(supported.has_wallet);
     try std.testing.expect(supported.has_jetton);
+    try std.testing.expect(!supported.has_jetton_master);
+    try std.testing.expect(supported.has_jetton_wallet);
     try std.testing.expect(supported.has_nft);
+    try std.testing.expect(!supported.has_nft_item);
+    try std.testing.expect(supported.has_nft_collection);
     try std.testing.expect(supported.has_abi);
 }
 

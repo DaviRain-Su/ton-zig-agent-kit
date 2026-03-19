@@ -102,7 +102,11 @@ pub fn main() !void {
             std.debug.print("Supported interfaces:\n", .{});
             std.debug.print("  wallet: {s}\n", .{if (value.has_wallet) "yes" else "no"});
             std.debug.print("  jetton: {s}\n", .{if (value.has_jetton) "yes" else "no"});
+            std.debug.print("    jetton_master: {s}\n", .{if (value.has_jetton_master) "yes" else "no"});
+            std.debug.print("    jetton_wallet: {s}\n", .{if (value.has_jetton_wallet) "yes" else "no"});
             std.debug.print("  nft: {s}\n", .{if (value.has_nft) "yes" else "no"});
+            std.debug.print("    nft_item: {s}\n", .{if (value.has_nft_item) "yes" else "no"});
+            std.debug.print("    nft_collection: {s}\n", .{if (value.has_nft_collection) "yes" else "no"});
             std.debug.print("  abi: {s}\n", .{if (value.has_abi) "yes" else "no"});
         } else {
             std.debug.print("Supported interfaces: none detected\n", .{});
@@ -121,6 +125,24 @@ pub fn main() !void {
             }
         } else {
             std.debug.print("ABI: not detected\n", .{});
+        }
+
+        if (supported) |value| {
+            if (value.has_wallet) {
+                printInspectWalletDetails(&provider, addr);
+            }
+            if (value.has_jetton_master) {
+                printInspectJettonMasterDetails(allocator, &provider, addr);
+            }
+            if (value.has_jetton_wallet) {
+                printInspectJettonWalletDetails(&provider, addr);
+            }
+            if (value.has_nft_item) {
+                printInspectNFTItemDetails(allocator, &provider, addr);
+            }
+            if (value.has_nft_collection) {
+                printInspectNFTCollectionDetails(allocator, &provider, addr);
+            }
         }
         return;
     }
@@ -1645,6 +1667,122 @@ fn printIndent(indent: usize) void {
     while (i < indent) : (i += 1) {
         std.debug.print(" ", .{});
     }
+}
+
+fn printInspectWalletDetails(provider: *ton_zig_agent_kit.core.MultiProvider, addr: []const u8) void {
+    const info = signing.getWalletInfo(provider, addr) catch |err| {
+        std.debug.print("Wallet details: read failed ({s})\n", .{@errorName(err)});
+        return;
+    };
+
+    std.debug.print("Wallet details:\n", .{});
+    std.debug.print("  Seqno: {d}\n", .{info.seqno});
+    std.debug.print("  Subwallet ID: {d} (0x{X:0>8})\n", .{ info.wallet_id, info.wallet_id });
+    std.debug.print("  Public key: ", .{});
+    for (info.public_key) |byte| {
+        std.debug.print("{X:0>2}", .{byte});
+    }
+    std.debug.print("\n", .{});
+}
+
+fn printInspectJettonMasterDetails(allocator: std.mem.Allocator, provider: *ton_zig_agent_kit.core.MultiProvider, addr: []const u8) void {
+    var master = contract_mod.jetton.ProviderJettonMaster.init(addr, provider);
+    var data = master.getJettonData() catch |err| {
+        std.debug.print("Jetton master details: read failed ({s})\n", .{@errorName(err)});
+        return;
+    };
+    defer data.deinit(allocator);
+
+    const total_supply = std.fmt.allocPrint(allocator, "{d}", .{data.total_supply}) catch |err| {
+        std.debug.print("Jetton master details: format failed ({s})\n", .{@errorName(err)});
+        return;
+    };
+    defer allocator.free(total_supply);
+
+    const admin = if (data.admin) |value|
+        ton_zig_agent_kit.core.address.formatRaw(allocator, &value) catch |err| {
+            std.debug.print("Jetton master details: admin format failed ({s})\n", .{@errorName(err)});
+            return;
+        }
+    else
+        null;
+    defer if (admin) |value| allocator.free(value);
+
+    std.debug.print("Jetton master details:\n", .{});
+    std.debug.print("  Total supply: {s}\n", .{total_supply});
+    std.debug.print("  Mintable: {s}\n", .{if (data.mintable) "yes" else "no"});
+    std.debug.print("  Admin: {s}\n", .{admin orelse "(none)"});
+    std.debug.print("  Content URI: {s}\n", .{data.content_uri orelse "(none)"});
+}
+
+fn printInspectJettonWalletDetails(provider: *ton_zig_agent_kit.core.MultiProvider, addr: []const u8) void {
+    var wallet_contract = contract_mod.jetton.ProviderJettonWallet.init(addr, provider);
+    var data = wallet_contract.getWalletData() catch |err| {
+        std.debug.print("Jetton wallet details: read failed ({s})\n", .{@errorName(err)});
+        return;
+    };
+    defer data.deinit(provider.allocator);
+
+    std.debug.print("Jetton wallet details:\n", .{});
+    std.debug.print("  Balance: {d}\n", .{data.balance});
+    std.debug.print("  Owner: {s}\n", .{data.owner});
+    std.debug.print("  Master: {s}\n", .{data.master});
+}
+
+fn printInspectNFTItemDetails(allocator: std.mem.Allocator, provider: *ton_zig_agent_kit.core.MultiProvider, addr: []const u8) void {
+    var item = contract_mod.nft.ProviderNFTItem.init(addr, provider);
+    var data = item.getNFTData() catch |err| {
+        std.debug.print("NFT item details: read failed ({s})\n", .{@errorName(err)});
+        return;
+    };
+    defer data.deinit(allocator);
+
+    const owner = if (data.owner) |value|
+        ton_zig_agent_kit.core.address.formatRaw(allocator, &value) catch |err| {
+            std.debug.print("NFT item details: owner format failed ({s})\n", .{@errorName(err)});
+            return;
+        }
+    else
+        null;
+    defer if (owner) |value| allocator.free(value);
+
+    const collection = if (data.collection) |value|
+        ton_zig_agent_kit.core.address.formatRaw(allocator, &value) catch |err| {
+            std.debug.print("NFT item details: collection format failed ({s})\n", .{@errorName(err)});
+            return;
+        }
+    else
+        null;
+    defer if (collection) |value| allocator.free(value);
+
+    std.debug.print("NFT item details:\n", .{});
+    std.debug.print("  Index: {d}\n", .{data.index});
+    std.debug.print("  Owner: {s}\n", .{owner orelse "(none)"});
+    std.debug.print("  Collection: {s}\n", .{collection orelse "(none)"});
+    std.debug.print("  Content URI: {s}\n", .{data.content_uri orelse "(none)"});
+}
+
+fn printInspectNFTCollectionDetails(allocator: std.mem.Allocator, provider: *ton_zig_agent_kit.core.MultiProvider, addr: []const u8) void {
+    var collection = contract_mod.nft.ProviderNFTCollection.init(addr, provider);
+    var data = collection.getCollectionData() catch |err| {
+        std.debug.print("NFT collection details: read failed ({s})\n", .{@errorName(err)});
+        return;
+    };
+    defer data.deinit(allocator);
+
+    const owner = if (data.owner) |value|
+        ton_zig_agent_kit.core.address.formatRaw(allocator, &value) catch |err| {
+            std.debug.print("NFT collection details: owner format failed ({s})\n", .{@errorName(err)});
+            return;
+        }
+    else
+        null;
+    defer if (owner) |value| allocator.free(value);
+
+    std.debug.print("NFT collection details:\n", .{});
+    std.debug.print("  Owner: {s}\n", .{owner orelse "(none)"});
+    std.debug.print("  Next item index: {d}\n", .{data.next_item_index});
+    std.debug.print("  Content URI: {s}\n", .{data.content_uri orelse "(none)"});
 }
 
 fn printUsage() !void {
