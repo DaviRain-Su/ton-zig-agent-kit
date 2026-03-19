@@ -399,7 +399,9 @@ pub fn main() !void {
         var abi = try contract_mod.abi_adapter.loadAbiInfoSourceAlloc(allocator, args[3]);
         defer abi.deinit(allocator);
 
-        var parsed_values = try parseCliAbiValues(allocator, args[5..]);
+        const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_name) orelse return error.FunctionNotFound;
+
+        var parsed_values = try parseCliAbiValuesForParams(allocator, function.inputs, args[5..]);
         defer parsed_values.deinit(allocator);
 
         var stack_args = try contract_mod.abi_adapter.buildStackArgsFromAbiAlloc(
@@ -442,9 +444,6 @@ pub fn main() !void {
         const addr = args[2];
         const function_name = args[3];
 
-        var parsed_values = try parseCliAbiValues(allocator, args[4..]);
-        defer parsed_values.deinit(allocator);
-
         var provider = try initDefaultProvider(allocator);
 
         var abi = (try contract_mod.abi_adapter.queryAbiDocumentAlloc(&provider, addr)) orelse {
@@ -452,6 +451,11 @@ pub fn main() !void {
             return;
         };
         defer abi.deinit(allocator);
+
+        const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_name) orelse return error.FunctionNotFound;
+
+        var parsed_values = try parseCliAbiValuesForParams(allocator, function.inputs, args[4..]);
+        defer parsed_values.deinit(allocator);
 
         var stack_args = try contract_mod.abi_adapter.buildStackArgsFromAbiAlloc(
             allocator,
@@ -675,7 +679,7 @@ pub fn main() !void {
             var function_def = try contract_mod.abi_adapter.parseFunctionDefJsonAlloc(allocator, function_json);
             defer function_def.deinit(allocator);
 
-            var parsed_values = try parseCliAbiValues(allocator, args[4..]);
+            var parsed_values = try parseCliAbiValuesForParams(allocator, function_def.function.inputs, args[4..]);
             defer parsed_values.deinit(allocator);
 
             const built = try contract_mod.abi_adapter.buildFunctionBodyBocAlloc(
@@ -712,7 +716,9 @@ pub fn main() !void {
             var abi = try contract_mod.abi_adapter.loadAbiInfoSourceAlloc(allocator, args[3]);
             defer abi.deinit(allocator);
 
-            var parsed_values = try parseCliAbiValues(allocator, args[5..]);
+            const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_name) orelse return error.FunctionNotFound;
+
+            var parsed_values = try parseCliAbiValuesForParams(allocator, function.inputs, args[5..]);
             defer parsed_values.deinit(allocator);
 
             const built = try contract_mod.abi_adapter.buildFunctionBodyFromAbiAlloc(
@@ -978,7 +984,7 @@ pub fn main() !void {
             var function_def = try contract_mod.abi_adapter.parseFunctionDefJsonAlloc(allocator, function_json);
             defer function_def.deinit(allocator);
 
-            var parsed_values = try parseCliAbiValues(allocator, args[7..]);
+            var parsed_values = try parseCliAbiValuesForParams(allocator, function_def.function.inputs, args[7..]);
             defer parsed_values.deinit(allocator);
 
             const body = try contract_mod.abi_adapter.buildFunctionBodyBocAlloc(
@@ -1016,7 +1022,9 @@ pub fn main() !void {
             var abi = try contract_mod.abi_adapter.loadAbiInfoSourceAlloc(allocator, args[6]);
             defer abi.deinit(allocator);
 
-            var parsed_values = try parseCliAbiValues(allocator, args[8..]);
+            const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_name) orelse return error.FunctionNotFound;
+
+            var parsed_values = try parseCliAbiValuesForParams(allocator, function.inputs, args[8..]);
             defer parsed_values.deinit(allocator);
 
             const body = try contract_mod.abi_adapter.buildFunctionBodyFromAbiAlloc(
@@ -1053,9 +1061,6 @@ pub fn main() !void {
             const amount = try std.fmt.parseInt(u64, args[5], 10);
             const function_name = args[6];
 
-            var parsed_values = try parseCliAbiValues(allocator, args[7..]);
-            defer parsed_values.deinit(allocator);
-
             var provider = try initDefaultProvider(allocator);
 
             var abi = (try contract_mod.abi_adapter.queryAbiDocumentAlloc(&provider, dest)) orelse {
@@ -1063,6 +1068,11 @@ pub fn main() !void {
                 return;
             };
             defer abi.deinit(allocator);
+
+            const function = contract_mod.abi_adapter.findFunction(&abi.abi, function_name) orelse return error.FunctionNotFound;
+
+            var parsed_values = try parseCliAbiValuesForParams(allocator, function.inputs, args[7..]);
+            defer parsed_values.deinit(allocator);
 
             const body = try contract_mod.abi_adapter.buildFunctionBodyFromAbiAlloc(
                 allocator,
@@ -1376,6 +1386,16 @@ const ParsedCliAbiValues = struct {
     }
 };
 
+const ParsedCliAbiValue = struct {
+    value: AbiValue,
+    owned_buffer: ?[]u8 = null,
+};
+
+const CliNamedAbiSpec = struct {
+    name: []const u8,
+    value_spec: []const u8,
+};
+
 fn parseCliBodyOps(allocator: std.mem.Allocator, specs: []const []const u8) !ParsedCliBodyOps {
     const parsed_ops = try allocator.alloc(BodyOp, specs.len);
     errdefer allocator.free(parsed_ops);
@@ -1530,6 +1550,191 @@ fn parseCliAbiValues(allocator: std.mem.Allocator, specs: []const []const u8) !P
         .values = values,
         .owned_buffers = owned_buffers,
     };
+}
+
+fn parseCliAbiValuesForParams(
+    allocator: std.mem.Allocator,
+    params: []const contract_mod.abi_adapter.ParamDef,
+    specs: []const []const u8,
+) !ParsedCliAbiValues {
+    if (cliAbiSpecsUseNamedSyntax(specs)) {
+        return parseCliAbiValuesNamedForParams(allocator, params, specs);
+    }
+    return parseCliAbiValuesPositionalForParams(allocator, params, specs);
+}
+
+fn parseCliAbiValuesPositionalForParams(
+    allocator: std.mem.Allocator,
+    params: []const contract_mod.abi_adapter.ParamDef,
+    specs: []const []const u8,
+) !ParsedCliAbiValues {
+    if (specs.len > params.len) return error.InvalidAbiArguments;
+
+    const values = try allocator.alloc(AbiValue, params.len);
+    errdefer allocator.free(values);
+
+    const owned_buffers = try allocator.alloc(?[]u8, params.len);
+    for (owned_buffers) |*buffer| buffer.* = null;
+    errdefer {
+        for (owned_buffers) |buffer| {
+            if (buffer) |value| allocator.free(value);
+        }
+        allocator.free(owned_buffers);
+    }
+
+    for (specs, 0..) |spec, idx| {
+        const parsed = try parseCliAbiValueSpec(allocator, spec);
+        values[idx] = parsed.value;
+        owned_buffers[idx] = parsed.owned_buffer;
+    }
+
+    for (params[specs.len..], specs.len..) |param, idx| {
+        if (inspectOptionalInnerType(param.type_name) == null) return error.MissingAbiArgument;
+        values[idx] = .{ .null = {} };
+        owned_buffers[idx] = null;
+    }
+
+    return .{
+        .values = values,
+        .owned_buffers = owned_buffers,
+    };
+}
+
+fn parseCliAbiValuesNamedForParams(
+    allocator: std.mem.Allocator,
+    params: []const contract_mod.abi_adapter.ParamDef,
+    specs: []const []const u8,
+) !ParsedCliAbiValues {
+    const values = try allocator.alloc(AbiValue, params.len);
+    errdefer allocator.free(values);
+
+    const owned_buffers = try allocator.alloc(?[]u8, params.len);
+    for (owned_buffers) |*buffer| buffer.* = null;
+    errdefer {
+        for (owned_buffers) |buffer| {
+            if (buffer) |value| allocator.free(value);
+        }
+        allocator.free(owned_buffers);
+    }
+
+    const seen = try allocator.alloc(bool, params.len);
+    defer allocator.free(seen);
+    @memset(seen, false);
+
+    for (specs) |spec| {
+        const named = splitCliNamedAbiSpec(spec) orelse return error.MixedAbiArgumentStyles;
+        const idx = findCliAbiParamIndex(params, named.name) orelse return error.UnknownAbiParameter;
+        if (seen[idx]) return error.DuplicateAbiParameter;
+
+        const parsed = try parseCliAbiValueSpec(allocator, named.value_spec);
+        values[idx] = parsed.value;
+        owned_buffers[idx] = parsed.owned_buffer;
+        seen[idx] = true;
+    }
+
+    for (params, 0..) |param, idx| {
+        if (seen[idx]) continue;
+        if (inspectOptionalInnerType(param.type_name) == null) return error.MissingAbiArgument;
+        values[idx] = .{ .null = {} };
+        owned_buffers[idx] = null;
+    }
+
+    return .{
+        .values = values,
+        .owned_buffers = owned_buffers,
+    };
+}
+
+fn parseCliAbiValueSpec(allocator: std.mem.Allocator, spec: []const u8) !ParsedCliAbiValue {
+    if (std.mem.eql(u8, spec, "null")) {
+        return .{ .value = .{ .null = {} } };
+    }
+
+    if (std.mem.startsWith(u8, spec, "u:")) {
+        return .{ .value = .{ .uint = try parseStackUint(spec["u:".len..]) } };
+    }
+
+    if (std.mem.startsWith(u8, spec, "i:")) {
+        return .{ .value = .{ .int = try parseStackInt(spec["i:".len..]) } };
+    }
+
+    if (std.mem.startsWith(u8, spec, "num:")) {
+        return .{ .value = .{ .numeric_text = spec["num:".len..] } };
+    }
+
+    if (std.mem.startsWith(u8, spec, "str:")) {
+        return .{ .value = .{ .text = spec["str:".len..] } };
+    }
+
+    if (std.mem.startsWith(u8, spec, "addr:")) {
+        return .{ .value = .{ .text = spec["addr:".len..] } };
+    }
+
+    if (std.mem.startsWith(u8, spec, "json:")) {
+        const json_text = try loadCliTextAlloc(allocator, spec["json:".len..]);
+        return .{
+            .value = .{ .json = json_text },
+            .owned_buffer = json_text,
+        };
+    }
+
+    if (std.mem.startsWith(u8, spec, "hex:")) {
+        const decoded = try hexToBytes(allocator, spec["hex:".len..]);
+        return .{
+            .value = .{ .bytes = decoded },
+            .owned_buffer = decoded,
+        };
+    }
+
+    if (std.mem.startsWith(u8, spec, "boc:")) {
+        const decoded = try decodeBase64FlexibleAlloc(allocator, spec["boc:".len..]);
+        return .{
+            .value = .{ .boc = decoded },
+            .owned_buffer = decoded,
+        };
+    }
+
+    if (std.mem.startsWith(u8, spec, "bochex:")) {
+        const decoded = try hexToBytes(allocator, spec["bochex:".len..]);
+        return .{
+            .value = .{ .boc = decoded },
+            .owned_buffer = decoded,
+        };
+    }
+
+    return error.InvalidAbiValueSpec;
+}
+
+fn cliAbiSpecsUseNamedSyntax(specs: []const []const u8) bool {
+    for (specs) |spec| {
+        if (splitCliNamedAbiSpec(spec) != null) return true;
+    }
+    return false;
+}
+
+fn splitCliNamedAbiSpec(spec: []const u8) ?CliNamedAbiSpec {
+    const eq_idx = std.mem.indexOfScalar(u8, spec, '=') orelse return null;
+    if (eq_idx == 0 or eq_idx + 1 > spec.len) return null;
+
+    const name = spec[0..eq_idx];
+    if (std.mem.indexOfScalar(u8, name, ':') != null) return null;
+    if (std.mem.indexOfAny(u8, name, " \t\r\n") != null) return null;
+
+    return .{
+        .name = name,
+        .value_spec = spec[eq_idx + 1 ..],
+    };
+}
+
+fn findCliAbiParamIndex(params: []const contract_mod.abi_adapter.ParamDef, name: []const u8) ?usize {
+    for (params, 0..) |param, idx| {
+        if (param.name.len > 0 and std.mem.eql(u8, param.name, name)) return idx;
+
+        var fallback_buf: [32]u8 = undefined;
+        const fallback_name = std.fmt.bufPrint(&fallback_buf, "arg{d}", .{idx}) catch continue;
+        if (std.mem.eql(u8, fallback_name, name)) return idx;
+    }
+    return null;
 }
 
 fn loadCliTextAlloc(allocator: std.mem.Allocator, spec: []const u8) ![]u8 {
@@ -2026,6 +2231,12 @@ fn printAbiFunctionDescribe(
     };
     defer allocator.free(input_template);
 
+    const named_input_template = buildInspectNamedCliArgsTemplateAlloc(allocator, function.inputs) catch |err| {
+        std.debug.print("  Named args: template build failed ({s})\n", .{@errorName(err)});
+        return;
+    };
+    defer allocator.free(named_input_template);
+
     const output_template = buildInspectDecodedOutputsTemplateAlloc(allocator, function.outputs) catch |err| {
         std.debug.print("  Decoded outputs: template build failed ({s})\n", .{@errorName(err)});
         return;
@@ -2034,6 +2245,9 @@ fn printAbiFunctionDescribe(
 
     std.debug.print("  Input args: {s}\n", .{
         if (input_template.len == 0) "(no args)" else input_template,
+    });
+    std.debug.print("  Named args: {s}\n", .{
+        if (named_input_template.len == 0) "(no args)" else named_input_template,
     });
     std.debug.print("  Decoded outputs: {s}\n", .{
         if (function.outputs.len == 0) "(no outputs)" else output_template,
@@ -2081,6 +2295,32 @@ fn buildInspectCliArgsTemplateAlloc(
 
     for (params, 0..) |param, idx| {
         if (idx != 0) try writer.writer.writeByte(' ');
+        const value = try buildInspectCliValueTemplateAlloc(allocator, param);
+        defer allocator.free(value);
+        try writer.writer.writeAll(value);
+    }
+
+    return try writer.toOwnedSlice();
+}
+
+fn buildInspectNamedCliArgsTemplateAlloc(
+    allocator: std.mem.Allocator,
+    params: []const contract_mod.abi_adapter.ParamDef,
+) anyerror![]u8 {
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    for (params, 0..) |param, idx| {
+        if (idx != 0) try writer.writer.writeByte(' ');
+
+        var fallback_name_buf: [32]u8 = undefined;
+        const name = if (param.name.len > 0)
+            param.name
+        else
+            try std.fmt.bufPrint(&fallback_name_buf, "arg{d}", .{idx});
+
+        try writer.writer.print("{s}=", .{name});
+
         const value = try buildInspectCliValueTemplateAlloc(allocator, param);
         defer allocator.free(value);
         try writer.writer.writeAll(value);
@@ -2370,6 +2610,7 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit runGetMethodTyped <addr> <method> [typed_args...]  Call get method with typed args\n", .{});
     std.debug.print("  ton-zig-agent-kit runGetMethodAbi <addr> <abi_json|@file|file://|http(s)://|ipfs://> <function> [values...]  Call get method with ABI decode\n", .{});
     std.debug.print("  ton-zig-agent-kit runGetMethodAuto <addr> <function> [values...]  Discover ABI and call get method\n", .{});
+    std.debug.print("    ABI values: positional specs or name=spec; omitted trailing optional args default to null\n", .{});
     std.debug.print("  ton-zig-agent-kit jetton info <master>          Read Jetton master metadata\n", .{});
     std.debug.print("  ton-zig-agent-kit jetton wallet-address <master> <owner>  Resolve Jetton wallet address\n", .{});
     std.debug.print("  ton-zig-agent-kit jetton wallet-data <wallet>   Read Jetton wallet balance/owner/master\n", .{});
@@ -2569,6 +2810,47 @@ test "parse cli abi values" {
     try std.testing.expectEqualSlices(u8, &.{ 0xB5, 0xEE, 0x9C, 0x72 }, parsed.values[8].boc[0..4]);
 }
 
+test "parse cli abi values for params supports named args and optional defaults" {
+    const allocator = std.testing.allocator;
+
+    const params = [_]contract_mod.abi_adapter.ParamDef{
+        .{ .name = "owner", .type_name = "address" },
+        .{ .name = "amount", .type_name = "uint128" },
+        .{ .name = "note", .type_name = "optional<string>" },
+    };
+
+    var parsed = try parseCliAbiValuesForParams(allocator, params[0..], &.{
+        "amount=num:0x1234",
+        "owner=addr:0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+    });
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 3), parsed.values.len);
+    try std.testing.expectEqualStrings(
+        "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+        parsed.values[0].text,
+    );
+    try std.testing.expectEqualStrings("0x1234", parsed.values[1].numeric_text);
+    try std.testing.expect(std.meta.activeTag(parsed.values[2]) == .null);
+}
+
+test "parse cli abi values for params supports positional optional omission" {
+    const allocator = std.testing.allocator;
+
+    const params = [_]contract_mod.abi_adapter.ParamDef{
+        .{ .name = "flag", .type_name = "bool" },
+        .{ .name = "memo", .type_name = "maybe<string>" },
+    };
+
+    var parsed = try parseCliAbiValuesForParams(allocator, params[0..], &.{
+        "num:1",
+    });
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqualStrings("1", parsed.values[0].numeric_text);
+    try std.testing.expect(std.meta.activeTag(parsed.values[1]) == .null);
+}
+
 test "load cli text alloc supports inline and file specs" {
     const allocator = std.testing.allocator;
 
@@ -2626,6 +2908,24 @@ test "inspect cli template joins scalars and arrays" {
     defer allocator.free(template);
 
     try std.testing.expectEqualStrings("num:1 addr:EQ... json:[0]", template);
+}
+
+test "inspect named cli template labels arguments" {
+    const allocator = std.testing.allocator;
+
+    const params = [_]contract_mod.abi_adapter.ParamDef{
+        .{ .name = "recipient", .type_name = "address" },
+        .{ .name = "amount", .type_name = "uint64" },
+        .{ .name = "memo", .type_name = "optional<string>" },
+    };
+
+    const template = try buildInspectNamedCliArgsTemplateAlloc(allocator, params[0..]);
+    defer allocator.free(template);
+
+    try std.testing.expectEqualStrings(
+        "recipient=addr:EQ... amount=num:0 memo=null",
+        template,
+    );
 }
 
 test "inspect decoded outputs template builds nested json" {
