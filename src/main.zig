@@ -3586,6 +3586,17 @@ fn printInspectObservedMessages(items: []const ton_zig_agent_kit.tools.tools_mod
             std.debug.print(" text={s}", .{value});
         }
         std.debug.print("\n", .{});
+        if (item.template) |value| {
+            if (value.body_cli_template) |template| {
+                std.debug.print("      body: {s}\n", .{template});
+            }
+            if (value.send_cli_template) |template| {
+                std.debug.print("      send: {s}\n", .{template});
+            }
+            if (value.note) |note| {
+                std.debug.print("      note: {s}\n", .{note});
+            }
+        }
     }
 }
 

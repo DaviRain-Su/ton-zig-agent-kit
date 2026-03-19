@@ -100,6 +100,19 @@ pub const ObservedMessageDirection = enum {
     outgoing,
 };
 
+pub const ObservedMessageTemplateResult = struct {
+    body_cli_template: ?[]const u8,
+    send_cli_template: ?[]const u8,
+    note: ?[]const u8,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.body_cli_template) |value| allocator.free(value);
+        if (self.send_cli_template) |value| allocator.free(value);
+        if (self.note) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
 pub const ObservedMessageSummaryResult = struct {
     direction: ObservedMessageDirection,
     count: u32,
@@ -109,12 +122,14 @@ pub const ObservedMessageSummaryResult = struct {
     utf8_tail: ?[]const u8,
     abi_kind: ?DecodedBodyKind,
     abi_selector: ?[]const u8,
+    template: ?ObservedMessageTemplateResult,
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         if (self.opcode_name) |value| allocator.free(value);
         if (self.comment) |value| allocator.free(value);
         if (self.utf8_tail) |value| allocator.free(value);
         if (self.abi_selector) |value| allocator.free(value);
+        if (self.template) |*value| value.deinit(allocator);
         self.* = undefined;
     }
 };

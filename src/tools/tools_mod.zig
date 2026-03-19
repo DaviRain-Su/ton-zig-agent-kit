@@ -879,13 +879,213 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 } else {
                     try writer.writeAll("null");
                 }
+                try writeJsonFieldPrefix(writer, &wrote_any, "template");
+                if (item.template) |value| {
+                    try writer.writeByte('{');
+                    var wrote_template = false;
+                    try writeJsonFieldPrefix(writer, &wrote_template, "body_cli_template");
+                    if (value.body_cli_template) |template| {
+                        try writeJsonString(writer, template);
+                    } else {
+                        try writer.writeAll("null");
+                    }
+                    try writeJsonFieldPrefix(writer, &wrote_template, "send_cli_template");
+                    if (value.send_cli_template) |template| {
+                        try writeJsonString(writer, template);
+                    } else {
+                        try writer.writeAll("null");
+                    }
+                    try writeJsonFieldPrefix(writer, &wrote_template, "note");
+                    if (value.note) |note| {
+                        try writeJsonString(writer, note);
+                    } else {
+                        try writer.writeAll("null");
+                    }
+                    try writer.writeByte('}');
+                } else {
+                    try writer.writeAll("null");
+                }
                 try writer.writeByte('}');
             }
             try writer.writeByte(']');
         }
 
+        fn buildStandardObservedTemplatesAlloc(
+            allocator: std.mem.Allocator,
+            contract_address: []const u8,
+            direction: tools_types.ObservedMessageDirection,
+            opcode_name: []const u8,
+            opcode: ?u32,
+        ) !?tools_types.ObservedMessageTemplateResult {
+            const is_incoming = direction == .incoming;
+
+            if (std.mem.eql(u8, opcode_name, "comment")) {
+                return .{
+                    .body_cli_template = try allocator.dupe(u8, "ton-zig-agent-kit cell build-typed u32:0 bytes:<comment_utf8>"),
+                    .send_cli_template = if (is_incoming)
+                        try std.fmt.allocPrint(
+                            allocator,
+                            "ton-zig-agent-kit wallet send <wallet_addr> {s} <amount_nanoton> <comment_utf8>",
+                            .{contract_address},
+                        )
+                    else
+                        null,
+                    .note = try allocator.dupe(u8, if (is_incoming) "Observed as a simple comment-bearing incoming transfer." else "Observed as an outgoing comment emitted by the contract."),
+                };
+            }
+
+            if (std.mem.eql(u8, opcode_name, "jetton_transfer")) {
+                return .{
+                    .body_cli_template = try allocator.dupe(
+                        u8,
+                        "ton-zig-agent-kit cell build-typed u32:0x0F8A7EA5 u64:<query_id> coins:<jetton_amount> addr:<destination> addr:<response_destination> u1:0 coins:<forward_ton_amount> u1:1 ref:<forward_payload_boc>",
+                    ),
+                    .send_cli_template = if (is_incoming)
+                        try std.fmt.allocPrint(
+                            allocator,
+                            "ton-zig-agent-kit wallet send-ops <wallet_addr> {s} <amount_nanoton> u32:0x0F8A7EA5 u64:<query_id> coins:<jetton_amount> addr:<destination> addr:<response_destination> u1:0 coins:<forward_ton_amount> u1:1 ref:<forward_payload_boc>",
+                            .{contract_address},
+                        )
+                    else
+                        null,
+                    .note = try allocator.dupe(u8, "Typical Jetton wallet transfer body. Build the forward payload separately, for example with `cell build-typed u32:0 bytes:<comment>`."),
+                };
+            }
+
+            if (std.mem.eql(u8, opcode_name, "jetton_burn")) {
+                return .{
+                    .body_cli_template = try allocator.dupe(
+                        u8,
+                        "ton-zig-agent-kit cell build-typed u32:0x595F07BC u64:<query_id> coins:<jetton_amount> addr:<response_destination> u1:0",
+                    ),
+                    .send_cli_template = if (is_incoming)
+                        try std.fmt.allocPrint(
+                            allocator,
+                            "ton-zig-agent-kit wallet send-ops <wallet_addr> {s} <amount_nanoton> u32:0x595F07BC u64:<query_id> coins:<jetton_amount> addr:<response_destination> u1:0",
+                            .{contract_address},
+                        )
+                    else
+                        null,
+                    .note = try allocator.dupe(u8, "Typical Jetton burn body."),
+                };
+            }
+
+            if (std.mem.eql(u8, opcode_name, "nft_transfer")) {
+                return .{
+                    .body_cli_template = try allocator.dupe(
+                        u8,
+                        "ton-zig-agent-kit cell build-typed u32:0x5FCC3D14 u64:<query_id> addr:<new_owner> addr:<response_destination> u1:0 coins:<forward_amount> u1:1 ref:<forward_payload_boc>",
+                    ),
+                    .send_cli_template = if (is_incoming)
+                        try std.fmt.allocPrint(
+                            allocator,
+                            "ton-zig-agent-kit wallet send-ops <wallet_addr> {s} <amount_nanoton> u32:0x5FCC3D14 u64:<query_id> addr:<new_owner> addr:<response_destination> u1:0 coins:<forward_amount> u1:1 ref:<forward_payload_boc>",
+                            .{contract_address},
+                        )
+                    else
+                        null,
+                    .note = try allocator.dupe(u8, "Typical NFT transfer body. The forward payload is often a comment cell."),
+                };
+            }
+
+            if (opcode != null) {
+                return .{
+                    .body_cli_template = try std.fmt.allocPrint(
+                        allocator,
+                        "ton-zig-agent-kit cell build-typed u32:0x{X} <more_ops...>",
+                        .{opcode.?},
+                    ),
+                    .send_cli_template = if (is_incoming)
+                        try std.fmt.allocPrint(
+                            allocator,
+                            "ton-zig-agent-kit wallet send-ops <wallet_addr> {s} <amount_nanoton> u32:0x{X} <more_ops...>",
+                            .{ contract_address, opcode.? },
+                        )
+                    else
+                        null,
+                    .note = try allocator.dupe(u8, "Unknown standard layout; extend the body after the observed opcode."),
+                };
+            }
+
+            return null;
+        }
+
         fn formatU256Alloc(self: *@This(), value: anytype) ![]u8 {
             return std.fmt.allocPrint(self.allocator, "{d}", .{value});
+        }
+
+        fn buildObservedMessageTemplateAlloc(
+            self: *@This(),
+            contract_address: []const u8,
+            direction: tools_types.ObservedMessageDirection,
+            analysis: ?tools_types.BodyAnalysisResult,
+            decoded_body: ?tools_types.DecodedBodyResult,
+        ) !?tools_types.ObservedMessageTemplateResult {
+            if (decoded_body) |value| {
+                const send_cli = if (direction == .incoming and value.kind == .function)
+                    try std.fmt.allocPrint(
+                        self.allocator,
+                        "ton-zig-agent-kit wallet send-auto-abi <wallet_addr> {s} <amount_nanoton> {s} [values...]",
+                        .{ contract_address, value.selector },
+                    )
+                else
+                    null;
+                errdefer if (send_cli) |text| self.allocator.free(text);
+
+                const note = try std.fmt.allocPrint(
+                    self.allocator,
+                    "Observed {s} ABI {s}; prefer schema-aware invocation.",
+                    .{
+                        switch (direction) {
+                            .incoming => "incoming",
+                            .outgoing => "outgoing",
+                        },
+                        switch (value.kind) {
+                            .function => "function call",
+                            .event => "event body",
+                        },
+                    },
+                );
+                errdefer self.allocator.free(note);
+
+                return .{
+                    .body_cli_template = null,
+                    .send_cli_template = send_cli,
+                    .note = note,
+                };
+            }
+
+            if (analysis) |value| {
+                if (value.opcode_name) |name| {
+                    if (try buildStandardObservedTemplatesAlloc(self.allocator, contract_address, direction, name, value.opcode)) |template| {
+                        return template;
+                    }
+                }
+                if (value.opcode) |opcode| {
+                    return .{
+                        .body_cli_template = try std.fmt.allocPrint(
+                            self.allocator,
+                            "ton-zig-agent-kit cell build-typed u32:0x{X} <more_ops...>",
+                            .{opcode},
+                        ),
+                        .send_cli_template = if (direction == .incoming)
+                            try std.fmt.allocPrint(
+                                self.allocator,
+                                "ton-zig-agent-kit wallet send-ops <wallet_addr> {s} <amount_nanoton> u32:0x{X} <more_ops...>",
+                                .{ contract_address, opcode },
+                            )
+                        else
+                            null,
+                        .note = try std.fmt.allocPrint(
+                            self.allocator,
+                            "Observed raw opcode 0x{X}; fill in the remaining fields manually.",
+                            .{opcode},
+                        ),
+                    };
+                }
+            }
+
+            return null;
         }
 
         fn buildAbiSummaryJsonAlloc(self: *@This(), contract_address: []const u8) !BuiltAbiInspect {
@@ -1621,6 +1821,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
 
         fn appendObservedMessageSummaryAlloc(
             self: *@This(),
+            contract_address: []const u8,
             items: *std.array_list.Managed(tools_types.ObservedMessageSummaryResult),
             direction: tools_types.ObservedMessageDirection,
             analysis: ?tools_types.BodyAnalysisResult,
@@ -1654,11 +1855,13 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 .utf8_tail = try self.dupOptionalStringAlloc(utf8_tail),
                 .abi_kind = abi_kind,
                 .abi_selector = try self.dupOptionalStringAlloc(abi_selector),
+                .template = try self.buildObservedMessageTemplateAlloc(contract_address, direction, analysis, decoded_body),
             });
         }
 
         fn observeMessageAlloc(
             self: *@This(),
+            contract_address: []const u8,
             msg: *const core_types.Message,
             direction: tools_types.ObservedMessageDirection,
             items: *std.array_list.Managed(tools_types.ObservedMessageSummaryResult),
@@ -1673,7 +1876,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             defer if (decoded_body) |*value| freeDecodedBodyAlloc(self.allocator, value);
 
             if (body_analysis == null and decoded_body == null) return;
-            try self.appendObservedMessageSummaryAlloc(items, direction, body_analysis, decoded_body);
+            try self.appendObservedMessageSummaryAlloc(contract_address, items, direction, body_analysis, decoded_body);
         }
 
         fn buildObservedMessagesAlloc(
@@ -1694,10 +1897,10 @@ fn AgentToolsImpl(comptime ClientType: type) type {
 
             for (txs) |*tx| {
                 if (tx.in_msg) |msg| {
-                    try self.observeMessageAlloc(msg, .incoming, &items);
+                    try self.observeMessageAlloc(contract_address, msg, .incoming, &items);
                 }
                 for (tx.out_msgs) |msg| {
-                    try self.observeMessageAlloc(msg, .outgoing, &items);
+                    try self.observeMessageAlloc(contract_address, msg, .outgoing, &items);
                 }
             }
 
@@ -5477,10 +5680,20 @@ test "agent tools inspectContract summarizes wallet and abi metadata" {
     try std.testing.expectEqual(@as(?u32, 0x11223344), result.observed_messages[0].opcode);
     try std.testing.expectEqual(tools_types.DecodedBodyKind.function, result.observed_messages[0].abi_kind.?);
     try std.testing.expectEqualStrings("transfer(address,coins)", result.observed_messages[0].abi_selector.?);
+    try std.testing.expect(result.observed_messages[0].template != null);
+    try std.testing.expectEqualStrings(
+        "ton-zig-agent-kit wallet send-auto-abi <wallet_addr> 0:2222222222222222222222222222222222222222222222222222222222222222 <amount_nanoton> transfer(address,coins) [values...]",
+        result.observed_messages[0].template.?.send_cli_template.?,
+    );
     try std.testing.expectEqual(tools_types.ObservedMessageDirection.outgoing, result.observed_messages[1].direction);
     try std.testing.expectEqual(@as(?u32, 0), result.observed_messages[1].opcode);
     try std.testing.expectEqualStrings("comment", result.observed_messages[1].opcode_name.?);
     try std.testing.expectEqualStrings("refund", result.observed_messages[1].comment.?);
+    try std.testing.expect(result.observed_messages[1].template != null);
+    try std.testing.expectEqualStrings(
+        "ton-zig-agent-kit cell build-typed u32:0 bytes:<comment_utf8>",
+        result.observed_messages[1].template.?.body_cli_template.?,
+    );
     try std.testing.expect(result.details_json != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"seqno\":7") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"wallet_id\":2864434397") != null);
@@ -5488,6 +5701,7 @@ test "agent tools inspectContract summarizes wallet and abi metadata" {
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"observed_messages\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"abi_selector\":\"transfer(address,coins)\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"opcode_name\":\"comment\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"send_cli_template\":\"ton-zig-agent-kit wallet send-auto-abi <wallet_addr> 0:2222222222222222222222222222222222222222222222222222222222222222 <amount_nanoton> transfer(address,coins) [values...]\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"comment\":\"refund\"") != null);
 }
 
