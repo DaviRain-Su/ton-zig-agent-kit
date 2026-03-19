@@ -7,6 +7,7 @@ const http_client = @import("../core/http_client.zig");
 const paywatch = @import("../paywatch/paywatch.zig");
 const wallet = @import("../wallet/wallet.zig");
 const signing = @import("../wallet/signing.zig");
+const contract = @import("../contract/contract.zig");
 const jetton = @import("../contract/jetton.zig");
 const nft = @import("../contract/nft.zig");
 const tools_types = @import("types.zig");
@@ -45,6 +46,46 @@ pub const AgentTools = struct {
             .address = target_address,
             .balance = resp.balance,
             .formatted = formatted,
+            .success = true,
+            .error_message = null,
+        };
+    }
+
+    /// Run any contract get-method with typed stack arguments
+    pub fn runGetMethod(self: *AgentTools, contract_address: []const u8, method: []const u8, args: []const contract.StackArg) !tools_types.RunMethodResult {
+        var generic = contract.GenericContract.init(self.client, contract_address);
+        var result = generic.callGetMethodArgs(method, args) catch |err| {
+            return tools_types.RunMethodResult{
+                .address = contract_address,
+                .method = method,
+                .exit_code = -1,
+                .stack_json = "[]",
+                .logs = "",
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        defer self.client.freeRunGetMethodResponse(&result);
+
+        const stack_json = contract.stackToJsonAlloc(self.allocator, result.stack) catch |err| {
+            return tools_types.RunMethodResult{
+                .address = contract_address,
+                .method = method,
+                .exit_code = result.exit_code,
+                .stack_json = "[]",
+                .logs = "",
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+
+        const logs = try self.allocator.dupe(u8, result.logs);
+        return tools_types.RunMethodResult{
+            .address = contract_address,
+            .method = method,
+            .exit_code = result.exit_code,
+            .stack_json = stack_json,
+            .logs = logs,
             .success = true,
             .error_message = null,
         };
@@ -239,6 +280,29 @@ pub const AgentTools = struct {
 
     /// Send TON transfer (if wallet configured)
     pub fn sendTransfer(self: *AgentTools, destination: []const u8, amount: u64, comment: ?[]const u8) !tools_types.SendResult {
+        const msgs = &[_]wallet.signing.WalletMessage{
+            .{
+                .destination = destination,
+                .amount = amount,
+                .comment = comment,
+            },
+        };
+        return self.sendWalletMessages(destination, amount, msgs);
+    }
+
+    /// Send an arbitrary contract body BoC via the configured wallet
+    pub fn sendContractMessage(self: *AgentTools, destination: []const u8, amount: u64, body_boc: []const u8) !tools_types.SendResult {
+        const msgs = &[_]wallet.signing.WalletMessage{
+            .{
+                .destination = destination,
+                .amount = amount,
+                .body = body_boc,
+            },
+        };
+        return self.sendWalletMessages(destination, amount, msgs);
+    }
+
+    fn sendWalletMessages(self: *AgentTools, destination: []const u8, amount: u64, msgs: []const wallet.signing.WalletMessage) !tools_types.SendResult {
         const private_key = self.config.wallet_private_key orelse {
             return tools_types.SendResult{
                 .hash = "",
@@ -251,38 +315,7 @@ pub const AgentTools = struct {
         };
 
         const wallet_addr = self.config.wallet_address orelse "";
-        const seqno = signing.getSeqno(self.client, wallet_addr) catch |err| {
-            return tools_types.SendResult{
-                .hash = "",
-                .lt = 0,
-                .destination = destination,
-                .amount = amount,
-                .success = false,
-                .error_message = @errorName(err),
-            };
-        };
-
-        const msgs = &[_]wallet.signing.WalletMessage{
-            .{
-                .destination = destination,
-                .amount = amount,
-                .comment = comment,
-            },
-        };
-
-        const signed = signing.createSignedTransfer(self.allocator, .v4, private_key, wallet_addr, seqno, @constCast(msgs)) catch |err| {
-            return tools_types.SendResult{
-                .hash = "",
-                .lt = 0,
-                .destination = destination,
-                .amount = amount,
-                .success = false,
-                .error_message = @errorName(err),
-            };
-        };
-        defer self.allocator.free(signed);
-
-        const result = self.client.sendBoc(signed) catch |err| {
+        const result = signing.sendMessages(self.client, .v4, private_key, wallet_addr, msgs) catch |err| {
             return tools_types.SendResult{
                 .hash = "",
                 .lt = 0,
@@ -307,6 +340,7 @@ pub const AgentTools = struct {
 // Re-export types
 pub const BalanceResult = tools_types.BalanceResult;
 pub const SendResult = tools_types.SendResult;
+pub const RunMethodResult = tools_types.RunMethodResult;
 pub const InvoiceResult = tools_types.InvoiceResult;
 pub const VerifyResult = tools_types.VerifyResult;
 pub const TxResult = tools_types.TxResult;
@@ -344,4 +378,10 @@ test "agent tools getBalance" {
 
     // Note: May fail if network unavailable, but struct should be valid
     _ = result;
+}
+
+test "agent tools generic runGetMethod result type is exported" {
+    _ = AgentTools.runGetMethod;
+    _ = AgentTools.sendContractMessage;
+    _ = RunMethodResult;
 }

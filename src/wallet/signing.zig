@@ -237,12 +237,6 @@ pub fn sendTransfer(
     amount: u64,
     comment: ?[]const u8,
 ) !types.SendBocResponse {
-    const allocator = std.heap.page_allocator;
-
-    // Get current seqno
-    const seqno = try getSeqno(client, wallet_address);
-
-    // Create message
     const msgs = &[_]WalletMessage{
         .{
             .destination = destination,
@@ -251,11 +245,42 @@ pub fn sendTransfer(
         },
     };
 
-    // Create signed transfer
+    return sendMessages(client, version, private_key, wallet_address, msgs);
+}
+
+pub fn sendBody(
+    client: *http_client.TonHttpClient,
+    version: WalletVersion,
+    private_key: [32]u8,
+    wallet_address: []const u8,
+    destination: []const u8,
+    amount: u64,
+    body_boc: []const u8,
+) !types.SendBocResponse {
+    const msgs = &[_]WalletMessage{
+        .{
+            .destination = destination,
+            .amount = amount,
+            .body = body_boc,
+        },
+    };
+
+    return sendMessages(client, version, private_key, wallet_address, msgs);
+}
+
+pub fn sendMessages(
+    client: *http_client.TonHttpClient,
+    version: WalletVersion,
+    private_key: [32]u8,
+    wallet_address: []const u8,
+    msgs: []const WalletMessage,
+) !types.SendBocResponse {
+    const allocator = std.heap.page_allocator;
+
+    const seqno = try getSeqno(client, wallet_address);
     const signed_transfer = try createSignedTransfer(allocator, version, private_key, wallet_address, seqno, msgs);
     defer allocator.free(signed_transfer);
 
-    // Send BoC
     return try client.sendBoc(signed_transfer);
 }
 
@@ -310,4 +335,76 @@ test "wallet signing verifies with ed25519" {
 
     const signature = Ed25519.Signature.fromBytes(signature_bytes[0..64].*);
     try signature.verify(&payload_cell.hash(), public_key);
+}
+
+test "wallet signing preserves raw body boc in internal message" {
+    const allocator = std.testing.allocator;
+
+    var body_builder = cell.Builder.init();
+    try body_builder.storeUint(0x12345678, 32);
+    try body_builder.storeUint(0xAB, 8);
+    const raw_body_cell = try body_builder.toCell(allocator);
+    defer raw_body_cell.deinit(allocator);
+
+    const raw_body_boc = try boc.serializeBoc(allocator, raw_body_cell);
+    defer allocator.free(raw_body_boc);
+
+    const keypair = try generateKeypair("test_seed");
+    var msgs = [_]WalletMessage{
+        .{
+            .destination = "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+            .amount = 1_000_000_000,
+            .body = raw_body_boc,
+        },
+    };
+
+    const signed = try createSignedTransfer(
+        allocator,
+        .v4,
+        keypair[0],
+        "0:0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+        3,
+        msgs[0..],
+    );
+    defer allocator.free(signed);
+
+    const ext_msg = try boc.deserializeBoc(allocator, signed);
+    defer ext_msg.deinit(allocator);
+
+    var ext_slice = ext_msg.toSlice();
+    _ = try ext_slice.loadUint(2);
+    _ = try ext_slice.loadUint(2);
+    _ = try ext_slice.loadAddress();
+    _ = try ext_slice.loadCoins();
+    _ = try ext_slice.loadUint(1);
+    _ = try ext_slice.loadUint(1);
+
+    const signed_body = try ext_slice.loadRef();
+    var signed_slice = signed_body.toSlice();
+    _ = try signed_slice.loadBits(512);
+    try std.testing.expectEqual(default_wallet_id_v4, try signed_slice.loadUint32());
+    _ = try signed_slice.loadUint32();
+    try std.testing.expectEqual(@as(u32, 3), try signed_slice.loadUint32());
+    try std.testing.expectEqual(simple_send_opcode, try signed_slice.loadUint32());
+    try std.testing.expectEqual(@as(u8, 3), try signed_slice.loadUint8());
+
+    const out_msg = try signed_slice.loadRef();
+    var out_slice = out_msg.toSlice();
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 1), try out_slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 1), try out_slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadUint(2));
+    _ = try out_slice.loadAddress();
+    try std.testing.expectEqual(@as(u64, 1_000_000_000), try out_slice.loadCoins());
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadCoins());
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadCoins());
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadUint(64));
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadUint(32));
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 1), try out_slice.loadUint(1));
+
+    const decoded_body = try out_slice.loadRef();
+    try std.testing.expectEqualSlices(u8, &raw_body_cell.hash(), &decoded_body.hash());
 }

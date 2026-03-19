@@ -195,6 +195,78 @@ pub fn buildAddressSliceStackArgJson(allocator: std.mem.Allocator, address_text:
     return buildStackArgsJsonAlloc(allocator, &.{.{ .address = address_text }});
 }
 
+pub fn stackToJsonAlloc(allocator: std.mem.Allocator, stack: []const types.StackEntry) ![]u8 {
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    try writeStackEntriesJson(&writer.writer, allocator, stack);
+    return try writer.toOwnedSlice();
+}
+
+fn writeStackEntriesJson(writer: anytype, allocator: std.mem.Allocator, stack: []const types.StackEntry) anyerror!void {
+    try writer.writeByte('[');
+    for (stack, 0..) |*entry, i| {
+        if (i != 0) try writer.writeByte(',');
+        try writeStackEntryJson(writer, allocator, entry);
+    }
+    try writer.writeByte(']');
+}
+
+fn writeStackEntryJson(writer: anytype, allocator: std.mem.Allocator, entry: *const types.StackEntry) anyerror!void {
+    switch (entry.*) {
+        .null => try writer.writeAll("[\"null\"]"),
+        .number => |value| try writer.print("[\"num\",{d}]", .{value}),
+        .bytes => |value| {
+            try writer.writeAll("[\"bytes\",");
+            try writeJsonString(writer, value);
+            try writer.writeByte(']');
+        },
+        .cell => |value| {
+            const body = try boc.serializeBoc(allocator, value);
+            defer allocator.free(body);
+            try writeBocStackArgJson(writer, allocator, "cell", body);
+        },
+        .slice => |value| {
+            const body = try boc.serializeBoc(allocator, value);
+            defer allocator.free(body);
+            try writeBocStackArgJson(writer, allocator, "slice", body);
+        },
+        .builder => |value| {
+            const body = try boc.serializeBoc(allocator, value);
+            defer allocator.free(body);
+            try writeBocStackArgJson(writer, allocator, "builder", body);
+        },
+        .tuple => |items| {
+            try writer.writeAll("[\"tuple\",");
+            try writeStackEntriesJson(writer, allocator, items);
+            try writer.writeByte(']');
+        },
+        .list => |items| {
+            try writer.writeAll("[\"list\",");
+            try writeStackEntriesJson(writer, allocator, items);
+            try writer.writeByte(']');
+        },
+    }
+}
+
+fn writeJsonString(writer: anytype, value: []const u8) !void {
+    try writer.writeByte('"');
+    for (value) |char| {
+        switch (char) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            0x08 => try writer.writeAll("\\b"),
+            0x0c => try writer.writeAll("\\f"),
+            0x00...0x07, 0x0b, 0x0e...0x1f => try writer.print("\\u00{X:0>2}", .{char}),
+            else => try writer.writeByte(char),
+        }
+    }
+    try writer.writeByte('"');
+}
+
 pub const jetton = @import("jetton.zig");
 pub const nft = @import("nft.zig");
 pub const abi_adapter = @import("abi_adapter.zig");
@@ -269,6 +341,34 @@ test "decode offchain content uri from snake cell" {
     defer allocator.free(uri);
 
     try std.testing.expectEqualStrings("https://example.com/meta.json", uri);
+}
+
+test "serialize stack entries to json" {
+    const allocator = std.testing.allocator;
+
+    var builder = cell.Builder.init();
+    try builder.storeUint(0xCAFE, 16);
+    const payload = try builder.toCell(allocator);
+    defer payload.deinit(allocator);
+
+    var nested = [_]types.StackEntry{
+        .{ .number = 7 },
+        .{ .bytes = "line1\n\"quoted\"" },
+    };
+    var stack = [_]types.StackEntry{
+        .{ .null = {} },
+        .{ .builder = payload },
+        .{ .tuple = nested[0..] },
+        .{ .list = nested[0..] },
+    };
+
+    const json = try stackToJsonAlloc(allocator, stack[0..]);
+    defer allocator.free(json);
+
+    try std.testing.expect(std.mem.indexOf(u8, json, "[\"null\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "[\"builder\",\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "[\"tuple\",[[\"num\",7],[\"bytes\",\"line1\\n\\\"quoted\\\"\"]]]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "[\"list\",[[\"num\",7],[\"bytes\",\"line1\\n\\\"quoted\\\"\"]]]") != null);
 }
 
 test {
