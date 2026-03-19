@@ -624,6 +624,8 @@ fn storeAbiValue(
         return storeAbiValue(builder, allocator, paramWithType(param, inner_type), value);
     }
 
+    if (arrayInnerType(param.type_name) != null) return error.UnsupportedAbiType;
+
     if (isCompositeParam(param)) {
         const json_text = switch (value) {
             .json => |text| text,
@@ -684,6 +686,18 @@ fn abiValueToStackArgAlloc(
         }
 
         return abiValueToStackArgAlloc(allocator, paramWithType(param, inner_type), value);
+    }
+
+    if (arrayInnerType(param.type_name)) |inner_type| {
+        const json_text = switch (value) {
+            .json => |text| text,
+            else => return error.InvalidAbiArguments,
+        };
+        const encoded = try buildArrayStackArgJsonAlloc(allocator, paramWithType(param, inner_type), json_text);
+        return .{
+            .arg = .{ .raw_json = encoded },
+            .owned_buffer = encoded,
+        };
     }
 
     if (isCompositeParam(param)) {
@@ -843,6 +857,21 @@ fn buildCompositeStackArgJsonAlloc(
     return try writer.toOwnedSlice();
 }
 
+fn buildArrayStackArgJsonAlloc(
+    allocator: std.mem.Allocator,
+    element_param: ParamDef,
+    json_text: []const u8,
+) ![]u8 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_text, .{});
+    defer parsed.deinit();
+
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    try writeAbiArrayStackArgJson(&writer.writer, allocator, element_param, parsed.value);
+    return try writer.toOwnedSlice();
+}
+
 fn storeAbiJsonValue(
     builder: *cell.Builder,
     allocator: std.mem.Allocator,
@@ -858,6 +887,8 @@ fn storeAbiJsonValue(
         try builder.storeUint(1, 1);
         return storeAbiJsonValue(builder, allocator, paramWithType(param, inner_type), json_value);
     }
+
+    if (arrayInnerType(param.type_name) != null) return error.UnsupportedAbiType;
 
     if (isCompositeParam(param)) {
         return storeCompositeFieldsJsonValue(builder, allocator, param.components, json_value);
@@ -956,6 +987,10 @@ fn writeAbiStackArgJson(
         return writeAbiStackArgJson(writer, allocator, paramWithType(param, inner_type), json_value);
     }
 
+    if (arrayInnerType(param.type_name)) |inner_type| {
+        return writeAbiArrayStackArgJson(writer, allocator, paramWithType(param, inner_type), json_value);
+    }
+
     if (isCompositeParam(param)) {
         return writeAbiCompositeStackArgJson(writer, allocator, param, json_value);
     }
@@ -1028,6 +1063,25 @@ fn writeAbiStackArgJson(
     return error.UnsupportedAbiType;
 }
 
+fn writeAbiArrayStackArgJson(
+    writer: anytype,
+    allocator: std.mem.Allocator,
+    element_param: ParamDef,
+    json_value: std.json.Value,
+) anyerror!void {
+    const items = switch (json_value) {
+        .array => |value| value.items,
+        else => return error.InvalidAbiArguments,
+    };
+
+    try writer.writeAll("[\"list\",[");
+    for (items, 0..) |item, idx| {
+        if (idx != 0) try writer.writeByte(',');
+        try writeAbiStackArgJson(writer, allocator, element_param, item);
+    }
+    try writer.writeAll("]]");
+}
+
 fn writeAbiCompositeStackArgJson(
     writer: anytype,
     allocator: std.mem.Allocator,
@@ -1077,6 +1131,28 @@ fn compositeStackTag(type_name: []const u8) []const u8 {
         return "list";
     }
     return "tuple";
+}
+
+fn arrayInnerType(type_name: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, type_name, " \t\r\n");
+
+    if (trimmed.len > 2 and std.mem.endsWith(u8, trimmed, "[]")) {
+        return std.mem.trim(u8, trimmed[0 .. trimmed.len - 2], " \t\r\n");
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "array<") and trimmed.len > "array<>".len and trimmed[trimmed.len - 1] == '>') {
+        return std.mem.trim(u8, trimmed["array<".len .. trimmed.len - 1], " \t\r\n");
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "list<") and trimmed.len > "list<>".len and trimmed[trimmed.len - 1] == '>') {
+        return std.mem.trim(u8, trimmed["list<".len .. trimmed.len - 1], " \t\r\n");
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "array ")) {
+        return std.mem.trim(u8, trimmed["array ".len..], " \t\r\n");
+    }
+
+    return null;
 }
 
 fn writeStackBocArgJson(writer: anytype, allocator: std.mem.Allocator, tag: []const u8, boc_bytes: []const u8) !void {
@@ -1154,6 +1230,10 @@ fn writeDecodedOutputJson(
         }
 
         return writeDecodedOutputJson(writer, allocator, paramWithType(param, inner_type), entry);
+    }
+
+    if (arrayInnerType(param.type_name)) |inner_type| {
+        return writeDecodedArrayJson(writer, allocator, paramWithType(param, inner_type), entry);
     }
 
     if (isCompositeParam(param)) {
@@ -1257,6 +1337,26 @@ fn writeDecodedCompositeJson(
         try writeDecodedOutputJson(writer, allocator, component, child);
     }
     try writer.writeByte('}');
+}
+
+fn writeDecodedArrayJson(
+    writer: anytype,
+    allocator: std.mem.Allocator,
+    element_param: ParamDef,
+    entry: *const types.StackEntry,
+) anyerror!void {
+    const items = switch (entry.*) {
+        .list => |value| value,
+        .tuple => |value| value,
+        else => return error.InvalidAbiOutputs,
+    };
+
+    try writer.writeByte('[');
+    for (items, 0..) |*child, idx| {
+        if (idx != 0) try writer.writeByte(',');
+        try writeDecodedOutputJson(writer, allocator, element_param, child);
+    }
+    try writer.writeByte(']');
 }
 
 fn decodeBytesOutputAlloc(allocator: std.mem.Allocator, entry: *const types.StackEntry) ![]u8 {
@@ -1803,6 +1903,61 @@ test "abi adapter builds tuple and list get-method stack args from json" {
     try std.testing.expectEqualStrings("[\"list\",[[\"num\",1],[\"num\",7]]]", list_args.args[0].raw_json);
 }
 
+test "abi adapter builds scalar and tuple array get-method stack args from json" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "sum_many",
+        \\      "inputs": [
+        \\        {"name": "values", "type": "uint32[]"}
+        \\      ]
+        \\    },
+        \\    {
+        \\      "name": "lookup_many",
+        \\      "inputs": [
+        \\        {
+        \\          "name": "items",
+        \\          "type": "tuple[]",
+        \\          "components": [
+        \\            {"name": "enabled", "type": "bool"},
+        \\            {"name": "owner", "type": "address"}
+        \\          ]
+        \\        }
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var abi = try parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer abi.deinit(allocator);
+
+    var scalar_args = try buildStackArgsFromAbiAlloc(allocator, &abi.abi, "sum_many", &.{
+        .{ .json = "[1,2,3]" },
+    });
+    defer scalar_args.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), scalar_args.args.len);
+    try std.testing.expect(scalar_args.args[0] == .raw_json);
+    try std.testing.expectEqualStrings("[\"list\",[[\"num\",1],[\"num\",2],[\"num\",3]]]", scalar_args.args[0].raw_json);
+
+    var tuple_args = try buildStackArgsFromAbiAlloc(allocator, &abi.abi, "lookup_many", &.{
+        .{ .json = "[{\"enabled\":true,\"owner\":\"0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8\"},{\"enabled\":false,\"owner\":\"0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8\"}]" },
+    });
+    defer tuple_args.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), tuple_args.args.len);
+    try std.testing.expect(tuple_args.args[0] == .raw_json);
+    try std.testing.expect(std.mem.startsWith(
+        u8,
+        tuple_args.args[0].raw_json,
+        "[\"list\",[[\"tuple\",[[\"num\",1],[\"slice\",\"",
+    ));
+    try std.testing.expect(std.mem.indexOf(u8, tuple_args.args[0].raw_json, "[\"tuple\",[[\"num\",0],[\"slice\",\"") != null);
+}
+
 test "abi adapter decodes optional outputs" {
     const allocator = std.testing.allocator;
     const abi_json =
@@ -1901,5 +2056,78 @@ test "abi adapter decodes tuple outputs using component schema" {
     try std.testing.expectEqualStrings(
         "{\"config\":{\"enabled\":true,\"owner\":\"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8\",\"label\":\"demo\"}}",
         decoded,
+    );
+}
+
+test "abi adapter decodes scalar and tuple array outputs" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "get_many",
+        \\      "outputs": [
+        \\        {"name": "values", "type": "uint32[]"}
+        \\      ]
+        \\    },
+        \\    {
+        \\      "name": "get_configs",
+        \\      "outputs": [
+        \\        {
+        \\          "name": "items",
+        \\          "type": "tuple[]",
+        \\          "components": [
+        \\            {"name": "enabled", "type": "bool"},
+        \\            {"name": "owner", "type": "address"}
+        \\          ]
+        \\        }
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var abi = try parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer abi.deinit(allocator);
+
+    var scalar_items = [_]types.StackEntry{
+        .{ .number = 1 },
+        .{ .number = 2 },
+        .{ .number = 3 },
+    };
+    const scalar_stack = [_]types.StackEntry{
+        .{ .list = scalar_items[0..] },
+    };
+
+    const scalar_decoded = try decodeFunctionOutputsFromAbiJsonAlloc(allocator, &abi.abi, "get_many", scalar_stack[0..]);
+    defer allocator.free(scalar_decoded);
+    try std.testing.expectEqualStrings("{\"values\":[1,2,3]}", scalar_decoded);
+
+    var owner_builder = cell.Builder.init();
+    try owner_builder.storeAddress(@as([]const u8, "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8"));
+    const owner_cell = try owner_builder.toCell(allocator);
+    defer owner_cell.deinit(allocator);
+
+    var tuple_a = [_]types.StackEntry{
+        .{ .number = 1 },
+        .{ .slice = owner_cell },
+    };
+    var tuple_b = [_]types.StackEntry{
+        .{ .number = 0 },
+        .{ .slice = owner_cell },
+    };
+    var tuple_items = [_]types.StackEntry{
+        .{ .tuple = tuple_a[0..] },
+        .{ .tuple = tuple_b[0..] },
+    };
+    const tuple_stack = [_]types.StackEntry{
+        .{ .list = tuple_items[0..] },
+    };
+
+    const tuple_decoded = try decodeFunctionOutputsFromAbiJsonAlloc(allocator, &abi.abi, "get_configs", tuple_stack[0..]);
+    defer allocator.free(tuple_decoded);
+    try std.testing.expectEqualStrings(
+        "{\"items\":[{\"enabled\":true,\"owner\":\"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8\"},{\"enabled\":false,\"owner\":\"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8\"}]}",
+        tuple_decoded,
     );
 }
