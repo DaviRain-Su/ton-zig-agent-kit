@@ -1,40 +1,332 @@
 //! Agent tools - High-level interface for AI agents
+//! Unified API for balance queries, transfers, invoices, and verification
 
 const std = @import("std");
 const http_client = @import("../core/http_client.zig");
 const paywatch = @import("../paywatch/paywatch.zig");
 const wallet = @import("../wallet/wallet.zig");
+const signing = @import("../wallet/signing.zig");
+const jetton = @import("../contract/jetton.zig");
+const nft = @import("../contract/nft.zig");
 const tools_types = @import("types.zig");
 
 pub const AgentTools = struct {
+    allocator: std.mem.Allocator,
     client: *http_client.TonHttpClient,
-};
+    config: tools_types.AgentToolsConfig,
 
-pub fn getBalance(tools: *AgentTools, address: []const u8) !tools_types.BalanceResult {
-    const resp = try tools.client.getBalance(address);
-    return tools_types.BalanceResult{
-        .address = address,
-        .balance = resp.balance,
-        .formatted = try std.fmt.allocPrint(std.heap.page_allocator, "{d}.{d:09} TON", .{
+    pub fn init(allocator: std.mem.Allocator, client: *http_client.TonHttpClient, config: tools_types.AgentToolsConfig) AgentTools {
+        return .{
+            .allocator = allocator,
+            .client = client,
+            .config = config,
+        };
+    }
+
+    /// Get TON balance for address
+    pub fn getBalance(self: *AgentTools, address: []const u8) !tools_types.BalanceResult {
+        const resp = self.client.getBalance(address) catch |err| {
+            return tools_types.BalanceResult{
+                .address = address,
+                .balance = 0,
+                .formatted = "0 TON",
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+
+        const formatted = try std.fmt.allocPrint(self.allocator, "{d}.{d:09} TON", .{
             resp.balance / 1_000_000_000,
             resp.balance % 1_000_000_000,
-        }),
-    };
-}
+        });
 
-pub fn createInvoice(tools: *AgentTools, amount: u64, description: []const u8) !tools_types.InvoiceResult {
+        return tools_types.BalanceResult{
+            .address = address,
+            .balance = resp.balance,
+            .formatted = formatted,
+            .success = true,
+            .error_message = null,
+        };
+    }
+
+    /// Create payment invoice
+    pub fn createInvoice(self: *AgentTools, amount: u64, description: []const u8) !tools_types.InvoiceResult {
+        const dest = self.config.wallet_address orelse "";
+
+        const invoice = paywatch.invoice.createInvoice(self.allocator, dest, amount, description) catch |err| {
+            return tools_types.InvoiceResult{
+                .invoice_id = "",
+                .address = dest,
+                .amount = amount,
+                .comment = "",
+                .payment_url = "",
+                .expires_at = 0,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+
+        return tools_types.InvoiceResult{
+            .invoice_id = invoice.id,
+            .address = invoice.address,
+            .amount = invoice.amount,
+            .comment = invoice.comment,
+            .payment_url = invoice.payment_url,
+            .expires_at = invoice.expires_at.?,
+            .success = true,
+            .error_message = null,
+        };
+    }
+
+    /// Verify payment by comment
+    pub fn verifyPayment(self: *AgentTools, comment: []const u8) !tools_types.VerifyResult {
+        const dest = self.config.wallet_address orelse "";
+
+        // Create temporary invoice for verification
+        const temp_invoice = paywatch.invoice.Invoice{
+            .id = "verify",
+            .address = dest,
+            .comment = comment,
+            .amount = 0,
+            .description = "",
+            .payment_url = "",
+            .created_at = std.time.timestamp(),
+            .expires_at = null,
+            .status = .pending,
+        };
+
+        const result = paywatch.verifier.verifyPayment(self.client, &temp_invoice) catch |err| {
+            return tools_types.VerifyResult{
+                .verified = false,
+                .tx_hash = null,
+                .tx_lt = null,
+                .amount = null,
+                .sender = null,
+                .timestamp = null,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+
+        return tools_types.VerifyResult{
+            .verified = result.verified,
+            .tx_hash = result.tx_hash,
+            .tx_lt = result.tx_lt,
+            .amount = result.amount,
+            .sender = result.sender,
+            .timestamp = result.timestamp,
+            .success = true,
+            .error_message = null,
+        };
+    }
+
+    /// Wait for payment with timeout
+    pub fn waitPayment(self: *AgentTools, comment: []const u8, timeout_ms: u32) !tools_types.VerifyResult {
+        const dest = self.config.wallet_address orelse "";
+
+        const temp_invoice = paywatch.invoice.Invoice{
+            .id = "wait",
+            .address = dest,
+            .comment = comment,
+            .amount = 0,
+            .description = "",
+            .payment_url = "",
+            .created_at = std.time.timestamp(),
+            .expires_at = std.time.timestamp() + @divTrunc(timeout_ms, 1000),
+            .status = .pending,
+        };
+
+        var watcher = paywatch.watcher.PaymentWatcher.init(
+            &temp_invoice,
+            self.client,
+            5000, // 5s poll interval
+            timeout_ms,
+        );
+
+        const result = paywatch.watcher.waitPayment(&watcher) catch |err| {
+            return tools_types.VerifyResult{
+                .verified = false,
+                .tx_hash = null,
+                .tx_lt = null,
+                .amount = null,
+                .sender = null,
+                .timestamp = null,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+
+        return tools_types.VerifyResult{
+            .verified = result.found,
+            .tx_hash = result.tx_hash,
+            .tx_lt = result.tx_lt,
+            .amount = result.amount,
+            .sender = result.sender,
+            .timestamp = result.confirmed_at,
+            .success = true,
+            .error_message = null,
+        };
+    }
+
+    /// Get Jetton balance
+    pub fn getJettonBalance(self: *AgentTools, wallet_address: []const u8, jetton_master: []const u8) !tools_types.JettonBalanceResult {
+        var jwallet = jetton.JettonWallet.init(wallet_address, self.client);
+
+        const data = jwallet.getWalletData() catch |err| {
+            return tools_types.JettonBalanceResult{
+                .address = wallet_address,
+                .jetton_master = jetton_master,
+                .balance = 0,
+                .decimals = 9,
+                .symbol = null,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+
+        return tools_types.JettonBalanceResult{
+            .address = wallet_address,
+            .jetton_master = jetton_master,
+            .balance = data.balance,
+            .decimals = 9,
+            .symbol = null,
+            .success = true,
+            .error_message = null,
+        };
+    }
+
+    /// Get NFT info
+    pub fn getNFTInfo(self: *AgentTools, nft_address: []const u8) !tools_types.NFTInfoResult {
+        var item = nft.NFTItem.init(nft_address, self.client);
+
+        const data = item.getNFTData() catch |err| {
+            return tools_types.NFTInfoResult{
+                .address = nft_address,
+                .owner = null,
+                .collection = null,
+                .index = 0,
+                .content = null,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+
+        return tools_types.NFTInfoResult{
+            .address = nft_address,
+            .owner = if (data.owner) |o| try std.fmt.allocPrint(self.allocator, "{s}", .{o}) else null,
+            .collection = if (data.collection) |c| try std.fmt.allocPrint(self.allocator, "{s}", .{c}) else null,
+            .index = data.index,
+            .content = data.content,
+            .success = true,
+            .error_message = null,
+        };
+    }
+
+    /// Send TON transfer (if wallet configured)
+    pub fn sendTransfer(self: *AgentTools, destination: []const u8, amount: u64, comment: ?[]const u8) !tools_types.SendResult {
+        const private_key = self.config.wallet_private_key orelse {
+            return tools_types.SendResult{
+                .hash = "",
+                .lt = 0,
+                .destination = destination,
+                .amount = amount,
+                .success = false,
+                .error_message = "Wallet not configured",
+            };
+        };
+
+        const wallet_addr = self.config.wallet_address orelse "";
+        const seqno = signing.getSeqno(self.client, wallet_addr) catch |err| {
+            return tools_types.SendResult{
+                .hash = "",
+                .lt = 0,
+                .destination = destination,
+                .amount = amount,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+
+        const msgs = &[_]wallet.signing.WalletMessage{
+            .{
+                .destination = destination,
+                .amount = amount,
+                .body = comment,
+            },
+        };
+
+        const signed = signing.createSignedTransfer(self.allocator, .v4, private_key, seqno, @constCast(msgs)) catch |err| {
+            return tools_types.SendResult{
+                .hash = "",
+                .lt = 0,
+                .destination = destination,
+                .amount = amount,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        defer self.allocator.free(signed);
+
+        const result = self.client.sendBoc(signed) catch |err| {
+            return tools_types.SendResult{
+                .hash = "",
+                .lt = 0,
+                .destination = destination,
+                .amount = amount,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+
+        return tools_types.SendResult{
+            .hash = result.hash,
+            .lt = result.lt,
+            .destination = destination,
+            .amount = amount,
+            .success = true,
+            .error_message = null,
+        };
+    }
+};
+
+// Re-export types
+pub const BalanceResult = tools_types.BalanceResult;
+pub const SendResult = tools_types.SendResult;
+pub const InvoiceResult = tools_types.InvoiceResult;
+pub const VerifyResult = tools_types.VerifyResult;
+pub const TxResult = tools_types.TxResult;
+pub const JettonBalanceResult = tools_types.JettonBalanceResult;
+pub const NFTInfoResult = tools_types.NFTInfoResult;
+pub const AgentToolsConfig = tools_types.AgentToolsConfig;
+pub const ToolResponse = tools_types.ToolResponse;
+pub const ToolError = tools_types.ToolError;
+pub const ErrorCode = tools_types.ErrorCode;
+
+test "agent tools init" {
+    const allocator = std.testing.allocator;
+    var client = try http_client.TonHttpClient.init(allocator, "https://tonapi.io", null);
+    defer client.deinit();
+
+    const config = tools_types.AgentToolsConfig{
+        .rpc_url = "https://tonapi.io",
+    };
+
+    const tools = AgentTools.init(allocator, &client, config);
     _ = tools;
-    const invoice = try paywatch.invoice.createInvoice(std.heap.page_allocator, "", amount, description);
-    return tools_types.InvoiceResult{
-        .invoice_id = invoice.comment,
-        .address = invoice.address,
-        .amount = invoice.amount,
-        .comment = invoice.comment,
-        .payment_url = invoice.payment_url,
-    };
 }
 
-test "agent tools" {
-    _ = getBalance;
-    _ = createInvoice;
+test "agent tools getBalance" {
+    const allocator = std.testing.allocator;
+    var client = try http_client.TonHttpClient.init(allocator, "https://tonapi.io", null);
+    defer client.deinit();
+
+    const config = tools_types.AgentToolsConfig{
+        .rpc_url = "https://tonapi.io",
+    };
+
+    const tools = AgentTools.init(allocator, &client, config);
+    const result = try tools.getBalance("EQCD39vd5kB8FW5w6KH7HpNmP8GCvGajvLKGPMgY4sUXJyxqH");
+
+    // Note: May fail if network unavailable, but struct should be valid
+    _ = result;
 }

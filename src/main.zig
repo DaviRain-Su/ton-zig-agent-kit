@@ -396,6 +396,22 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "demo")) {
+        if (args.len < 3) {
+            std.debug.print("Usage: ton-zig-agent-kit demo <bot>\n", .{});
+            return;
+        }
+        const demo_cmd = args[2];
+
+        if (std.mem.eql(u8, demo_cmd, "bot")) {
+            try runBotDemo();
+            return;
+        }
+
+        std.debug.print("Unknown demo command: {s}\n", .{demo_cmd});
+        return;
+    }
+
     try printUsage();
 }
 
@@ -442,6 +458,86 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit paywatch invoice <dest> <amount>  Create invoice\n", .{});
     std.debug.print("  ton-zig-agent-kit paywatch verify <addr> <comment>  Verify payment\n", .{});
     std.debug.print("  ton-zig-agent-kit paywatch wait <addr> <comment>    Wait for payment\n", .{});
+    std.debug.print("\nDemo:\n", .{});
+    std.debug.print("  ton-zig-agent-kit demo bot                     Run Telegram bot demo\n", .{});
+}
+
+/// Run Telegram Bot Demo
+fn runBotDemo() !void {
+    const allocator = std.heap.page_allocator;
+
+    std.debug.print("=== TON Payment Bot Demo ===\n\n", .{});
+
+    const merchant_address = "EQCD39vd5kB8FW5w6KH7HpNmP8GCvGajvLKGPMgY4sUXJyxqH";
+
+    // Demo 1: Start
+    std.debug.print("1. User sends /start\n", .{});
+    const welcome = try std.fmt.allocPrint(allocator, "Welcome to TON Payment Bot!\n\n" ++
+        "Commands:\n" ++
+        "/buy <amount> - Create a new order\n" ++
+        "/status <order_id> - Check order status\n" ++
+        "/balance <address> - Check TON balance\n", .{});
+    std.debug.print("Bot: {s}\n\n", .{welcome});
+
+    // Demo 2: Buy
+    std.debug.print("2. User sends /buy 10\n", .{});
+
+    // Create invoice
+    const amount_nanoton = 10 * 1_000_000_000;
+    const timestamp = std.time.timestamp();
+    const comment = try std.fmt.allocPrint(allocator, "TON-ZIG-{d}-1", .{timestamp});
+    defer allocator.free(comment);
+
+    const payment_url = try std.fmt.allocPrint(allocator, "ton://transfer/{s}?amount={d}&text={s}", .{ merchant_address, amount_nanoton, comment });
+    defer allocator.free(payment_url);
+
+    const buy_response = try std.fmt.allocPrint(allocator, "Order created!\n" ++
+        "Order ID: order_1\n" ++
+        "Amount: 10 TON\n" ++
+        "Payment Comment: {s}\n\n" ++
+        "Please send 10 TON to:\n" ++
+        "{s}\n\n" ++
+        "With comment: {s}\n\n" ++
+        "Or use: {s}", .{ comment, merchant_address, comment, payment_url });
+    defer allocator.free(buy_response);
+
+    std.debug.print("Bot: {s}\n\n", .{buy_response});
+
+    // Demo 3: Check status
+    std.debug.print("3. User sends /status order_1\n", .{});
+    const status = try std.fmt.allocPrint(allocator, "Order Status\n" ++
+        "ID: order_1\n" ++
+        "Status: awaiting_payment\n" ++
+        "Amount: 10 TON\n", .{});
+    defer allocator.free(status);
+    std.debug.print("Bot: {s}\n\n", .{status});
+
+    // Demo 4: Check balance
+    std.debug.print("4. User sends /balance EQCD39vd5kB8FW5w6KH7HpNmP8GCvGajvLKGPMgY4sUXJyxqH\n", .{});
+
+    var client = try TonHttpClient.init(allocator, "https://tonapi.io", null);
+    defer client.deinit();
+
+    const balance_result = client.getBalance("EQCD39vd5kB8FW5w6KH7HpNmP8GCvGajvLKGPMgY4sUXJyxqH") catch |err| {
+        std.debug.print("Bot: Error checking balance: {s}\n", .{@errorName(err)});
+        return;
+    };
+
+    const balance = try std.fmt.allocPrint(allocator, "Balance for EQCD39vd5kB8FW5w6KH7HpNmP8GCvGajvLKGPMgY4sUXJyxqH:\n{d}.{d:09} TON", .{
+        balance_result.balance / 1_000_000_000,
+        balance_result.balance % 1_000_000_000,
+    });
+    defer allocator.free(balance);
+
+    std.debug.print("Bot: {s}\n\n", .{balance});
+
+    std.debug.print("=== Demo Complete ===\n", .{});
+    std.debug.print("\nThis demo shows the core payment flow:\n", .{});
+    std.debug.print("1. User creates an order with /buy\n", .{});
+    std.debug.print("2. Bot generates unique invoice with comment\n", .{});
+    std.debug.print("3. User pays via TON wallet with the comment\n", .{});
+    std.debug.print("4. Bot monitors and confirms payment\n", .{});
+    std.debug.print("5. Goods/services are delivered\n", .{});
 }
 
 test "basic test" {

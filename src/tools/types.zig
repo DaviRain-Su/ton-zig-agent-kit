@@ -1,12 +1,14 @@
 //! Agent tool types and results
+//! Standardized return types for AI agent interactions
 
 const std = @import("std");
-const types = @import("../core/types.zig");
 
 pub const BalanceResult = struct {
     address: []const u8,
     balance: u64,
     formatted: []const u8,
+    success: bool,
+    error_message: ?[]const u8 = null,
 };
 
 pub const SendResult = struct {
@@ -14,6 +16,8 @@ pub const SendResult = struct {
     lt: i64,
     destination: []const u8,
     amount: u64,
+    success: bool,
+    error_message: ?[]const u8 = null,
 };
 
 pub const InvoiceResult = struct {
@@ -22,6 +26,9 @@ pub const InvoiceResult = struct {
     amount: u64,
     comment: []const u8,
     payment_url: []const u8,
+    expires_at: i64,
+    success: bool,
+    error_message: ?[]const u8 = null,
 };
 
 pub const VerifyResult = struct {
@@ -29,6 +36,10 @@ pub const VerifyResult = struct {
     tx_hash: ?[]const u8,
     tx_lt: ?i64,
     amount: ?u64,
+    sender: ?[]const u8,
+    timestamp: ?i64,
+    success: bool,
+    error_message: ?[]const u8 = null,
 };
 
 pub const TxResult = struct {
@@ -39,15 +50,66 @@ pub const TxResult = struct {
     to: ?[]const u8,
     value: u64,
     status: TxStatus,
+    success: bool,
+    error_message: ?[]const u8 = null,
 };
 
 pub const TxStatus = enum {
     pending,
     confirmed,
     failed,
+    unknown,
 };
 
 pub const AgentToolsConfig = struct {
     rpc_url: []const u8,
     api_key: ?[]const u8 = null,
+    wallet_address: ?[]const u8 = null,
+    wallet_private_key: ?[32]u8 = null,
+};
+
+pub const JettonBalanceResult = struct {
+    address: []const u8,
+    jetton_master: []const u8,
+    balance: u64,
+    decimals: u8,
+    symbol: ?[]const u8,
+    success: bool,
+    error_message: ?[]const u8 = null,
+};
+
+pub const NFTInfoResult = struct {
+    address: []const u8,
+    owner: ?[]const u8,
+    collection: ?[]const u8,
+    index: u64,
+    content: ?[]const u8,
+    success: bool,
+    error_message: ?[]const u8 = null,
+};
+
+pub const ToolResponse = union(enum) {
+    balance: BalanceResult,
+    send: SendResult,
+    invoice: InvoiceResult,
+    verify: VerifyResult,
+    transaction: TxResult,
+    jetton_balance: JettonBalanceResult,
+    nft_info: NFTInfoResult,
+    err: ToolError,
+};
+
+pub const ToolError = struct {
+    code: ErrorCode,
+    message: []const u8,
+};
+
+pub const ErrorCode = enum {
+    invalid_address,
+    insufficient_balance,
+    network_error,
+    timeout,
+    not_found,
+    invalid_params,
+    internal_error,
 };
