@@ -271,6 +271,41 @@ pub const AbiDescribeResult = struct {
     }
 };
 
+pub const BuiltBodyResult = struct {
+    address: ?[]const u8,
+    selector: []const u8,
+    body_boc: []const u8,
+    body_hex: []const u8,
+    success: bool,
+    error_message: ?[]const u8 = null,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.address) |value| allocator.free(value);
+        if (self.selector.len > 0) allocator.free(self.selector);
+        if (self.body_boc.len > 0) allocator.free(self.body_boc);
+        if (self.body_hex.len > 0) allocator.free(self.body_hex);
+        self.* = undefined;
+    }
+};
+
+pub const BuiltExternalMessageResult = struct {
+    destination: []const u8,
+    body_boc: []const u8,
+    external_boc: []const u8,
+    external_hex: []const u8,
+    state_init_attached: bool,
+    success: bool,
+    error_message: ?[]const u8 = null,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.destination.len > 0) allocator.free(self.destination);
+        if (self.body_boc.len > 0) allocator.free(self.body_boc);
+        if (self.external_boc.len > 0) allocator.free(self.external_boc);
+        if (self.external_hex.len > 0) allocator.free(self.external_hex);
+        self.* = undefined;
+    }
+};
+
 pub const TxStatus = enum {
     pending,
     confirmed,
@@ -355,6 +390,8 @@ pub const ToolResponse = union(enum) {
     send: SendResult,
     run_method: RunMethodResult,
     decoded_body: DecodedBodyResult,
+    built_body: BuiltBodyResult,
+    built_external: BuiltExternalMessageResult,
     invoice: InvoiceResult,
     verify: VerifyResult,
     transaction: TxResult,

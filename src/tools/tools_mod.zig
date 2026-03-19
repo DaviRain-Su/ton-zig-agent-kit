@@ -596,6 +596,87 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             return out;
         }
 
+        fn builtBodyError(error_message: []const u8) tools_types.BuiltBodyResult {
+            return .{
+                .address = null,
+                .selector = "",
+                .body_boc = "",
+                .body_hex = "",
+                .success = false,
+                .error_message = error_message,
+            };
+        }
+
+        fn builtExternalError(error_message: []const u8) tools_types.BuiltExternalMessageResult {
+            return .{
+                .destination = "",
+                .body_boc = "",
+                .external_boc = "",
+                .external_hex = "",
+                .state_init_attached = false,
+                .success = false,
+                .error_message = error_message,
+            };
+        }
+
+        fn buildBodyResultAlloc(
+            self: *@This(),
+            contract_address: ?[]const u8,
+            selector: []const u8,
+            body_boc: []const u8,
+        ) !tools_types.BuiltBodyResult {
+            const address = if (contract_address) |value| try self.allocator.dupe(u8, value) else null;
+            errdefer if (address) |value| self.allocator.free(value);
+
+            const owned_selector = try self.allocator.dupe(u8, selector);
+            errdefer self.allocator.free(owned_selector);
+
+            const body_b64 = try encodeBase64Alloc(self.allocator, body_boc);
+            errdefer self.allocator.free(body_b64);
+
+            const body_hex = try allocHexLower(self.allocator, body_boc);
+            errdefer self.allocator.free(body_hex);
+
+            return .{
+                .address = address,
+                .selector = owned_selector,
+                .body_boc = body_b64,
+                .body_hex = body_hex,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
+        fn buildExternalMessageResultAlloc(
+            self: *@This(),
+            destination: []const u8,
+            body_boc: []const u8,
+            external_boc_bytes: []const u8,
+            state_init_attached: bool,
+        ) !tools_types.BuiltExternalMessageResult {
+            const owned_destination = try self.allocator.dupe(u8, destination);
+            errdefer self.allocator.free(owned_destination);
+
+            const body_b64 = try encodeBase64Alloc(self.allocator, body_boc);
+            errdefer self.allocator.free(body_b64);
+
+            const external_b64 = try encodeBase64Alloc(self.allocator, external_boc_bytes);
+            errdefer self.allocator.free(external_b64);
+
+            const external_hex = try allocHexLower(self.allocator, external_boc_bytes);
+            errdefer self.allocator.free(external_hex);
+
+            return .{
+                .destination = owned_destination,
+                .body_boc = body_b64,
+                .external_boc = external_b64,
+                .external_hex = external_hex,
+                .state_init_attached = state_init_attached,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
         fn freeDecodedBodyAlloc(allocator: std.mem.Allocator, decoded: *tools_types.DecodedBodyResult) void {
             if (decoded.address.len > 0) allocator.free(decoded.address);
             if (decoded.selector.len > 0) allocator.free(decoded.selector);
@@ -2563,6 +2644,178 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             };
         }
 
+        /// Build a contract body BoC from a single function schema and typed values.
+        pub fn buildContractBodyFunction(
+            self: *@This(),
+            function: abi_adapter.FunctionDef,
+            values: []const abi_adapter.AbiValue,
+        ) !tools_types.BuiltBodyResult {
+            const selector = abi_adapter.buildFunctionSelectorAlloc(self.allocator, function) catch |err| {
+                return builtBodyError(@errorName(err));
+            };
+            defer self.allocator.free(selector);
+
+            const body_boc = abi_adapter.buildFunctionBodyBocAlloc(self.allocator, function, values) catch |err| {
+                return builtBodyError(@errorName(err));
+            };
+            defer self.allocator.free(body_boc);
+
+            return self.buildBodyResultAlloc(null, selector, body_boc) catch |err| {
+                return builtBodyError(@errorName(err));
+            };
+        }
+
+        /// Build a contract body BoC from a loaded ABI source and function name or signature.
+        pub fn buildContractBodyAbi(
+            self: *@This(),
+            abi_json: []const u8,
+            function_name: []const u8,
+            values: []const abi_adapter.AbiValue,
+        ) !tools_types.BuiltBodyResult {
+            var abi = abi_adapter.loadAbiInfoSourceAlloc(self.allocator, abi_json) catch |err| {
+                return builtBodyError(@errorName(err));
+            };
+            defer abi.deinit(self.allocator);
+
+            const function = abi_adapter.resolveFunctionByValueCount(&abi.abi, function_name, values.len) catch |err| {
+                return builtBodyError(@errorName(err));
+            };
+
+            const selector = abi_adapter.buildFunctionSelectorAlloc(self.allocator, function.*) catch |err| {
+                return builtBodyError(@errorName(err));
+            };
+            defer self.allocator.free(selector);
+
+            const body_boc = abi_adapter.buildFunctionBodyFromAbiAlloc(self.allocator, &abi.abi, function_name, values) catch |err| {
+                return builtBodyError(@errorName(err));
+            };
+            defer self.allocator.free(body_boc);
+
+            return self.buildBodyResultAlloc(null, selector, body_boc) catch |err| {
+                return builtBodyError(@errorName(err));
+            };
+        }
+
+        /// Discover ABI on-chain and build a contract body BoC for the destination contract.
+        pub fn buildContractBodyAuto(
+            self: *@This(),
+            contract_address: []const u8,
+            function_name: []const u8,
+            values: []const abi_adapter.AbiValue,
+        ) !tools_types.BuiltBodyResult {
+            var abi = abi_adapter.queryAbiDocumentAlloc(self.client, contract_address) catch |err| {
+                return builtBodyError(@errorName(err));
+            } orelse return builtBodyError("AbiNotFound");
+            defer abi.deinit(self.allocator);
+
+            const function = abi_adapter.resolveFunctionByValueCount(&abi.abi, function_name, values.len) catch |err| {
+                return builtBodyError(@errorName(err));
+            };
+
+            const selector = abi_adapter.buildFunctionSelectorAlloc(self.allocator, function.*) catch |err| {
+                return builtBodyError(@errorName(err));
+            };
+            defer self.allocator.free(selector);
+
+            const body_boc = abi_adapter.buildFunctionBodyFromAbiAlloc(self.allocator, &abi.abi, function_name, values) catch |err| {
+                return builtBodyError(@errorName(err));
+            };
+            defer self.allocator.free(body_boc);
+
+            return self.buildBodyResultAlloc(contract_address, selector, body_boc) catch |err| {
+                return builtBodyError(@errorName(err));
+            };
+        }
+
+        /// Wrap a built body in a generic external incoming message envelope.
+        pub fn buildExternalMessageEnvelope(
+            self: *@This(),
+            destination: []const u8,
+            body_boc: []const u8,
+            state_init_boc: ?[]const u8,
+        ) !tools_types.BuiltExternalMessageResult {
+            const ext_boc = external_message.buildExternalIncomingMessageBocAlloc(
+                self.allocator,
+                destination,
+                body_boc,
+                state_init_boc,
+            ) catch |err| {
+                return builtExternalError(@errorName(err));
+            };
+            defer self.allocator.free(ext_boc);
+
+            return self.buildExternalMessageResultAlloc(destination, body_boc, ext_boc, state_init_boc != null) catch |err| {
+                return builtExternalError(@errorName(err));
+            };
+        }
+
+        /// Build an external incoming message from a single function schema and typed values.
+        pub fn buildExternalMessageEnvelopeFunction(
+            self: *@This(),
+            destination: []const u8,
+            function: abi_adapter.FunctionDef,
+            values: []const abi_adapter.AbiValue,
+            state_init_boc: ?[]const u8,
+        ) !tools_types.BuiltExternalMessageResult {
+            var body = self.buildContractBodyFunction(function, values) catch |err| {
+                return builtExternalError(@errorName(err));
+            };
+            defer body.deinit(self.allocator);
+
+            return self.buildExternalMessageEnvelopeFromBase64(destination, body.body_boc, state_init_boc);
+        }
+
+        /// Build an external incoming message from an ABI document and function name or signature.
+        pub fn buildExternalMessageEnvelopeAbi(
+            self: *@This(),
+            destination: []const u8,
+            abi_json: []const u8,
+            function_name: []const u8,
+            values: []const abi_adapter.AbiValue,
+            state_init_boc: ?[]const u8,
+        ) !tools_types.BuiltExternalMessageResult {
+            var body = self.buildContractBodyAbi(abi_json, function_name, values) catch |err| {
+                return builtExternalError(@errorName(err));
+            };
+            defer body.deinit(self.allocator);
+
+            return self.buildExternalMessageEnvelopeFromBase64(destination, body.body_boc, state_init_boc);
+        }
+
+        /// Discover ABI on-chain and build an external incoming message envelope.
+        pub fn buildExternalMessageEnvelopeAuto(
+            self: *@This(),
+            destination: []const u8,
+            function_name: []const u8,
+            values: []const abi_adapter.AbiValue,
+            state_init_boc: ?[]const u8,
+        ) !tools_types.BuiltExternalMessageResult {
+            var body = self.buildContractBodyAuto(destination, function_name, values) catch |err| {
+                return builtExternalError(@errorName(err));
+            };
+            defer body.deinit(self.allocator);
+
+            return self.buildExternalMessageEnvelopeFromBase64(destination, body.body_boc, state_init_boc);
+        }
+
+        fn buildExternalMessageEnvelopeFromBase64(
+            self: *@This(),
+            destination: []const u8,
+            body_boc_base64: []const u8,
+            state_init_boc: ?[]const u8,
+        ) !tools_types.BuiltExternalMessageResult {
+            const decoded_len = std.base64.standard.Decoder.calcSizeForSlice(body_boc_base64) catch {
+                return builtExternalError("InvalidBodyBocBase64");
+            };
+            const decoded = try self.allocator.alloc(u8, decoded_len);
+            defer self.allocator.free(decoded);
+            std.base64.standard.Decoder.decode(decoded, body_boc_base64) catch {
+                return builtExternalError("InvalidBodyBocBase64");
+            };
+
+            return self.buildExternalMessageEnvelope(destination, decoded, state_init_boc);
+        }
+
         /// Send an arbitrary contract body BoC via the configured wallet
         pub fn sendContractMessage(self: *@This(), destination: []const u8, amount: u64, body_boc: []const u8) !tools_types.SendResult {
             const msgs = &[_]wallet.signing.WalletMessage{
@@ -2956,6 +3209,8 @@ pub const SendResult = tools_types.SendResult;
 pub const RunMethodResult = tools_types.RunMethodResult;
 pub const DecodedBodyKind = tools_types.DecodedBodyKind;
 pub const DecodedBodyResult = tools_types.DecodedBodyResult;
+pub const BuiltBodyResult = tools_types.BuiltBodyResult;
+pub const BuiltExternalMessageResult = tools_types.BuiltExternalMessageResult;
 pub const MessageResult = tools_types.MessageResult;
 pub const InvoiceResult = tools_types.InvoiceResult;
 pub const VerifyResult = tools_types.VerifyResult;
@@ -3208,6 +3463,165 @@ test "agent tools sendExternalMessage wraps body without wallet" {
     try std.testing.expect(result.success);
     try std.testing.expectEqual(@as(i64, 987), result.lt);
     try std.testing.expect(client.last_boc != null);
+}
+
+test "agent tools buildContractBodyAbi returns encoded body and selector" {
+    const allocator = std.testing.allocator;
+
+    const FakeClient = struct {};
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    const abi_json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "set_flag",
+        \\      "opcode": "0x10203040",
+        \\      "inputs": [
+        \\        {"name": "enabled", "type": "bool"},
+        \\        {"name": "count", "type": "uint8"}
+        \\      ],
+        \\      "outputs": []
+        \\    }
+        \\  ],
+        \\  "events": []
+        \\}
+    ;
+
+    var client = FakeClient{};
+    var tools = FakeTools.init(allocator, &client, .{ .rpc_url = "https://example.invalid" });
+
+    var result = try tools.buildContractBodyAbi(abi_json, "set_flag", &.{
+        .{ .uint = 1 },
+        .{ .uint = 7 },
+    });
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.success);
+    try std.testing.expect(result.address == null);
+    try std.testing.expectEqualStrings("set_flag(bool,uint8)", result.selector);
+
+    const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(result.body_boc);
+    const decoded = try allocator.alloc(u8, decoded_len);
+    defer allocator.free(decoded);
+    try std.base64.standard.Decoder.decode(decoded, result.body_boc);
+
+    const root = try boc.deserializeBoc(allocator, decoded);
+    defer root.deinit(allocator);
+
+    var slice = root.toSlice();
+    try std.testing.expectEqual(@as(u64, 0x10203040), try slice.loadUint(32));
+    try std.testing.expectEqual(@as(u64, 1), try slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 7), try slice.loadUint(8));
+    try std.testing.expect(std.mem.startsWith(u8, result.body_hex, "b5ee9c72"));
+}
+
+test "agent tools buildExternalMessageEnvelopeAuto discovers abi and wraps state init" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const abi_json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "ping",
+        \\      "opcode": "0xAABBCCDD",
+        \\      "inputs": [],
+        \\      "outputs": []
+        \\    }
+        \\  ],
+        \\  "events": []
+        \\}
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "build_ext_abi.json", .data = abi_json });
+    const abi_path = try tmp.dir.realpathAlloc(allocator, "build_ext_abi.json");
+    defer allocator.free(abi_path);
+    const abi_uri = try std.fmt.allocPrint(allocator, "file://{s}", .{abi_path});
+    defer allocator.free(abi_uri);
+
+    var code_builder = core_types.Builder.init();
+    try code_builder.storeUint(0xAA, 8);
+    const code_cell = try code_builder.toCell(allocator);
+    defer code_cell.deinit(allocator);
+    const code_boc = try boc.serializeBoc(allocator, code_cell);
+    defer allocator.free(code_boc);
+
+    const state_init_boc = try state_init.buildStateInitBocAlloc(allocator, code_boc, null);
+    defer allocator.free(state_init_boc);
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+        abi_uri: []const u8,
+
+        pub fn runGetMethod(self: *@This(), addr: []const u8, method: []const u8, stack: []const []const u8) anyerror!core_types.RunGetMethodResponse {
+            _ = addr;
+            _ = stack;
+            if (!std.mem.eql(u8, method, "get_abi_uri")) return error.InvalidResponse;
+
+            var builder = core_types.Builder.init();
+            try builder.storeUint(0x01, 8);
+            try builder.storeBits(self.abi_uri, @intCast(self.abi_uri.len * 8));
+            const value = try builder.toCell(self.allocator);
+
+            const entries = try self.allocator.alloc(core_types.StackEntry, 1);
+            entries[0] = .{ .cell = value };
+            return .{
+                .exit_code = 0,
+                .stack = entries,
+                .logs = "",
+            };
+        }
+
+        pub fn freeRunGetMethodResponse(self: *@This(), response: *core_types.RunGetMethodResponse) void {
+            for (response.stack) |*entry| {
+                switch (entry.*) {
+                    .cell => |value| value.deinit(self.allocator),
+                    else => {},
+                }
+            }
+            if (response.stack.len > 0) self.allocator.free(response.stack);
+        }
+    };
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    var client = FakeClient{ .allocator = allocator, .abi_uri = abi_uri };
+    var tools = FakeTools.init(allocator, &client, .{ .rpc_url = "https://example.invalid" });
+
+    var result = try tools.buildExternalMessageEnvelopeAuto(
+        "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+        "ping",
+        &.{},
+        state_init_boc,
+    );
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.success);
+    try std.testing.expect(result.state_init_attached);
+
+    const ext_len = try std.base64.standard.Decoder.calcSizeForSlice(result.external_boc);
+    const ext_bytes = try allocator.alloc(u8, ext_len);
+    defer allocator.free(ext_bytes);
+    try std.base64.standard.Decoder.decode(ext_bytes, result.external_boc);
+
+    const ext_msg = try boc.deserializeBoc(allocator, ext_bytes);
+    defer ext_msg.deinit(allocator);
+
+    var slice = ext_msg.toSlice();
+    try std.testing.expectEqual(@as(u64, 0b10), try slice.loadUint(2));
+    try std.testing.expectEqual(@as(u64, 0), try slice.loadUint(2));
+    _ = try slice.loadAddress();
+    try std.testing.expectEqual(@as(u64, 0), try slice.loadCoins());
+    try std.testing.expectEqual(@as(u64, 1), try slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 1), try slice.loadUint(1));
+    _ = try slice.loadRef();
+    try std.testing.expectEqual(@as(u64, 1), try slice.loadUint(1));
+    const body_ref = try slice.loadRef();
+    var body_slice = body_ref.toSlice();
+    try std.testing.expectEqual(@as(u64, 0xAABBCCDD), try body_slice.loadUint(32));
 }
 
 test "agent tools decodeFunctionBodyAbi decodes function input json" {
@@ -3882,6 +4296,13 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.decodeFunctionBodyAuto;
     _ = AgentTools.decodeEventBodyAbi;
     _ = AgentTools.decodeEventBodyAuto;
+    _ = AgentTools.buildContractBodyFunction;
+    _ = AgentTools.buildContractBodyAbi;
+    _ = AgentTools.buildContractBodyAuto;
+    _ = AgentTools.buildExternalMessageEnvelope;
+    _ = AgentTools.buildExternalMessageEnvelopeFunction;
+    _ = AgentTools.buildExternalMessageEnvelopeAbi;
+    _ = AgentTools.buildExternalMessageEnvelopeAuto;
     _ = AgentTools.inspectContract;
     _ = AgentTools.getTransactions;
     _ = AgentTools.lookupTransaction;
@@ -3915,6 +4336,13 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = ProviderAgentTools.decodeFunctionBodyAuto;
     _ = ProviderAgentTools.decodeEventBodyAbi;
     _ = ProviderAgentTools.decodeEventBodyAuto;
+    _ = ProviderAgentTools.buildContractBodyFunction;
+    _ = ProviderAgentTools.buildContractBodyAbi;
+    _ = ProviderAgentTools.buildContractBodyAuto;
+    _ = ProviderAgentTools.buildExternalMessageEnvelope;
+    _ = ProviderAgentTools.buildExternalMessageEnvelopeFunction;
+    _ = ProviderAgentTools.buildExternalMessageEnvelopeAbi;
+    _ = ProviderAgentTools.buildExternalMessageEnvelopeAuto;
     _ = ProviderAgentTools.deriveWalletInit;
     _ = ProviderAgentTools.verifyPayment;
     _ = ProviderAgentTools.waitPayment;
@@ -3931,6 +4359,8 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = ProviderAgentTools.sendInitialTransfer;
     _ = AddressResult;
     _ = DecodedBodyResult;
+    _ = BuiltBodyResult;
+    _ = BuiltExternalMessageResult;
     _ = MessageResult;
     _ = RunMethodResult;
     _ = TransactionListResult;
