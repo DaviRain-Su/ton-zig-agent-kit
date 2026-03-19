@@ -11,5 +11,10 @@ pub const TonHttpClient = http_client.TonHttpClient;
 pub const MultiProvider = provider.MultiProvider;
 pub const Cell = cell.Cell;
 pub const Builder = cell.Builder;
+pub const Slice = cell.Slice;
 pub const Address = types.Address;
 pub const TonError = types.TonError;
+
+pub const parseAddress = address.parseAddress;
+pub const serializeBoc = boc.serializeBoc;
+pub const deserializeBoc = boc.deserializeBoc;

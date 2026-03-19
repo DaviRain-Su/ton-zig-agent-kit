@@ -3,6 +3,10 @@ const ton_zig_agent_kit = @import("ton_zig_agent_kit");
 
 const TonHttpClient = ton_zig_agent_kit.core.TonHttpClient;
 const TonError = ton_zig_agent_kit.core.TonError;
+const Cell = ton_zig_agent_kit.core.Cell;
+const Builder = ton_zig_agent_kit.core.Builder;
+const Slice = ton_zig_agent_kit.core.Slice;
+const boc = ton_zig_agent_kit.core.boc;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -104,7 +108,111 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "cell")) {
+        if (args.len < 3) {
+            std.debug.print("Usage: ton-zig-agent-kit cell <create|encode|decode|hash>\n", .{});
+            return;
+        }
+        const cell_cmd = args[2];
+
+        if (std.mem.eql(u8, cell_cmd, "create")) {
+            var builder = Builder.init();
+            try builder.storeUint(42, 8);
+            try builder.storeUint(1000, 16);
+
+            const cell = try builder.toCell(allocator);
+            defer allocator.destroy(cell);
+
+            const encoded = try boc.serializeBoc(allocator, cell);
+            defer allocator.free(encoded);
+
+            std.debug.print("Cell created:\n", .{});
+            std.debug.print("  Bit length: {d}\n", .{cell.bit_len});
+            std.debug.print("  Refs: {d}\n", .{cell.ref_cnt});
+            std.debug.print("  Hash: ", .{});
+            for (cell.hash()) |byte| {
+                std.debug.print("{X:0>2}", .{byte});
+            }
+            std.debug.print("\n", .{});
+            std.debug.print("  BoC size: {d} bytes\n", .{encoded.len});
+            return;
+        }
+
+        if (std.mem.eql(u8, cell_cmd, "encode")) {
+            if (args.len < 4) {
+                std.debug.print("Usage: ton-zig-agent-kit cell encode <hex_data>\n", .{});
+                return;
+            }
+            const hex_data = args[3];
+            const bytes = try hexToBytes(allocator, hex_data);
+            defer allocator.free(bytes);
+
+            var builder = Builder.init();
+            try builder.storeBits(bytes, @intCast(bytes.len * 8));
+
+            const cell = try builder.toCell(allocator);
+            defer allocator.destroy(cell);
+
+            const encoded = try boc.serializeBoc(allocator, cell);
+            defer allocator.free(encoded);
+
+            std.debug.print("Encoded BoC (hex): ", .{});
+            for (encoded) |byte| {
+                std.debug.print("{X:0>2}", .{byte});
+            }
+            std.debug.print("\n", .{});
+            return;
+        }
+
+        if (std.mem.eql(u8, cell_cmd, "hash")) {
+            if (args.len < 4) {
+                std.debug.print("Usage: ton-zig-agent-kit cell hash <hex_data>\n", .{});
+                return;
+            }
+            const hex_data = args[3];
+            const bytes = try hexToBytes(allocator, hex_data);
+            defer allocator.free(bytes);
+
+            var builder = Builder.init();
+            try builder.storeBits(bytes, @intCast(bytes.len * 8));
+
+            const cell = try builder.toCell(allocator);
+            defer allocator.destroy(cell);
+
+            std.debug.print("Cell hash: ", .{});
+            for (cell.hash()) |byte| {
+                std.debug.print("{X:0>2}", .{byte});
+            }
+            std.debug.print("\n", .{});
+            return;
+        }
+
+        std.debug.print("Unknown cell command: {s}\n", .{cell_cmd});
+        return;
+    }
+
     try printUsage();
+}
+
+fn hexToBytes(allocator: std.mem.Allocator, hex: []const u8) ![]u8 {
+    if (hex.len % 2 != 0) return error.InvalidHex;
+    const out = try allocator.alloc(u8, hex.len / 2);
+    var i: usize = 0;
+    while (i < out.len) : (i += 1) {
+        const hi = try hexCharValue(hex[i * 2]);
+        const lo = try hexCharValue(hex[i * 2 + 1]);
+        out[i] = (hi << 4) | lo;
+    }
+    return out;
+}
+
+fn hexCharValue(c: u8) !u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => error.InvalidHex,
+    };
 }
 
 fn printUsage() !void {
@@ -117,6 +225,10 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit runGetMethod <addr> <method>  Call get method\n", .{});
     std.debug.print("  ton-zig-agent-kit parseAddress <address>        Parse TON address\n", .{});
     std.debug.print("  ton-zig-agent-kit createInvoice <dest> <amount>  Create payment invoice\n", .{});
+    std.debug.print("\nCell/Builder/Slice operations:\n", .{});
+    std.debug.print("  ton-zig-agent-kit cell create                  Create test cell\n", .{});
+    std.debug.print("  ton-zig-agent-kit cell encode <hex>            Encode data to BoC\n", .{});
+    std.debug.print("  ton-zig-agent-kit cell hash <hex>              Get cell hash\n", .{});
 }
 
 test "basic test" {
