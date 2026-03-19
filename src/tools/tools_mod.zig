@@ -2,6 +2,7 @@
 //! Unified API for balance queries, transfers, invoices, and verification
 
 const std = @import("std");
+const address_mod = @import("../core/address.zig");
 const http_client = @import("../core/http_client.zig");
 const paywatch = @import("../paywatch/paywatch.zig");
 const wallet = @import("../wallet/wallet.zig");
@@ -24,10 +25,10 @@ pub const AgentTools = struct {
     }
 
     /// Get TON balance for address
-    pub fn getBalance(self: *AgentTools, address: []const u8) !tools_types.BalanceResult {
-        const resp = self.client.getBalance(address) catch |err| {
+    pub fn getBalance(self: *AgentTools, target_address: []const u8) !tools_types.BalanceResult {
+        const resp = self.client.getBalance(target_address) catch |err| {
             return tools_types.BalanceResult{
-                .address = address,
+                .address = target_address,
                 .balance = 0,
                 .formatted = "0 TON",
                 .success = false,
@@ -41,7 +42,7 @@ pub const AgentTools = struct {
         });
 
         return tools_types.BalanceResult{
-            .address = address,
+            .address = target_address,
             .balance = resp.balance,
             .formatted = formatted,
             .success = true,
@@ -199,7 +200,7 @@ pub const AgentTools = struct {
     pub fn getNFTInfo(self: *AgentTools, nft_address: []const u8) !tools_types.NFTInfoResult {
         var item = nft.NFTItem.init(nft_address, self.client);
 
-        const data = item.getNFTData() catch |err| {
+        var data = item.getNFTData() catch |err| {
             return tools_types.NFTInfoResult{
                 .address = nft_address,
                 .owner = null,
@@ -210,13 +211,23 @@ pub const AgentTools = struct {
                 .error_message = @errorName(err),
             };
         };
+        errdefer data.deinit(self.allocator);
+
+        const owner = if (data.owner) |value| try address_mod.formatRaw(self.allocator, &value) else null;
+        errdefer if (owner) |value| self.allocator.free(value);
+
+        const collection = if (data.collection) |value| try address_mod.formatRaw(self.allocator, &value) else null;
+        errdefer if (collection) |value| self.allocator.free(value);
+
+        const content = data.content;
+        data.content = null;
 
         return tools_types.NFTInfoResult{
             .address = nft_address,
-            .owner = if (data.owner) |o| try std.fmt.allocPrint(self.allocator, "{s}", .{o}) else null,
-            .collection = if (data.collection) |c| try std.fmt.allocPrint(self.allocator, "{s}", .{c}) else null,
-            .index = data.index,
-            .content = data.content,
+            .owner = owner,
+            .collection = collection,
+            .index = @intCast(data.index),
+            .content = content,
             .success = true,
             .error_message = null,
         };

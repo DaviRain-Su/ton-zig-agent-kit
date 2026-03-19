@@ -357,11 +357,15 @@ fn parseStackEntry(allocator: std.mem.Allocator, value: std.json.Value) anyerror
     }
 
     if (std.mem.eql(u8, tag, "cell") or std.mem.eql(u8, tag, "slice")) {
-        const bytes = switch (raw_value) {
-            .string => try allocator.dupe(u8, raw_value.string),
-            else => return error.UnsupportedStackEntry,
-        };
-        return .{ .bytes = bytes };
+        const boc_base64 = try extractStackBytes(raw_value);
+        const boc_bytes = try decodeBase64Flexible(allocator, boc_base64);
+        defer allocator.free(boc_bytes);
+
+        const parsed_cell = try boc.deserializeBoc(allocator, boc_bytes);
+        if (std.mem.eql(u8, tag, "cell")) {
+            return .{ .cell = parsed_cell };
+        }
+        return .{ .slice = parsed_cell };
     }
 
     return error.UnsupportedStackEntry;
@@ -373,9 +377,25 @@ fn freeStackEntry(allocator: std.mem.Allocator, entry: *types.StackEntry) void {
             for (items) |*child| freeStackEntry(allocator, child);
             allocator.free(items);
         },
+        .cell => |value| value.deinit(allocator),
+        .slice => |value| value.deinit(allocator),
         .bytes => |bytes| if (bytes.len > 0) allocator.free(bytes),
         else => {},
     }
+}
+
+fn extractStackBytes(value: std.json.Value) ![]const u8 {
+    return switch (value) {
+        .string => value.string,
+        .object => if (value.object.get("bytes")) |bytes_value|
+            switch (bytes_value) {
+                .string => bytes_value.string,
+                else => error.InvalidResponse,
+            }
+        else
+            error.InvalidResponse,
+        else => error.UnsupportedStackEntry,
+    };
 }
 
 fn parseTonInt(value: std.json.Value) !i64 {
@@ -616,6 +636,40 @@ test "build stack json from raw items" {
     defer allocator.free(stack);
 
     try std.testing.expectEqualStrings("[[\"num\",\"0x2a\"],[\"tuple\",[]]]", stack);
+}
+
+test "parse runGetMethod stack cell" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "result": {
+        \\    "exit_code": 0,
+        \\    "stack": [["cell", "te6cckEBAQEABgAACP/////btDe4"]],
+        \\    "logs": ""
+        \\  }
+        \\}
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+
+    const stack = try parseStack(allocator, parsed.value.object.get("result").?.object.get("stack").?);
+    defer {
+        var client = TonHttpClient{
+            .allocator = allocator,
+            .base_url = "",
+            .api_key = null,
+            .http_client = .{ .allocator = allocator },
+        };
+        var response = types.RunGetMethodResponse{
+            .exit_code = 0,
+            .stack = stack,
+            .logs = "",
+        };
+        client.freeRunGetMethodResponse(&response);
+    }
+
+    try std.testing.expectEqual(@as(u16, 32), stack[0].cell.bit_len);
 }
 
 test "decode base64 flexible accepts standard and url safe" {

@@ -103,7 +103,8 @@ pub const RunGetMethodResponse = struct {
 
 pub const StackEntry = union(enum) {
     number: i64,
-    cell: *Cell,
+    cell: *cell.Cell,
+    slice: *cell.Cell,
     tuple: []StackEntry,
     bytes: []const u8,
 };
