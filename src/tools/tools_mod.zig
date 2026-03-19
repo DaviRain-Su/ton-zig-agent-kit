@@ -4,6 +4,7 @@
 const std = @import("std");
 const address_mod = @import("../core/address.zig");
 const body_builder = @import("../core/body_builder.zig");
+const core_types = @import("../core/types.zig");
 const http_client = @import("../core/http_client.zig");
 const provider_mod = @import("../core/provider.zig");
 const state_init = @import("../core/state_init.zig");
@@ -59,6 +60,66 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             };
         }
 
+        fn deriveConfiguredWalletRawAddressAlloc(self: *@This()) ![]u8 {
+            const private_key = self.config.wallet_private_key orelse return error.MissingWalletPrivateKey;
+            var wallet_init = try signing.deriveWalletV4InitFromPrivateKeyAlloc(
+                self.allocator,
+                self.config.wallet_workchain,
+                self.config.wallet_id,
+                private_key,
+            );
+            defer wallet_init.deinit(self.allocator);
+            return address_mod.formatRaw(self.allocator, &wallet_init.address);
+        }
+
+        fn buildWalletInitResultAlloc(self: *@This(), private_key: [32]u8) !tools_types.WalletInitResult {
+            var wallet_init = try signing.deriveWalletV4InitFromPrivateKeyAlloc(
+                self.allocator,
+                self.config.wallet_workchain,
+                self.config.wallet_id,
+                private_key,
+            );
+            defer wallet_init.deinit(self.allocator);
+
+            const raw_address = try address_mod.formatRaw(self.allocator, &wallet_init.address);
+            errdefer self.allocator.free(raw_address);
+
+            const user_friendly_address = try address_mod.addressToUserFriendlyAlloc(self.allocator, &wallet_init.address, true, false);
+            errdefer self.allocator.free(user_friendly_address);
+
+            const public_key_hex = try allocHexLower(self.allocator, &wallet_init.public_key);
+            errdefer self.allocator.free(public_key_hex);
+
+            const encoded_len = std.base64.standard.Encoder.calcSize(wallet_init.state_init_boc.len);
+            const state_init_boc = try self.allocator.alloc(u8, encoded_len);
+            errdefer self.allocator.free(state_init_boc);
+            _ = std.base64.standard.Encoder.encode(state_init_boc, wallet_init.state_init_boc);
+
+            return tools_types.WalletInitResult{
+                .raw_address = raw_address,
+                .user_friendly_address = user_friendly_address,
+                .workchain = self.config.wallet_workchain,
+                .wallet_id = self.config.wallet_id,
+                .public_key_hex = public_key_hex,
+                .state_init_boc = state_init_boc,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
+        fn allocHexLower(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+            const hex_chars = "0123456789abcdef";
+            const out = try allocator.alloc(u8, bytes.len * 2);
+            errdefer allocator.free(out);
+
+            for (bytes, 0..) |byte, idx| {
+                out[idx * 2] = hex_chars[byte >> 4];
+                out[idx * 2 + 1] = hex_chars[byte & 0x0f];
+            }
+
+            return out;
+        }
+
         /// Compute the deployed contract address for a StateInit BoC and workchain.
         pub fn computeStateInitAddress(
             self: *@This(),
@@ -103,6 +164,35 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 .workchain = workchain,
                 .success = true,
                 .error_message = null,
+            };
+        }
+
+        /// Derive the default wallet v4 address and StateInit from the configured private key.
+        pub fn deriveWalletInit(self: *@This()) !tools_types.WalletInitResult {
+            const private_key = self.config.wallet_private_key orelse {
+                return tools_types.WalletInitResult{
+                    .raw_address = "",
+                    .user_friendly_address = "",
+                    .workchain = self.config.wallet_workchain,
+                    .wallet_id = self.config.wallet_id,
+                    .public_key_hex = "",
+                    .state_init_boc = "",
+                    .success = false,
+                    .error_message = "Wallet not configured",
+                };
+            };
+
+            return self.buildWalletInitResultAlloc(private_key) catch |err| {
+                return tools_types.WalletInitResult{
+                    .raw_address = "",
+                    .user_friendly_address = "",
+                    .workchain = self.config.wallet_workchain,
+                    .wallet_id = self.config.wallet_id,
+                    .public_key_hex = "",
+                    .state_init_boc = "",
+                    .success = false,
+                    .error_message = @errorName(err),
+                };
             };
         }
 
@@ -811,6 +901,101 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             return self.sendWalletMessages(destination, amount, msgs);
         }
 
+        /// Deploy the configured wallet itself using its derived v4 address and StateInit.
+        pub fn deployWalletSelf(self: *@This()) !tools_types.SendResult {
+            const private_key = self.config.wallet_private_key orelse {
+                return tools_types.SendResult{
+                    .hash = "",
+                    .lt = 0,
+                    .destination = "",
+                    .amount = 0,
+                    .success = false,
+                    .error_message = "Wallet not configured",
+                };
+            };
+
+            const derived_raw = self.deriveConfiguredWalletRawAddressAlloc() catch |err| {
+                return tools_types.SendResult{
+                    .hash = "",
+                    .lt = 0,
+                    .destination = "",
+                    .amount = 0,
+                    .success = false,
+                    .error_message = @errorName(err),
+                };
+            };
+            errdefer self.allocator.free(derived_raw);
+
+            const result = signing.deployWallet(
+                self.client,
+                .v4,
+                private_key,
+                self.config.wallet_workchain,
+                self.config.wallet_id,
+            ) catch |err| {
+                return tools_types.SendResult{
+                    .hash = "",
+                    .lt = 0,
+                    .destination = derived_raw,
+                    .amount = 0,
+                    .success = false,
+                    .error_message = @errorName(err),
+                };
+            };
+
+            return tools_types.SendResult{
+                .hash = result.hash,
+                .lt = result.lt,
+                .destination = derived_raw,
+                .amount = 0,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
+        /// Send the first transfer from an undeployed derived wallet, including wallet StateInit.
+        pub fn sendInitialTransfer(self: *@This(), destination: []const u8, amount: u64, comment: ?[]const u8) !tools_types.SendResult {
+            const private_key = self.config.wallet_private_key orelse {
+                return tools_types.SendResult{
+                    .hash = "",
+                    .lt = 0,
+                    .destination = destination,
+                    .amount = amount,
+                    .success = false,
+                    .error_message = "Wallet not configured",
+                };
+            };
+
+            const result = signing.sendInitialTransfer(
+                self.client,
+                .v4,
+                private_key,
+                self.config.wallet_workchain,
+                self.config.wallet_id,
+                destination,
+                amount,
+                comment,
+            ) catch |err| {
+                return tools_types.SendResult{
+                    .hash = "",
+                    .lt = 0,
+                    .destination = destination,
+                    .amount = amount,
+                    .success = false,
+                    .error_message = @errorName(err),
+                };
+            };
+
+            return tools_types.SendResult{
+                .hash = result.hash,
+                .lt = result.lt,
+                .destination = destination,
+                .amount = amount,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
         /// Send an arbitrary contract body BoC via the configured wallet
         pub fn sendContractMessage(self: *@This(), destination: []const u8, amount: u64, body_boc: []const u8) !tools_types.SendResult {
             const msgs = &[_]wallet.signing.WalletMessage{
@@ -1047,6 +1232,7 @@ pub const JettonInfoResult = tools_types.JettonInfoResult;
 pub const JettonWalletAddressResult = tools_types.JettonWalletAddressResult;
 pub const NFTInfoResult = tools_types.NFTInfoResult;
 pub const NFTCollectionInfoResult = tools_types.NFTCollectionInfoResult;
+pub const WalletInitResult = tools_types.WalletInitResult;
 pub const AgentToolsConfig = tools_types.AgentToolsConfig;
 pub const ToolResponse = tools_types.ToolResponse;
 pub const ToolError = tools_types.ToolError;
@@ -1081,11 +1267,125 @@ test "agent tools getBalance" {
     _ = result;
 }
 
+test "agent tools deriveWalletInit matches signing helper" {
+    const allocator = std.testing.allocator;
+
+    const FakeClient = struct {};
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    var client = FakeClient{};
+    const keypair = try signing.generateKeypair("tools-wallet-init");
+    const config = tools_types.AgentToolsConfig{
+        .rpc_url = "https://example.invalid",
+        .wallet_private_key = keypair[0],
+        .wallet_workchain = -1,
+        .wallet_id = 0xA1B2C3D4,
+    };
+
+    var tools = FakeTools.init(allocator, &client, config);
+    const result = try tools.deriveWalletInit();
+    defer allocator.free(result.raw_address);
+    defer allocator.free(result.user_friendly_address);
+    defer allocator.free(result.public_key_hex);
+    defer allocator.free(result.state_init_boc);
+
+    try std.testing.expect(result.success);
+
+    var expected = try signing.deriveWalletV4InitFromPrivateKeyAlloc(allocator, -1, 0xA1B2C3D4, keypair[0]);
+    defer expected.deinit(allocator);
+    const expected_raw = try address_mod.formatRaw(allocator, &expected.address);
+    defer allocator.free(expected_raw);
+
+    try std.testing.expectEqualStrings(expected_raw, result.raw_address);
+    try std.testing.expectEqual(@as(i8, -1), result.workchain);
+    try std.testing.expectEqual(@as(u32, 0xA1B2C3D4), result.wallet_id);
+}
+
+test "agent tools deployWalletSelf submits derived wallet deployment" {
+    const allocator = std.testing.allocator;
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+        last_boc: ?[]u8 = null,
+
+        pub fn sendBoc(self: *@This(), payload: []const u8) !core_types.SendBocResponse {
+            self.last_boc = try self.allocator.dupe(u8, payload);
+            return .{
+                .hash = try self.allocator.dupe(u8, "fake"),
+                .lt = 123,
+            };
+        }
+    };
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    var client = FakeClient{ .allocator = allocator };
+    defer if (client.last_boc) |value| allocator.free(value);
+
+    const keypair = try signing.generateKeypair("tools-wallet-deploy");
+    const config = tools_types.AgentToolsConfig{
+        .rpc_url = "https://example.invalid",
+        .wallet_private_key = keypair[0],
+    };
+
+    var tools = FakeTools.init(allocator, &client, config);
+    const result = try tools.deployWalletSelf();
+    defer allocator.free(result.hash);
+    defer allocator.free(result.destination);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqual(@as(i64, 123), result.lt);
+    try std.testing.expect(client.last_boc != null);
+}
+
+test "agent tools sendInitialTransfer submits first transfer without configured wallet address" {
+    const allocator = std.testing.allocator;
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+        last_boc: ?[]u8 = null,
+
+        pub fn sendBoc(self: *@This(), payload: []const u8) !core_types.SendBocResponse {
+            self.last_boc = try self.allocator.dupe(u8, payload);
+            return .{
+                .hash = try self.allocator.dupe(u8, "fake"),
+                .lt = 456,
+            };
+        }
+    };
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    var client = FakeClient{ .allocator = allocator };
+    defer if (client.last_boc) |value| allocator.free(value);
+
+    const keypair = try signing.generateKeypair("tools-wallet-first-send");
+    const config = tools_types.AgentToolsConfig{
+        .rpc_url = "https://example.invalid",
+        .wallet_private_key = keypair[0],
+    };
+
+    var tools = FakeTools.init(allocator, &client, config);
+    const result = try tools.sendInitialTransfer(
+        "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+        999,
+        null,
+    );
+    defer allocator.free(result.hash);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqual(@as(i64, 456), result.lt);
+    try std.testing.expectEqualStrings(
+        "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+        result.destination,
+    );
+    try std.testing.expect(client.last_boc != null);
+}
+
 test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.runGetMethod;
     _ = AgentTools.runGetMethodAbi;
     _ = AgentTools.runGetMethodAuto;
     _ = AgentTools.computeStateInitAddress;
+    _ = AgentTools.deriveWalletInit;
     _ = AgentTools.sendContractMessage;
     _ = AgentTools.sendContractMessageOps;
     _ = AgentTools.sendContractMessageFunction;
@@ -1093,9 +1393,12 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.sendContractMessageAuto;
     _ = AgentTools.sendContractDeploy;
     _ = AgentTools.sendContractDeployAuto;
+    _ = AgentTools.deployWalletSelf;
+    _ = AgentTools.sendInitialTransfer;
     _ = ProviderAgentTools.runGetMethod;
     _ = ProviderAgentTools.runGetMethodAbi;
     _ = ProviderAgentTools.runGetMethodAuto;
+    _ = ProviderAgentTools.deriveWalletInit;
     _ = ProviderAgentTools.verifyPayment;
     _ = ProviderAgentTools.waitPayment;
     _ = ProviderAgentTools.getJettonBalance;
@@ -1104,8 +1407,11 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = ProviderAgentTools.getNFTInfo;
     _ = ProviderAgentTools.getNFTCollectionInfo;
     _ = ProviderAgentTools.sendTransfer;
+    _ = ProviderAgentTools.deployWalletSelf;
+    _ = ProviderAgentTools.sendInitialTransfer;
     _ = AddressResult;
     _ = RunMethodResult;
+    _ = WalletInitResult;
     _ = JettonInfoResult;
     _ = JettonWalletAddressResult;
     _ = NFTCollectionInfoResult;

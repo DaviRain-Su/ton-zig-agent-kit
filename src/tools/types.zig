@@ -2,6 +2,7 @@
 //! Standardized return types for AI agent interactions
 
 const std = @import("std");
+const signing = @import("../wallet/signing.zig");
 
 pub const BalanceResult = struct {
     address: []const u8,
@@ -85,6 +86,19 @@ pub const AgentToolsConfig = struct {
     api_key: ?[]const u8 = null,
     wallet_address: ?[]const u8 = null,
     wallet_private_key: ?[32]u8 = null,
+    wallet_workchain: i8 = 0,
+    wallet_id: u32 = signing.default_wallet_id_v4,
+};
+
+pub const WalletInitResult = struct {
+    raw_address: []const u8,
+    user_friendly_address: []const u8,
+    workchain: i8,
+    wallet_id: u32,
+    public_key_hex: []const u8,
+    state_init_boc: []const u8,
+    success: bool,
+    error_message: ?[]const u8 = null,
 };
 
 pub const JettonBalanceResult = struct {
@@ -140,6 +154,7 @@ pub const NFTCollectionInfoResult = struct {
 pub const ToolResponse = union(enum) {
     balance: BalanceResult,
     address: AddressResult,
+    wallet_init: WalletInitResult,
     send: SendResult,
     run_method: RunMethodResult,
     invoice: InvoiceResult,
