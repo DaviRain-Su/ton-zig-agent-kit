@@ -461,6 +461,48 @@ fn normalizeStackTagAlloc(allocator: std.mem.Allocator, raw_tag: []const u8) ![]
         return out;
     }
 
+    if (std.mem.eql(u8, normalized, "stackentrynumber")) {
+        const out = try allocator.dupe(u8, "num");
+        allocator.free(normalized);
+        return out;
+    }
+
+    if (std.mem.eql(u8, normalized, "stackentrycell")) {
+        const out = try allocator.dupe(u8, "cell");
+        allocator.free(normalized);
+        return out;
+    }
+
+    if (std.mem.eql(u8, normalized, "stackentryslice")) {
+        const out = try allocator.dupe(u8, "slice");
+        allocator.free(normalized);
+        return out;
+    }
+
+    if (std.mem.eql(u8, normalized, "stackentrybuilder")) {
+        const out = try allocator.dupe(u8, "builder");
+        allocator.free(normalized);
+        return out;
+    }
+
+    if (std.mem.eql(u8, normalized, "stackentrytuple")) {
+        const out = try allocator.dupe(u8, "tuple");
+        allocator.free(normalized);
+        return out;
+    }
+
+    if (std.mem.eql(u8, normalized, "stackentrylist")) {
+        const out = try allocator.dupe(u8, "list");
+        allocator.free(normalized);
+        return out;
+    }
+
+    if (std.mem.eql(u8, normalized, "stackentryunsupported")) {
+        const out = try allocator.dupe(u8, "unsupported");
+        allocator.free(normalized);
+        return out;
+    }
+
     return normalized;
 }
 
@@ -468,9 +510,11 @@ fn stackEntryObjectPayload(object: std.json.ObjectMap) ?std.json.Value {
     return object.get("value") orelse
         object.get("val") orelse
         object.get("bytes") orelse
+        object.get("number") orelse
         object.get("cell") orelse
         object.get("slice") orelse
         object.get("builder") orelse
+        object.get("elements") orelse
         object.get("items") orelse
         object.get("list") orelse
         object.get("tuple");
@@ -480,10 +524,7 @@ fn extractStackItems(value: std.json.Value) ![]const std.json.Value {
     return switch (value) {
         .array => value.array.items,
         .object => if (stackEntryObjectPayload(value.object)) |payload|
-            switch (payload) {
-                .array => payload.array.items,
-                else => error.InvalidResponse,
-            }
+            extractStackItems(payload)
         else
             error.InvalidResponse,
         else => error.InvalidResponse,
@@ -1031,6 +1072,81 @@ test "parse runGetMethod stack supports object wrapped list payload" {
     try std.testing.expectEqual(@as(usize, 1), stack.len);
     try std.testing.expectEqual(@as(usize, 1), stack[0].list.len);
     try std.testing.expectEqual(@as(i64, 2), stack[0].list[0].number);
+}
+
+test "parse runGetMethod stack supports tonlib stackentry objects" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "result": {
+        \\    "exit_code": 0,
+        \\    "stack": {
+        \\      "elements": [
+        \\        {
+        \\          "@type": "tvm.stackEntryNumber",
+        \\          "number": {
+        \\            "@type": "tvm.numberDecimal",
+        \\            "number": "42"
+        \\          }
+        \\        },
+        \\        {
+        \\          "@type": "tvm.stackEntryCell",
+        \\          "cell": {
+        \\            "bytes": "te6cckEBAQEABgAACP/////btDe4"
+        \\          }
+        \\        },
+        \\        {
+        \\          "@type": "tvm.stackEntryTuple",
+        \\          "tuple": {
+        \\            "@type": "tvm.tuple",
+        \\            "elements": [
+        \\              {
+        \\                "@type": "tvm.stackEntryList",
+        \\                "list": {
+        \\                  "@type": "tvm.list",
+        \\                  "elements": [
+        \\                    {
+        \\                      "@type": "tvm.stackEntryNumber",
+        \\                      "number": "0x2"
+        \\                    }
+        \\                  ]
+        \\                }
+        \\              }
+        \\            ]
+        \\          }
+        \\        }
+        \\      ]
+        \\    },
+        \\    "logs": ""
+        \\  }
+        \\}
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+
+    const stack = try parseStack(allocator, parsed.value.object.get("result").?.object.get("stack").?);
+    defer {
+        var client = TonHttpClient{
+            .allocator = allocator,
+            .base_url = "",
+            .api_key = null,
+            .http_client = .{ .allocator = allocator },
+        };
+        var response = types.RunGetMethodResponse{
+            .exit_code = 0,
+            .stack = stack,
+            .logs = "",
+        };
+        client.freeRunGetMethodResponse(&response);
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), stack.len);
+    try std.testing.expectEqual(@as(i64, 42), stack[0].number);
+    try std.testing.expectEqual(@as(u16, 32), stack[1].cell.bit_len);
+    try std.testing.expectEqual(@as(usize, 1), stack[2].tuple.len);
+    try std.testing.expectEqual(@as(usize, 1), stack[2].tuple[0].list.len);
+    try std.testing.expectEqual(@as(i64, 2), stack[2].tuple[0].list[0].number);
 }
 
 test "decode base64 flexible accepts standard and url safe" {
