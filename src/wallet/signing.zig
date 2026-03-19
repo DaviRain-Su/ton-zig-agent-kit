@@ -220,6 +220,7 @@ pub fn getSeqno(client: *http_client.TonHttpClient, wallet_address: []const u8) 
         // First stack entry should be the seqno number
         switch (result.stack[0]) {
             .number => |n| return @intCast(n),
+            .big_number => |n| return try std.fmt.parseInt(u32, if (std.mem.startsWith(u8, n, "0x")) n[2..] else n, if (std.mem.startsWith(u8, n, "0x")) 16 else 10),
             else => return error.InvalidResponse,
         }
     }

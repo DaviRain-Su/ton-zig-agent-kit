@@ -355,7 +355,7 @@ fn parseStackEntry(allocator: std.mem.Allocator, value: std.json.Value) anyerror
     const raw_value = value.array.items[1];
 
     if (std.mem.eql(u8, tag, "num") or std.mem.eql(u8, tag, "int")) {
-        return .{ .number = try parseTonInt(raw_value) };
+        return try parseTonNumber(allocator, raw_value);
     }
 
     if (std.mem.eql(u8, tag, "tuple")) {
@@ -400,6 +400,7 @@ fn freeStackEntry(allocator: std.mem.Allocator, entry: *types.StackEntry) void {
             for (items) |*child| freeStackEntry(allocator, child);
             allocator.free(items);
         },
+        .big_number => |value| if (value.len > 0) allocator.free(value),
         .cell => |value| value.deinit(allocator),
         .slice => |value| value.deinit(allocator),
         .builder => |value| value.deinit(allocator),
@@ -422,22 +423,59 @@ fn extractStackBytes(value: std.json.Value) ![]const u8 {
     };
 }
 
-fn parseTonInt(value: std.json.Value) !i64 {
+fn parseTonNumber(allocator: std.mem.Allocator, value: std.json.Value) !types.StackEntry {
     return switch (value) {
-        .integer => @as(i64, @intCast(value.integer)),
+        .integer => .{ .number = @as(i64, @intCast(value.integer)) },
         .string => {
-            if (std.mem.startsWith(u8, value.string, "-0x")) {
-                const magnitude = try std.fmt.parseInt(u64, value.string[3..], 16);
-                if (magnitude > @as(u64, @intCast(std.math.maxInt(i64))) + 1) return error.Overflow;
-                return -@as(i64, @intCast(magnitude));
+            if (parseTonIntText(value.string)) |small_value| {
+                return .{ .number = small_value };
+            } else |err| switch (err) {
+                error.Overflow => {
+                    if (!isValidTonNumberText(value.string)) return error.InvalidResponse;
+                    return .{ .big_number = try allocator.dupe(u8, value.string) };
+                },
+                else => return error.InvalidResponse,
             }
-            if (std.mem.startsWith(u8, value.string, "0x")) {
-                return @intCast(try std.fmt.parseInt(u64, value.string[2..], 16));
-            }
-            return try std.fmt.parseInt(i64, value.string, 10);
         },
         else => error.InvalidResponse,
     };
+}
+
+fn parseTonIntText(value: []const u8) !i64 {
+    if (std.mem.startsWith(u8, value, "-0x")) {
+        const magnitude = try std.fmt.parseInt(u64, value[3..], 16);
+        if (magnitude > @as(u64, @intCast(std.math.maxInt(i64))) + 1) return error.Overflow;
+        if (magnitude == @as(u64, @intCast(std.math.maxInt(i64))) + 1) return std.math.minInt(i64);
+        return -@as(i64, @intCast(magnitude));
+    }
+    if (std.mem.startsWith(u8, value, "0x")) {
+        return @intCast(try std.fmt.parseInt(u64, value[2..], 16));
+    }
+    return try std.fmt.parseInt(i64, value, 10);
+}
+
+fn isValidTonNumberText(value: []const u8) bool {
+    if (value.len == 0) return false;
+
+    var text = value;
+    if (text[0] == '-') {
+        if (text.len == 1) return false;
+        text = text[1..];
+    }
+
+    if (std.mem.startsWith(u8, text, "0x")) {
+        const hex = text[2..];
+        if (hex.len == 0) return false;
+        for (hex) |char| {
+            if (!std.ascii.isHex(char)) return false;
+        }
+        return true;
+    }
+
+    for (text) |char| {
+        if (!std.ascii.isDigit(char)) return false;
+    }
+    return true;
 }
 
 fn buildTransactionsUrl(
@@ -639,16 +677,60 @@ test "parse runGetMethod stack number" {
         \\}
     ;
 
-    var client = try TonHttpClient.init(allocator, "https://toncenter.com/api/v2/jsonRPC", null);
-    defer client.deinit();
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+
+    const stack = try parseStack(allocator, parsed.value.object.get("result").?.object.get("stack").?);
+    defer {
+        var client = TonHttpClient{
+            .allocator = allocator,
+            .base_url = "",
+            .api_key = null,
+            .http_client = .{ .allocator = allocator },
+        };
+        var response = types.RunGetMethodResponse{
+            .exit_code = 0,
+            .stack = stack,
+            .logs = "",
+        };
+        client.freeRunGetMethodResponse(&response);
+    }
+
+    try std.testing.expectEqual(@as(i64, 42), stack[0].number);
+}
+
+test "parse runGetMethod stack big number" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "result": {
+        \\    "exit_code": 0,
+        \\    "stack": [["num", "0x1234567890abcdef1234567890abcdef"]],
+        \\    "logs": ""
+        \\  }
+        \\}
+    ;
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
     defer parsed.deinit();
 
     const stack = try parseStack(allocator, parsed.value.object.get("result").?.object.get("stack").?);
-    defer allocator.free(stack);
+    defer {
+        var client = TonHttpClient{
+            .allocator = allocator,
+            .base_url = "",
+            .api_key = null,
+            .http_client = .{ .allocator = allocator },
+        };
+        var response = types.RunGetMethodResponse{
+            .exit_code = 0,
+            .stack = stack,
+            .logs = "",
+        };
+        client.freeRunGetMethodResponse(&response);
+    }
 
-    try std.testing.expectEqual(@as(i64, 42), stack[0].number);
+    try std.testing.expectEqualStrings("0x1234567890abcdef1234567890abcdef", stack[0].big_number);
 }
 
 test "build stack json from raw items" {

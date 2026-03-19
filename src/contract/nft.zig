@@ -87,11 +87,8 @@ test "nft basic" {
 fn parseNFTData(allocator: std.mem.Allocator, stack: []const types.StackEntry) !NFTData {
     if (stack.len < 5) return error.InvalidResponse;
 
-    const index_raw = try generic_contract.stackEntryAsInt(&stack[1]);
-    if (index_raw < 0) return error.InvalidResponse;
-
     return NFTData{
-        .index = @intCast(index_raw),
+        .index = try generic_contract.stackEntryAsUnsigned(u256, &stack[1]),
         .collection = try generic_contract.stackEntryAsOptionalAddress(&stack[2]),
         .owner = try generic_contract.stackEntryAsOptionalAddress(&stack[3]),
         .content = try generic_contract.stackEntryToBocAlloc(allocator, &stack[4]),
@@ -102,11 +99,8 @@ fn parseNFTData(allocator: std.mem.Allocator, stack: []const types.StackEntry) !
 fn parseCollectionData(allocator: std.mem.Allocator, stack: []const types.StackEntry) !CollectionData {
     if (stack.len < 3) return error.InvalidResponse;
 
-    const next_item_index_raw = try generic_contract.stackEntryAsInt(&stack[0]);
-    if (next_item_index_raw < 0) return error.InvalidResponse;
-
     return CollectionData{
-        .next_item_index = @intCast(next_item_index_raw),
+        .next_item_index = try generic_contract.stackEntryAsUnsigned(u256, &stack[0]),
         .owner = try generic_contract.stackEntryAsOptionalAddress(&stack[2]),
         .content = try generic_contract.stackEntryToBocAlloc(allocator, &stack[1]),
         .content_uri = try generic_contract.stackEntryAsOffchainContentUriAlloc(allocator, &stack[1]),
@@ -187,4 +181,33 @@ test "parse collection data stack" {
     try std.testing.expect(data.owner != null);
     try std.testing.expect(data.content != null);
     try std.testing.expectEqualStrings("https://example.com/collection.json", data.content_uri.?);
+}
+
+test "parse collection data stack big index" {
+    const allocator = std.testing.allocator;
+
+    var owner_builder = cell.Builder.init();
+    try owner_builder.storeAddress(@as([]const u8, "0:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"));
+    const owner_cell = try owner_builder.toCell(allocator);
+    defer owner_cell.deinit(allocator);
+
+    var content_builder = cell.Builder.init();
+    try content_builder.storeUint(1, 8);
+    try content_builder.storeBits("https://example.com/collection.json", "https://example.com/collection.json".len * 8);
+    const content_cell = try content_builder.toCell(allocator);
+    defer content_cell.deinit(allocator);
+
+    const stack = [_]types.StackEntry{
+        .{ .big_number = "0x1234567890ABCDEF1234567890ABCDEF" },
+        .{ .cell = content_cell },
+        .{ .slice = owner_cell },
+    };
+
+    var data = try parseCollectionData(allocator, stack[0..]);
+    defer data.deinit(allocator);
+
+    try std.testing.expectEqual(
+        @as(u256, 0x1234567890ABCDEF1234567890ABCDEF),
+        data.next_item_index,
+    );
 }

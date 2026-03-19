@@ -82,7 +82,7 @@ pub const AgentToolsConfig = struct {
 pub const JettonBalanceResult = struct {
     address: []const u8,
     jetton_master: []const u8,
-    balance: u64,
+    balance: []const u8,
     decimals: u8,
     symbol: ?[]const u8,
     success: bool,
@@ -93,7 +93,7 @@ pub const NFTInfoResult = struct {
     address: []const u8,
     owner: ?[]const u8,
     collection: ?[]const u8,
-    index: u64,
+    index: []const u8,
     content: ?[]const u8,
     content_uri: ?[]const u8,
     success: bool,

@@ -1642,8 +1642,11 @@ fn writeDecodedOutputJsonType(
         std.mem.startsWith(u8, type_name, "uint") or
         std.mem.startsWith(u8, type_name, "int"))
     {
-        const value = try generic_contract.stackEntryAsInt(entry);
-        try writer.print("{d}", .{value});
+        switch (entry.*) {
+            .number => |value| try writer.print("{d}", .{value}),
+            .big_number => |value| try writeJsonString(writer, value),
+            else => return error.InvalidAbiOutputs,
+        }
         return;
     }
 
@@ -2701,5 +2704,38 @@ test "abi adapter decodes scalar and tuple array outputs" {
     try std.testing.expectEqualStrings(
         "{\"items\":[{\"enabled\":true,\"owner\":\"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8\"},{\"enabled\":false,\"owner\":\"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8\"}]}",
         tuple_decoded,
+    );
+}
+
+test "abi adapter preserves large numeric outputs as strings" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "get_big",
+        \\      "outputs": [
+        \\        {"name": "total_supply", "type": "uint128"},
+        \\        {"name": "balance", "type": "coins"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var abi = try parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer abi.deinit(allocator);
+
+    const stack = [_]types.StackEntry{
+        .{ .big_number = "0x1234567890ABCDEF1234567890ABCDEF" },
+        .{ .big_number = "340282366920938463463374607431768211455" },
+    };
+
+    const decoded = try decodeFunctionOutputsFromAbiJsonAlloc(allocator, &abi.abi, "get_big", stack[0..]);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqualStrings(
+        "{\"total_supply\":\"0x1234567890ABCDEF1234567890ABCDEF\",\"balance\":\"340282366920938463463374607431768211455\"}",
+        decoded,
     );
 }

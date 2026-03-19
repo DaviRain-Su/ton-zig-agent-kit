@@ -1226,6 +1226,7 @@ fn printStackEntry(entry: StackEntry, indent: usize) void {
     switch (entry) {
         .null => std.debug.print("null\n", .{}),
         .number => |value| std.debug.print("number: {d}\n", .{value}),
+        .big_number => |value| std.debug.print("number: {s}\n", .{value}),
         .bytes => |value| std.debug.print("bytes/base64: {s}\n", .{value}),
         .cell => |value| std.debug.print("cell(bits={d}, refs={d})\n", .{ value.bit_len, value.ref_cnt }),
         .slice => |value| std.debug.print("slice(bits={d}, refs={d})\n", .{ value.bit_len, value.ref_cnt }),

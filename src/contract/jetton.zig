@@ -76,14 +76,14 @@ pub const JettonWallet = struct {
     }
 
     /// Get balance
-    pub fn getBalance(self: *JettonWallet) !u64 {
+    pub fn getBalance(self: *JettonWallet) !u256 {
         const data = try self.getWalletData();
         return data.balance;
     }
 };
 
 pub const JettonData = struct {
-    total_supply: u64,
+    total_supply: u256,
     mintable: bool,
     admin: ?types.Address,
     content: ?[]const u8,
@@ -98,7 +98,7 @@ pub const JettonData = struct {
 };
 
 pub const WalletData = struct {
-    balance: u64,
+    balance: u256,
     owner: []const u8,
     master: []const u8,
 
@@ -113,11 +113,8 @@ pub const WalletData = struct {
 fn parseJettonData(allocator: std.mem.Allocator, stack: []const types.StackEntry) !JettonData {
     if (stack.len < 4) return error.InvalidResponse;
 
-    const total_supply_raw = try generic_contract.stackEntryAsInt(&stack[0]);
-    if (total_supply_raw < 0) return error.InvalidResponse;
-
     return JettonData{
-        .total_supply = @intCast(total_supply_raw),
+        .total_supply = try generic_contract.stackEntryAsUnsigned(u256, &stack[0]),
         .mintable = (try generic_contract.stackEntryAsInt(&stack[1])) != 0,
         .admin = try generic_contract.stackEntryAsOptionalAddress(&stack[2]),
         .content = try generic_contract.stackEntryToBocAlloc(allocator, &stack[3]),
@@ -128,14 +125,11 @@ fn parseJettonData(allocator: std.mem.Allocator, stack: []const types.StackEntry
 fn parseJettonWalletData(allocator: std.mem.Allocator, stack: []const types.StackEntry) !WalletData {
     if (stack.len < 3) return error.InvalidResponse;
 
-    const balance_raw = try generic_contract.stackEntryAsInt(&stack[0]);
-    if (balance_raw < 0) return error.InvalidResponse;
-
     const owner_addr = (try generic_contract.stackEntryAsOptionalAddress(&stack[1])) orelse return error.InvalidAddress;
     const master_addr = (try generic_contract.stackEntryAsOptionalAddress(&stack[2])) orelse return error.InvalidAddress;
 
     return WalletData{
-        .balance = @intCast(balance_raw),
+        .balance = try generic_contract.stackEntryAsUnsigned(u256, &stack[0]),
         .owner = try address_mod.formatRaw(allocator, &owner_addr),
         .master = try address_mod.formatRaw(allocator, &master_addr),
     };
@@ -266,7 +260,7 @@ test "parse jetton data stack" {
     var data = try parseJettonData(allocator, stack[0..]);
     defer data.deinit(allocator);
 
-    try std.testing.expectEqual(@as(u64, 1234), data.total_supply);
+    try std.testing.expectEqual(@as(u256, 1234), data.total_supply);
     try std.testing.expect(data.mintable);
     try std.testing.expect(data.admin != null);
     try std.testing.expect(data.content != null);
@@ -295,9 +289,37 @@ test "parse jetton wallet data stack" {
     var data = try parseJettonWalletData(allocator, stack[0..]);
     defer data.deinit(allocator);
 
-    try std.testing.expectEqual(@as(u64, 777), data.balance);
+    try std.testing.expectEqual(@as(u256, 777), data.balance);
     try std.testing.expectEqualStrings("0:1111111111111111111111111111111111111111111111111111111111111111", data.owner);
     try std.testing.expectEqualStrings("0:2222222222222222222222222222222222222222222222222222222222222222", data.master);
+}
+
+test "parse jetton wallet data stack big balance" {
+    const allocator = std.testing.allocator;
+
+    var owner_builder = cell.Builder.init();
+    try owner_builder.storeAddress(@as([]const u8, "0:1111111111111111111111111111111111111111111111111111111111111111"));
+    const owner_cell = try owner_builder.toCell(allocator);
+    defer owner_cell.deinit(allocator);
+
+    var master_builder = cell.Builder.init();
+    try master_builder.storeAddress(@as([]const u8, "0:2222222222222222222222222222222222222222222222222222222222222222"));
+    const master_cell = try master_builder.toCell(allocator);
+    defer master_cell.deinit(allocator);
+
+    const stack = [_]types.StackEntry{
+        .{ .big_number = "0x1234567890ABCDEF1234567890ABCDEF" },
+        .{ .slice = owner_cell },
+        .{ .slice = master_cell },
+    };
+
+    var data = try parseJettonWalletData(allocator, stack[0..]);
+    defer data.deinit(allocator);
+
+    try std.testing.expectEqual(
+        @as(u256, 0x1234567890ABCDEF1234567890ABCDEF),
+        data.balance,
+    );
 }
 
 test "jetton transfer message stores custom and forward payload refs" {

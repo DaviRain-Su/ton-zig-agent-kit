@@ -60,6 +60,26 @@ const offchain_content_prefix: u8 = 0x01;
 pub fn stackEntryAsInt(entry: *const types.StackEntry) !i64 {
     return switch (entry.*) {
         .number => |value| value,
+        .big_number => |value| parseSignedTonInt(i64, value),
+        else => error.InvalidStackEntry,
+    };
+}
+
+pub fn stackEntryAsUnsigned(comptime IntType: type, entry: *const types.StackEntry) !IntType {
+    return switch (entry.*) {
+        .number => |value| {
+            if (value < 0) return error.InvalidStackEntry;
+            return @intCast(value);
+        },
+        .big_number => |value| parseUnsignedTonInt(IntType, value),
+        else => error.InvalidStackEntry,
+    };
+}
+
+pub fn stackEntryAsNumberTextAlloc(allocator: std.mem.Allocator, entry: *const types.StackEntry) ![]u8 {
+    return switch (entry.*) {
+        .number => |value| std.fmt.allocPrint(allocator, "{d}", .{value}),
+        .big_number => |value| allocator.dupe(u8, value),
         else => error.InvalidStackEntry,
     };
 }
@@ -218,6 +238,11 @@ fn writeStackEntryJson(writer: anytype, allocator: std.mem.Allocator, entry: *co
     switch (entry.*) {
         .null => try writer.writeAll("[\"null\"]"),
         .number => |value| try writer.print("[\"num\",{d}]", .{value}),
+        .big_number => |value| {
+            try writer.writeAll("[\"num\",");
+            try writeJsonString(writer, value);
+            try writer.writeByte(']');
+        },
         .bytes => |value| {
             try writer.writeAll("[\"bytes\",");
             try writeJsonString(writer, value);
@@ -267,6 +292,34 @@ fn writeJsonString(writer: anytype, value: []const u8) !void {
         }
     }
     try writer.writeByte('"');
+}
+
+fn parseUnsignedTonInt(comptime IntType: type, value: []const u8) !IntType {
+    if (value.len == 0 or value[0] == '-') return error.InvalidStackEntry;
+
+    if (std.mem.startsWith(u8, value, "0x")) {
+        return std.fmt.parseInt(IntType, value[2..], 16);
+    }
+
+    return std.fmt.parseInt(IntType, value, 10);
+}
+
+fn parseSignedTonInt(comptime IntType: type, value: []const u8) !IntType {
+    if (value.len == 0) return error.InvalidStackEntry;
+
+    if (std.mem.startsWith(u8, value, "-0x")) {
+        const magnitude = try std.fmt.parseUnsigned(std.meta.Int(.unsigned, @typeInfo(IntType).int.bits), value[3..], 16);
+        const min_magnitude: std.meta.Int(.unsigned, @typeInfo(IntType).int.bits) = @as(std.meta.Int(.unsigned, @typeInfo(IntType).int.bits), @intCast(std.math.maxInt(IntType))) + 1;
+        if (magnitude > min_magnitude) return error.Overflow;
+        if (magnitude == min_magnitude) return std.math.minInt(IntType);
+        return -@as(IntType, @intCast(magnitude));
+    }
+
+    if (std.mem.startsWith(u8, value, "0x")) {
+        return std.fmt.parseInt(IntType, value[2..], 16);
+    }
+
+    return std.fmt.parseInt(IntType, value, 10);
 }
 
 pub const jetton = @import("jetton.zig");
@@ -358,6 +411,7 @@ test "serialize stack entries to json" {
 
     var nested = [_]types.StackEntry{
         .{ .number = 7 },
+        .{ .big_number = "0x1234567890ABCDEF1234567890ABCDEF" },
         .{ .bytes = "line1\n\"quoted\"" },
     };
     var stack = [_]types.StackEntry{
@@ -372,8 +426,22 @@ test "serialize stack entries to json" {
 
     try std.testing.expect(std.mem.indexOf(u8, json, "[\"null\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, json, "[\"builder\",\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "[\"tuple\",[[\"num\",7],[\"bytes\",\"line1\\n\\\"quoted\\\"\"]]]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "[\"list\",[[\"num\",7],[\"bytes\",\"line1\\n\\\"quoted\\\"\"]]]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "[\"tuple\",[[\"num\",7],[\"num\",\"0x1234567890ABCDEF1234567890ABCDEF\"],[\"bytes\",\"line1\\n\\\"quoted\\\"\"]]]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json, "[\"list\",[[\"num\",7],[\"num\",\"0x1234567890ABCDEF1234567890ABCDEF\"],[\"bytes\",\"line1\\n\\\"quoted\\\"\"]]]") != null);
+}
+
+test "stack entry helpers support big unsigned values" {
+    const allocator = std.testing.allocator;
+    const entry = types.StackEntry{ .big_number = "0x1234567890ABCDEF1234567890ABCDEF" };
+
+    try std.testing.expectEqual(
+        @as(u256, 0x1234567890ABCDEF1234567890ABCDEF),
+        try stackEntryAsUnsigned(u256, &entry),
+    );
+
+    const text = try stackEntryAsNumberTextAlloc(allocator, &entry);
+    defer allocator.free(text);
+    try std.testing.expectEqualStrings("0x1234567890ABCDEF1234567890ABCDEF", text);
 }
 
 test {

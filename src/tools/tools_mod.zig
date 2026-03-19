@@ -322,7 +322,7 @@ pub const AgentTools = struct {
             return tools_types.JettonBalanceResult{
                 .address = wallet_address,
                 .jetton_master = jetton_master,
-                .balance = 0,
+                .balance = "0",
                 .decimals = 9,
                 .symbol = null,
                 .success = false,
@@ -330,10 +330,12 @@ pub const AgentTools = struct {
             };
         };
 
+        const balance = try std.fmt.allocPrint(self.allocator, "{d}", .{data.balance});
+
         return tools_types.JettonBalanceResult{
             .address = wallet_address,
             .jetton_master = jetton_master,
-            .balance = data.balance,
+            .balance = balance,
             .decimals = 9,
             .symbol = null,
             .success = true,
@@ -350,7 +352,7 @@ pub const AgentTools = struct {
                 .address = nft_address,
                 .owner = null,
                 .collection = null,
-                .index = 0,
+                .index = "0",
                 .content = null,
                 .content_uri = null,
                 .success = false,
@@ -365,6 +367,9 @@ pub const AgentTools = struct {
         const collection = if (data.collection) |value| try address_mod.formatRaw(self.allocator, &value) else null;
         errdefer if (collection) |value| self.allocator.free(value);
 
+        const index = try std.fmt.allocPrint(self.allocator, "{d}", .{data.index});
+        errdefer self.allocator.free(index);
+
         const content = data.content;
         data.content = null;
         const content_uri = data.content_uri;
@@ -374,7 +379,7 @@ pub const AgentTools = struct {
             .address = nft_address,
             .owner = owner,
             .collection = collection,
-            .index = @intCast(data.index),
+            .index = index,
             .content = content,
             .content_uri = content_uri,
             .success = true,
