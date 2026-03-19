@@ -21,11 +21,19 @@ const tools_types = @import("types.zig");
 
 const BuiltAbiInspect = struct {
     uri: ?[]u8 = null,
+    version: ?[]u8 = null,
     json: ?[]u8 = null,
+    functions: []tools_types.AbiFunctionTemplateResult = &.{},
+    events: []tools_types.AbiEventTemplateResult = &.{},
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         if (self.uri) |value| allocator.free(value);
+        if (self.version) |value| allocator.free(value);
         if (self.json) |value| allocator.free(value);
+        for (self.functions) |*item| item.deinit(allocator);
+        if (self.functions.len > 0) allocator.free(self.functions);
+        for (self.events) |*item| item.deinit(allocator);
+        if (self.events.len > 0) allocator.free(self.events);
         self.* = .{};
     }
 };
@@ -658,6 +666,30 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 null;
             errdefer if (owned_uri) |value| self.allocator.free(value);
 
+            const owned_version = if (abi_doc) |*info|
+                try self.allocator.dupe(u8, info.abi.version)
+            else
+                null;
+            errdefer if (owned_version) |value| self.allocator.free(value);
+
+            const functions: []tools_types.AbiFunctionTemplateResult = if (abi_doc) |*info|
+                try self.buildAbiFunctionTemplateResultsAlloc(info.abi.functions)
+            else
+                &.{};
+            errdefer {
+                for (0..functions.len) |idx| @constCast(&functions[idx]).deinit(self.allocator);
+                if (functions.len > 0) self.allocator.free(functions);
+            }
+
+            const events: []tools_types.AbiEventTemplateResult = if (abi_doc) |*info|
+                try self.buildAbiEventTemplateResultsAlloc(info.abi.events)
+            else
+                &.{};
+            errdefer {
+                for (0..events.len) |idx| @constCast(&events[idx]).deinit(self.allocator);
+                if (events.len > 0) self.allocator.free(events);
+            }
+
             var writer = std.io.Writer.Allocating.init(self.allocator);
             errdefer writer.deinit();
 
@@ -749,7 +781,10 @@ fn AgentToolsImpl(comptime ClientType: type) type {
 
             return .{
                 .uri = owned_uri,
+                .version = owned_version,
                 .json = try writer.toOwnedSlice(),
+                .functions = functions,
+                .events = events,
             };
         }
 
@@ -1337,7 +1372,10 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 .has_nft_collection = false,
                 .has_abi = false,
                 .abi_uri = null,
+                .abi_version = null,
                 .abi_json = null,
+                .functions = &.{},
+                .events = &.{},
                 .details_json = null,
                 .success = false,
                 .error_message = error_message,
@@ -1610,7 +1648,10 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 .has_nft_collection = supported.has_nft_collection,
                 .has_abi = supported.has_abi,
                 .abi_uri = abi_summary.uri,
+                .abi_version = abi_summary.version,
                 .abi_json = abi_summary.json,
+                .functions = abi_summary.functions,
+                .events = abi_summary.events,
                 .details_json = details_json,
                 .success = true,
                 .error_message = null,
@@ -3592,12 +3633,18 @@ test "agent tools inspectContract summarizes wallet and abi metadata" {
     try std.testing.expect(!result.has_jetton);
     try std.testing.expect(result.abi_uri != null);
     try std.testing.expectEqualStrings(abi_uri, result.abi_uri.?);
+    try std.testing.expect(result.abi_version != null);
+    try std.testing.expectEqualStrings("1.0", result.abi_version.?);
     try std.testing.expect(result.abi_json != null);
     try std.testing.expect(std.mem.indexOf(u8, result.abi_json.?, "\"document_version\":\"1.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.abi_json.?, "\"selector\":\"transfer(address,coins)\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.abi_json.?, "\"input_template\":\"addr:EQ... num:0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.abi_json.?, "\"named_input_template\":\"to=addr:EQ... amount=num:0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.abi_json.?, "\"decoded_output_template\":\"{}\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), result.functions.len);
+    try std.testing.expectEqualStrings("transfer", result.functions[0].name);
+    try std.testing.expectEqualStrings("to=addr:EQ... amount=num:0", result.functions[0].named_input_template);
+    try std.testing.expectEqual(@as(usize, 0), result.events.len);
     try std.testing.expect(result.details_json != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"seqno\":7") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"wallet_id\":2864434397") != null);

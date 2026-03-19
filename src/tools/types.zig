@@ -166,14 +166,22 @@ pub const ContractInspectResult = struct {
     has_nft_collection: bool,
     has_abi: bool,
     abi_uri: ?[]const u8,
+    abi_version: ?[]const u8,
     abi_json: ?[]const u8,
+    functions: []AbiFunctionTemplateResult,
+    events: []AbiEventTemplateResult,
     details_json: ?[]const u8,
     success: bool,
     error_message: ?[]const u8 = null,
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         if (self.abi_uri) |value| allocator.free(value);
+        if (self.abi_version) |value| allocator.free(value);
         if (self.abi_json) |value| allocator.free(value);
+        for (self.functions) |*item| item.deinit(allocator);
+        if (self.functions.len > 0) allocator.free(self.functions);
+        for (self.events) |*item| item.deinit(allocator);
+        if (self.events.len > 0) allocator.free(self.events);
         if (self.details_json) |value| allocator.free(value);
         self.* = undefined;
     }
