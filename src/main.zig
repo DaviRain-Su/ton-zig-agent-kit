@@ -92,6 +92,8 @@ pub fn main() !void {
         const supported = try contract_mod.abi_adapter.querySupportedInterfaces(&client, addr);
         var abi = try contract_mod.abi_adapter.queryAbiIpfs(&client, addr);
         defer if (abi) |*info| info.deinit(allocator);
+        var abi_doc = contract_mod.abi_adapter.queryAbiDocumentAlloc(&client, addr) catch null;
+        defer if (abi_doc) |*info| info.deinit(allocator);
 
         std.debug.print("Address: {s}\n", .{addr});
         if (supported) |value| {
@@ -108,6 +110,13 @@ pub fn main() !void {
             std.debug.print("ABI:\n", .{});
             std.debug.print("  kind: {s}\n", .{info.version});
             std.debug.print("  uri: {s}\n", .{info.uri orelse "(missing)"});
+            if (abi_doc) |loaded| {
+                std.debug.print("  document_version: {s}\n", .{loaded.abi.version});
+                std.debug.print("  functions: {d}\n", .{loaded.abi.functions.len});
+                std.debug.print("  events: {d}\n", .{loaded.abi.events.len});
+            } else {
+                std.debug.print("  document: not loaded\n", .{});
+            }
         } else {
             std.debug.print("ABI: not detected\n", .{});
         }
@@ -141,16 +150,13 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "runGetMethodAbi") or std.mem.eql(u8, command, "get-method-abi")) {
         if (args.len < 5) {
-            std.debug.print("Usage: ton-zig-agent-kit runGetMethodAbi <address> <abi_json|@file> <function_name> [values...]\n", .{});
+            std.debug.print("Usage: ton-zig-agent-kit runGetMethodAbi <address> <abi_json|@file|file://|http(s)://|ipfs://> <function_name> [values...]\n", .{});
             return;
         }
 
         const addr = args[2];
         const function_name = args[4];
-        const abi_json = try loadCliTextAlloc(allocator, args[3]);
-        defer allocator.free(abi_json);
-
-        var abi = try contract_mod.abi_adapter.parseAbiInfoJsonAlloc(allocator, abi_json);
+        var abi = try contract_mod.abi_adapter.loadAbiInfoSourceAlloc(allocator, args[3]);
         defer abi.deinit(allocator);
 
         var parsed_values = try parseCliAbiValues(allocator, args[5..]);
@@ -172,6 +178,56 @@ pub fn main() !void {
         defer client.freeRunGetMethodResponse(&result);
 
         std.debug.print("Address: {s}\n", .{addr});
+        std.debug.print("ABI version: {s}\n", .{abi.abi.version});
+        std.debug.print("Function: {s}\n", .{function_name});
+        printRunGetMethodResult(result);
+
+        const decoded = try contract_mod.abi_adapter.decodeFunctionOutputsFromAbiJsonAlloc(
+            allocator,
+            &abi.abi,
+            function_name,
+            result.stack,
+        );
+        defer allocator.free(decoded);
+        std.debug.print("Decoded outputs:\n{s}\n", .{decoded});
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "runGetMethodAuto") or std.mem.eql(u8, command, "get-method-auto")) {
+        if (args.len < 4) {
+            std.debug.print("Usage: ton-zig-agent-kit runGetMethodAuto <address> <function_name> [values...]\n", .{});
+            return;
+        }
+
+        const addr = args[2];
+        const function_name = args[3];
+
+        var parsed_values = try parseCliAbiValues(allocator, args[4..]);
+        defer parsed_values.deinit(allocator);
+
+        var client = try TonHttpClient.init(allocator, default_rpc_url, null);
+        defer client.deinit();
+
+        var abi = (try contract_mod.abi_adapter.queryAbiDocumentAlloc(&client, addr)) orelse {
+            std.debug.print("ABI document not found for {s}\n", .{addr});
+            return;
+        };
+        defer abi.deinit(allocator);
+
+        var stack_args = try contract_mod.abi_adapter.buildStackArgsFromAbiAlloc(
+            allocator,
+            &abi.abi,
+            function_name,
+            parsed_values.values,
+        );
+        defer stack_args.deinit(allocator);
+
+        var generic = contract_mod.GenericContract.init(&client, addr);
+        var result = try generic.callGetMethodArgs(function_name, stack_args.args);
+        defer client.freeRunGetMethodResponse(&result);
+
+        std.debug.print("Address: {s}\n", .{addr});
+        std.debug.print("ABI source: {s}\n", .{abi.abi.uri orelse "(embedded)"});
         std.debug.print("ABI version: {s}\n", .{abi.abi.version});
         std.debug.print("Function: {s}\n", .{function_name});
         printRunGetMethodResult(result);
@@ -408,15 +464,13 @@ pub fn main() !void {
 
         if (std.mem.eql(u8, cell_cmd, "build-abi")) {
             if (args.len < 5) {
-                std.debug.print("Usage: ton-zig-agent-kit cell build-abi <abi_json|@file> <function_name> <values...>\n", .{});
+                std.debug.print("Usage: ton-zig-agent-kit cell build-abi <abi_json|@file|file://|http(s)://|ipfs://> <function_name> <values...>\n", .{});
                 return;
             }
 
-            const abi_json = try loadCliTextAlloc(allocator, args[3]);
-            defer allocator.free(abi_json);
             const function_name = args[4];
 
-            var abi = try contract_mod.abi_adapter.parseAbiInfoJsonAlloc(allocator, abi_json);
+            var abi = try contract_mod.abi_adapter.loadAbiInfoSourceAlloc(allocator, args[3]);
             defer abi.deinit(allocator);
 
             var parsed_values = try parseCliAbiValues(allocator, args[5..]);
@@ -453,7 +507,7 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "wallet")) {
         if (args.len < 3) {
-            std.debug.print("Usage: ton-zig-agent-kit wallet <genkey|seqno|send|send-body|send-body-hex|send-ops|send-function|send-abi>\n", .{});
+            std.debug.print("Usage: ton-zig-agent-kit wallet <genkey|seqno|send|send-body|send-body-hex|send-ops|send-function|send-abi|send-auto-abi>\n", .{});
             return;
         }
         const wallet_cmd = args[2];
@@ -638,7 +692,7 @@ pub fn main() !void {
 
         if (std.mem.eql(u8, wallet_cmd, "send-abi")) {
             if (args.len < 9) {
-                std.debug.print("Usage: ton-zig-agent-kit wallet send-abi <wallet_addr> <dest> <amount_nanoton> <abi_json|@file> <function_name> <values...>\n", .{});
+                std.debug.print("Usage: ton-zig-agent-kit wallet send-abi <wallet_addr> <dest> <amount_nanoton> <abi_json|@file|file://|http(s)://|ipfs://> <function_name> <values...>\n", .{});
                 return;
             }
             const wallet_addr = args[3];
@@ -646,10 +700,7 @@ pub fn main() !void {
             const amount = try std.fmt.parseInt(u64, args[5], 10);
             const function_name = args[7];
 
-            const abi_json = try loadCliTextAlloc(allocator, args[6]);
-            defer allocator.free(abi_json);
-
-            var abi = try contract_mod.abi_adapter.parseAbiInfoJsonAlloc(allocator, abi_json);
+            var abi = try contract_mod.abi_adapter.loadAbiInfoSourceAlloc(allocator, args[6]);
             defer abi.deinit(allocator);
 
             var parsed_values = try parseCliAbiValues(allocator, args[8..]);
@@ -673,6 +724,51 @@ pub fn main() !void {
             defer client.freeSendBocResponse(&result);
 
             std.debug.print("ABI contract message submitted:\n", .{});
+            std.debug.print("  ABI version: {s}\n", .{abi.abi.version});
+            std.debug.print("  Function: {s}\n", .{function_name});
+            std.debug.print("  Hash: {s}\n", .{result.hash});
+            std.debug.print("  LT: {d}\n", .{result.lt});
+            return;
+        }
+
+        if (std.mem.eql(u8, wallet_cmd, "send-auto-abi")) {
+            if (args.len < 8) {
+                std.debug.print("Usage: ton-zig-agent-kit wallet send-auto-abi <wallet_addr> <dest> <amount_nanoton> <function_name> <values...>\n", .{});
+                return;
+            }
+            const wallet_addr = args[3];
+            const dest = args[4];
+            const amount = try std.fmt.parseInt(u64, args[5], 10);
+            const function_name = args[6];
+
+            var parsed_values = try parseCliAbiValues(allocator, args[7..]);
+            defer parsed_values.deinit(allocator);
+
+            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
+            defer client.deinit();
+
+            var abi = (try contract_mod.abi_adapter.queryAbiDocumentAlloc(&client, dest)) orelse {
+                std.debug.print("ABI document not found for {s}\n", .{dest});
+                return;
+            };
+            defer abi.deinit(allocator);
+
+            const body = try contract_mod.abi_adapter.buildFunctionBodyFromAbiAlloc(
+                allocator,
+                &abi.abi,
+                function_name,
+                parsed_values.values,
+            );
+            defer allocator.free(body);
+
+            const keypair = try signing.generateKeypair("my_seed_phrase");
+            const private_key = keypair[0];
+
+            var result = try signing.sendBody(&client, .v4, private_key, wallet_addr, dest, amount, body);
+            defer client.freeSendBocResponse(&result);
+
+            std.debug.print("Auto ABI contract message submitted:\n", .{});
+            std.debug.print("  ABI source: {s}\n", .{abi.abi.uri orelse "(embedded)"});
             std.debug.print("  ABI version: {s}\n", .{abi.abi.version});
             std.debug.print("  Function: {s}\n", .{function_name});
             std.debug.print("  Hash: {s}\n", .{result.hash});
@@ -1267,7 +1363,8 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit runGetMethod <addr> <method> [stack_json]  Call any get method\n", .{});
     std.debug.print("  ton-zig-agent-kit inspectContract <addr>        Detect standard interfaces and ABI URI\n", .{});
     std.debug.print("  ton-zig-agent-kit runGetMethodTyped <addr> <method> [typed_args...]  Call get method with typed args\n", .{});
-    std.debug.print("  ton-zig-agent-kit runGetMethodAbi <addr> <abi_json|@file> <function> [values...]  Call get method with ABI decode\n", .{});
+    std.debug.print("  ton-zig-agent-kit runGetMethodAbi <addr> <abi_json|@file|file://|http(s)://|ipfs://> <function> [values...]  Call get method with ABI decode\n", .{});
+    std.debug.print("  ton-zig-agent-kit runGetMethodAuto <addr> <function> [values...]  Discover ABI and call get method\n", .{});
     std.debug.print("    typed args: null, int:<n>, addr:<addr>, cell:<b64>, slice:<b64>, builder:<b64>, cellhex:<hex>, slicehex:<hex>, builderhex:<hex>\n", .{});
     std.debug.print("  ton-zig-agent-kit sendBoc <boc_base64>          Submit raw BoC to the network\n", .{});
     std.debug.print("  ton-zig-agent-kit sendBocHex <boc_hex>          Submit raw BoC hex to the network\n", .{});
@@ -1279,7 +1376,7 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit cell hash <hex>              Get cell hash\n", .{});
     std.debug.print("  ton-zig-agent-kit cell build-typed <ops...>    Build body BoC from typed ops\n", .{});
     std.debug.print("  ton-zig-agent-kit cell build-function <function_json> <values...>  Build body from function schema\n", .{});
-    std.debug.print("  ton-zig-agent-kit cell build-abi <abi_json|@file> <function> <values...>  Build body from ABI doc\n", .{});
+    std.debug.print("  ton-zig-agent-kit cell build-abi <abi_json|@file|file://|http(s)://|ipfs://> <function> <values...>  Build body from ABI doc\n", .{});
     std.debug.print("    body ops: u<bits>:<v>, i<bits>:<v>, coins:<v>, addr:<addr>, bytes:<utf8>, hex:<hex>, ref:<b64 boc>, refhex:<hex boc>\n", .{});
     std.debug.print("    function values: null, u:<v>, i:<v>, num:<dec|0xhex>, str:<utf8>, addr:<addr>, json:<json|@file>, hex:<hex>, boc:<b64 boc>, bochex:<hex boc>\n", .{});
     std.debug.print("\nWallet operations:\n", .{});
@@ -1290,7 +1387,8 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit wallet send-body-hex <src> <dst> <amount> <body_hex>  Send raw contract body hex\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-ops <src> <dst> <amount> <ops...>  Build and send typed contract body\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-function <src> <dst> <amount> <function_json> <values...>  Build and send function body\n", .{});
-    std.debug.print("  ton-zig-agent-kit wallet send-abi <src> <dst> <amount> <abi_json|@file> <function> <values...>  Build and send ABI function body\n", .{});
+    std.debug.print("  ton-zig-agent-kit wallet send-abi <src> <dst> <amount> <abi_json|@file|file://|http(s)://|ipfs://> <function> <values...>  Build and send ABI function body\n", .{});
+    std.debug.print("  ton-zig-agent-kit wallet send-auto-abi <src> <dst> <amount> <function> <values...>  Discover ABI and send function body\n", .{});
     std.debug.print("\nPayment watch operations:\n", .{});
     std.debug.print("  ton-zig-agent-kit paywatch invoice <dest> <amount>  Create invoice\n", .{});
     std.debug.print("  ton-zig-agent-kit paywatch verify <addr> <comment>  Verify payment\n", .{});

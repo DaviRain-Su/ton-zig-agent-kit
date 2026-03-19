@@ -104,7 +104,7 @@ pub const AgentTools = struct {
         function_name: []const u8,
         values: []const abi_adapter.AbiValue,
     ) !tools_types.RunMethodResult {
-        var abi = abi_adapter.parseAbiInfoJsonAlloc(self.allocator, abi_json) catch |err| {
+        var abi = abi_adapter.loadAbiInfoSourceAlloc(self.allocator, abi_json) catch |err| {
             return tools_types.RunMethodResult{
                 .address = contract_address,
                 .method = function_name,
@@ -116,7 +116,114 @@ pub const AgentTools = struct {
                 .error_message = @errorName(err),
             };
         };
-        defer abi.deinit(self.allocator);
+        defer abi.deinit(self.client.allocator);
+
+        var args = abi_adapter.buildStackArgsFromAbiAlloc(self.allocator, &abi.abi, function_name, values) catch |err| {
+            return tools_types.RunMethodResult{
+                .address = contract_address,
+                .method = function_name,
+                .exit_code = -1,
+                .stack_json = "[]",
+                .decoded_json = null,
+                .logs = "",
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        defer args.deinit(self.allocator);
+
+        var generic = contract.GenericContract.init(self.client, contract_address);
+        var result = generic.callGetMethodArgs(function_name, args.args) catch |err| {
+            return tools_types.RunMethodResult{
+                .address = contract_address,
+                .method = function_name,
+                .exit_code = -1,
+                .stack_json = "[]",
+                .decoded_json = null,
+                .logs = "",
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        defer self.client.freeRunGetMethodResponse(&result);
+
+        const stack_json = contract.stackToJsonAlloc(self.allocator, result.stack) catch |err| {
+            return tools_types.RunMethodResult{
+                .address = contract_address,
+                .method = function_name,
+                .exit_code = result.exit_code,
+                .stack_json = "[]",
+                .decoded_json = null,
+                .logs = "",
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        errdefer self.allocator.free(stack_json);
+
+        const logs = try self.allocator.dupe(u8, result.logs);
+        errdefer self.allocator.free(logs);
+
+        const decoded_json = abi_adapter.decodeFunctionOutputsFromAbiJsonAlloc(
+            self.allocator,
+            &abi.abi,
+            function_name,
+            result.stack,
+        ) catch |err| {
+            return tools_types.RunMethodResult{
+                .address = contract_address,
+                .method = function_name,
+                .exit_code = result.exit_code,
+                .stack_json = stack_json,
+                .decoded_json = null,
+                .logs = logs,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        errdefer self.allocator.free(decoded_json);
+
+        return tools_types.RunMethodResult{
+            .address = contract_address,
+            .method = function_name,
+            .exit_code = result.exit_code,
+            .stack_json = stack_json,
+            .decoded_json = decoded_json,
+            .logs = logs,
+            .success = true,
+            .error_message = null,
+        };
+    }
+
+    /// Run a get-method by discovering the contract ABI URI on-chain
+    pub fn runGetMethodAuto(
+        self: *AgentTools,
+        contract_address: []const u8,
+        function_name: []const u8,
+        values: []const abi_adapter.AbiValue,
+    ) !tools_types.RunMethodResult {
+        var abi = abi_adapter.queryAbiDocumentAlloc(self.client, contract_address) catch |err| {
+            return tools_types.RunMethodResult{
+                .address = contract_address,
+                .method = function_name,
+                .exit_code = -1,
+                .stack_json = "[]",
+                .decoded_json = null,
+                .logs = "",
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        } orelse return tools_types.RunMethodResult{
+            .address = contract_address,
+            .method = function_name,
+            .exit_code = -1,
+            .stack_json = "[]",
+            .decoded_json = null,
+            .logs = "",
+            .success = false,
+            .error_message = "AbiNotFound",
+        };
+        defer abi.deinit(self.client.allocator);
 
         var args = abi_adapter.buildStackArgsFromAbiAlloc(self.allocator, &abi.abi, function_name, values) catch |err| {
             return tools_types.RunMethodResult{
@@ -460,7 +567,7 @@ pub const AgentTools = struct {
         function_name: []const u8,
         values: []const abi_adapter.AbiValue,
     ) !tools_types.SendResult {
-        var abi = abi_adapter.parseAbiInfoJsonAlloc(self.allocator, abi_json) catch |err| {
+        var abi = abi_adapter.loadAbiInfoSourceAlloc(self.allocator, abi_json) catch |err| {
             return tools_types.SendResult{
                 .hash = "",
                 .lt = 0,
@@ -469,6 +576,53 @@ pub const AgentTools = struct {
                 .success = false,
                 .error_message = @errorName(err),
             };
+        };
+        defer abi.deinit(self.allocator);
+
+        const body_boc = abi_adapter.buildFunctionBodyFromAbiAlloc(
+            self.allocator,
+            &abi.abi,
+            function_name,
+            values,
+        ) catch |err| {
+            return tools_types.SendResult{
+                .hash = "",
+                .lt = 0,
+                .destination = destination,
+                .amount = amount,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        defer self.allocator.free(body_boc);
+
+        return self.sendContractMessage(destination, amount, body_boc);
+    }
+
+    /// Build and send a contract body by discovering the destination ABI URI on-chain
+    pub fn sendContractMessageAuto(
+        self: *AgentTools,
+        destination: []const u8,
+        amount: u64,
+        function_name: []const u8,
+        values: []const abi_adapter.AbiValue,
+    ) !tools_types.SendResult {
+        var abi = abi_adapter.queryAbiDocumentAlloc(self.client, destination) catch |err| {
+            return tools_types.SendResult{
+                .hash = "",
+                .lt = 0,
+                .destination = destination,
+                .amount = amount,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        } orelse return tools_types.SendResult{
+            .hash = "",
+            .lt = 0,
+            .destination = destination,
+            .amount = amount,
+            .success = false,
+            .error_message = "AbiNotFound",
         };
         defer abi.deinit(self.allocator);
 
@@ -573,9 +727,11 @@ test "agent tools getBalance" {
 test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.runGetMethod;
     _ = AgentTools.runGetMethodAbi;
+    _ = AgentTools.runGetMethodAuto;
     _ = AgentTools.sendContractMessage;
     _ = AgentTools.sendContractMessageOps;
     _ = AgentTools.sendContractMessageFunction;
     _ = AgentTools.sendContractMessageAbi;
+    _ = AgentTools.sendContractMessageAuto;
     _ = RunMethodResult;
 }

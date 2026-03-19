@@ -98,6 +98,9 @@ pub const ContractAdapter = struct {
     abi: ?AbiInfo,
 };
 
+const max_abi_source_bytes: usize = 1 << 20;
+const default_ipfs_gateway = "https://ipfs.io";
+
 pub fn querySupportedInterfaces(client: *http_client.TonHttpClient, addr: []const u8) !?SupportedInterfaces {
     const supported = supportedInterfacesFromMethodSupport(
         try probeMethodSupport(client, addr, "seqno"),
@@ -129,8 +132,61 @@ pub fn queryAbiIpfs(client: *http_client.TonHttpClient, addr: []const u8) !?AbiI
     return null;
 }
 
+pub fn queryAbiDocumentAlloc(client: *http_client.TonHttpClient, addr: []const u8) !?OwnedAbiInfo {
+    var abi_ref = try queryAbiIpfs(client, addr) orelse return null;
+    defer abi_ref.deinit(client.allocator);
+
+    const uri = abi_ref.uri orelse return null;
+    var abi = try loadAbiInfoSourceAlloc(client.allocator, uri);
+    errdefer abi.deinit(client.allocator);
+
+    if (abi.abi.uri == null) {
+        abi.abi.uri = try client.allocator.dupe(u8, uri);
+    }
+
+    return abi;
+}
+
 pub fn adaptToContract(addr: []const u8, abi: ?AbiInfo) ContractAdapter {
     return ContractAdapter{ .address = addr, .abi = abi };
+}
+
+pub fn loadAbiInfoSourceAlloc(allocator: std.mem.Allocator, source: []const u8) !OwnedAbiInfo {
+    const abi_json = try loadAbiTextSourceAlloc(allocator, source);
+    defer allocator.free(abi_json);
+
+    return parseAbiInfoJsonAlloc(allocator, abi_json);
+}
+
+pub fn loadAbiTextSourceAlloc(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, source, " \t\r\n");
+    if (trimmed.len == 0) return error.InvalidAbiDefinition;
+
+    if (trimmed[0] == '{' or trimmed[0] == '[') {
+        return allocator.dupe(u8, trimmed);
+    }
+
+    if (trimmed[0] == '@' and trimmed.len > 1) {
+        return readAbiFileAlloc(allocator, trimmed[1..]);
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "file://")) {
+        return readAbiFileAlloc(allocator, trimmed["file://".len..]);
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "http://") or
+        std.mem.startsWith(u8, trimmed, "https://") or
+        std.mem.startsWith(u8, trimmed, "ipfs://") or
+        std.mem.startsWith(u8, trimmed, "ipns://"))
+    {
+        return fetchAbiUrlAlloc(allocator, trimmed);
+    }
+
+    if (readAbiFileAlloc(allocator, trimmed)) |file_text| {
+        return file_text;
+    } else |_| {}
+
+    return allocator.dupe(u8, trimmed);
 }
 
 pub fn parseAbiInfoJsonAlloc(allocator: std.mem.Allocator, json_text: []const u8) !OwnedAbiInfo {
@@ -367,6 +423,71 @@ fn findOffchainUriInStack(allocator: std.mem.Allocator, stack: []const types.Sta
         if (try abiUriFromEntry(allocator, entry)) |uri| return uri;
     }
     return null;
+}
+
+fn readAbiFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (std.fs.path.isAbsolute(path)) {
+        const file = try std.fs.openFileAbsolute(path, .{});
+        defer file.close();
+        return file.readToEndAlloc(allocator, max_abi_source_bytes);
+    }
+
+    return std.fs.cwd().readFileAlloc(allocator, path, max_abi_source_bytes);
+}
+
+fn fetchAbiUrlAlloc(allocator: std.mem.Allocator, source_url: []const u8) ![]u8 {
+    const resolved_url = try normalizeAbiUrlAlloc(allocator, source_url);
+    defer allocator.free(resolved_url);
+
+    const uri = try std.Uri.parse(resolved_url);
+    var client = std.http.Client{ .allocator = allocator };
+    defer client.deinit();
+
+    var headers = [_]std.http.Header{
+        .{ .name = "accept", .value = "application/json, text/plain;q=0.9, */*;q=0.1" },
+    };
+
+    var request = try client.request(.GET, uri, .{
+        .redirect_behavior = .unhandled,
+        .extra_headers = headers[0..1],
+        .keep_alive = false,
+    });
+    defer request.deinit();
+
+    try request.sendBodiless();
+
+    var response = try request.receiveHead(&.{});
+
+    const decompress_buffer = switch (response.head.content_encoding) {
+        .identity => null,
+        .gzip, .deflate => try allocator.alloc(u8, std.compress.flate.max_window_len),
+        else => return error.UnsupportedCompressionMethod,
+    };
+    defer if (decompress_buffer) |buffer| allocator.free(buffer);
+
+    var response_writer = std.io.Writer.Allocating.init(allocator);
+    errdefer response_writer.deinit();
+
+    var transfer_buffer: [512]u8 = undefined;
+    var decompress: std.http.Decompress = undefined;
+    const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer orelse &.{});
+    _ = try reader.streamRemaining(&response_writer.writer);
+
+    return try response_writer.toOwnedSlice();
+}
+
+fn normalizeAbiUrlAlloc(allocator: std.mem.Allocator, source_url: []const u8) ![]u8 {
+    if (std.mem.startsWith(u8, source_url, "ipfs://")) {
+        const path = std.mem.trimLeft(u8, source_url["ipfs://".len..], "/");
+        return std.fmt.allocPrint(allocator, "{s}/ipfs/{s}", .{ default_ipfs_gateway, path });
+    }
+
+    if (std.mem.startsWith(u8, source_url, "ipns://")) {
+        const path = std.mem.trimLeft(u8, source_url["ipns://".len..], "/");
+        return std.fmt.allocPrint(allocator, "{s}/ipns/{s}", .{ default_ipfs_gateway, path });
+    }
+
+    return allocator.dupe(u8, source_url);
 }
 
 fn abiUriFromEntry(allocator: std.mem.Allocator, entry: *const types.StackEntry) anyerror!?[]u8 {
@@ -1797,6 +1918,9 @@ fn writeJsonString(writer: anytype, value: []const u8) !void {
 test "abi adapter" {
     _ = querySupportedInterfaces;
     _ = queryAbiIpfs;
+    _ = queryAbiDocumentAlloc;
+    _ = loadAbiInfoSourceAlloc;
+    _ = loadAbiTextSourceAlloc;
     _ = adaptToContract;
 }
 
@@ -1836,6 +1960,67 @@ test "abi adapter extracts offchain uri from stack cell" {
 
     try std.testing.expectEqualStrings("offchain-uri", info.version);
     try std.testing.expectEqualStrings("ipfs://example/abi.json", info.uri.?);
+}
+
+test "abi adapter loads abi text from @file source" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "ping",
+        \\      "outputs": []
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{ .sub_path = "abi.json", .data = abi_json });
+    const abi_path = try tmp.dir.realpathAlloc(allocator, "abi.json");
+    defer allocator.free(abi_path);
+
+    const source = try std.fmt.allocPrint(allocator, "@{s}", .{abi_path});
+    defer allocator.free(source);
+
+    const loaded = try loadAbiTextSourceAlloc(allocator, source);
+    defer allocator.free(loaded);
+
+    try std.testing.expectEqualStrings(abi_json, loaded);
+}
+
+test "abi adapter loads abi info from file uri source" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "version": "1.2",
+        \\  "functions": [
+        \\    {
+        \\      "name": "ping",
+        \\      "outputs": []
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{ .sub_path = "abi.json", .data = abi_json });
+    const abi_path = try tmp.dir.realpathAlloc(allocator, "abi.json");
+    defer allocator.free(abi_path);
+
+    const source = try std.fmt.allocPrint(allocator, "file://{s}", .{abi_path});
+    defer allocator.free(source);
+
+    var loaded = try loadAbiInfoSourceAlloc(allocator, source);
+    defer loaded.deinit(allocator);
+
+    try std.testing.expectEqualStrings("1.2", loaded.abi.version);
+    try std.testing.expectEqual(@as(usize, 1), loaded.abi.functions.len);
+    try std.testing.expectEqualStrings("ping", loaded.abi.functions[0].name);
 }
 
 test "abi adapter can extract plain uri bytes from tuple stack" {
