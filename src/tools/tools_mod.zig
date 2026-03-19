@@ -17,6 +17,9 @@ const nft = @import("../contract/nft.zig");
 const tools_types = @import("types.zig");
 
 fn AgentToolsImpl(comptime ClientType: type) type {
+    const JettonMasterClient = if (ClientType == *http_client.TonHttpClient) jetton.JettonMaster else jetton.ProviderJettonMaster;
+    const NFTCollectionClient = if (ClientType == *http_client.TonHttpClient) nft.NFTCollection else nft.ProviderNFTCollection;
+
     return struct {
     allocator: std.mem.Allocator,
     client: ClientType,
@@ -561,6 +564,68 @@ fn AgentToolsImpl(comptime ClientType: type) type {
         };
     }
 
+    /// Get Jetton master metadata
+    pub fn getJettonInfo(self: *@This(), jetton_master_address: []const u8) !tools_types.JettonInfoResult {
+        var master = JettonMasterClient.init(jetton_master_address, self.client);
+        var data = master.getJettonData() catch |err| {
+            return tools_types.JettonInfoResult{
+                .address = jetton_master_address,
+                .total_supply = "0",
+                .mintable = false,
+                .admin = null,
+                .content = null,
+                .content_uri = null,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        errdefer data.deinit(self.allocator);
+
+        const total_supply = try std.fmt.allocPrint(self.allocator, "{d}", .{data.total_supply});
+        errdefer self.allocator.free(total_supply);
+
+        const admin = if (data.admin) |value| try address_mod.formatRaw(self.allocator, &value) else null;
+        errdefer if (admin) |value| self.allocator.free(value);
+
+        const content = data.content;
+        data.content = null;
+        const content_uri = data.content_uri;
+        data.content_uri = null;
+
+        return tools_types.JettonInfoResult{
+            .address = jetton_master_address,
+            .total_supply = total_supply,
+            .mintable = data.mintable,
+            .admin = admin,
+            .content = content,
+            .content_uri = content_uri,
+            .success = true,
+            .error_message = null,
+        };
+    }
+
+    /// Resolve a Jetton wallet address from master + owner address.
+    pub fn getJettonWalletAddress(self: *@This(), jetton_master_address: []const u8, owner_address: []const u8) !tools_types.JettonWalletAddressResult {
+        var master = JettonMasterClient.init(jetton_master_address, self.client);
+        const wallet_address = master.getWalletAddress(owner_address) catch |err| {
+            return tools_types.JettonWalletAddressResult{
+                .owner_address = owner_address,
+                .jetton_master = jetton_master_address,
+                .wallet_address = null,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+
+        return tools_types.JettonWalletAddressResult{
+            .owner_address = owner_address,
+            .jetton_master = jetton_master_address,
+            .wallet_address = wallet_address,
+            .success = true,
+            .error_message = null,
+        };
+    }
+
     /// Get NFT info
     pub fn getNFTInfo(self: *@This(), nft_address: []const u8) !tools_types.NFTInfoResult {
         var result = self.client.runGetMethod(nft_address, "get_nft_data", &.{}) catch |err| {
@@ -623,6 +688,44 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             .owner = owner,
             .collection = collection,
             .index = index,
+            .content = content,
+            .content_uri = content_uri,
+            .success = true,
+            .error_message = null,
+        };
+    }
+
+    /// Get NFT collection metadata
+    pub fn getNFTCollectionInfo(self: *@This(), collection_address: []const u8) !tools_types.NFTCollectionInfoResult {
+        var collection = NFTCollectionClient.init(collection_address, self.client);
+        var data = collection.getCollectionData() catch |err| {
+            return tools_types.NFTCollectionInfoResult{
+                .address = collection_address,
+                .owner = null,
+                .next_item_index = "0",
+                .content = null,
+                .content_uri = null,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        errdefer data.deinit(self.allocator);
+
+        const owner = if (data.owner) |value| try address_mod.formatRaw(self.allocator, &value) else null;
+        errdefer if (owner) |value| self.allocator.free(value);
+
+        const next_item_index = try std.fmt.allocPrint(self.allocator, "{d}", .{data.next_item_index});
+        errdefer self.allocator.free(next_item_index);
+
+        const content = data.content;
+        data.content = null;
+        const content_uri = data.content_uri;
+        data.content_uri = null;
+
+        return tools_types.NFTCollectionInfoResult{
+            .address = collection_address,
+            .owner = owner,
+            .next_item_index = next_item_index,
             .content = content,
             .content_uri = content_uri,
             .success = true,
@@ -874,7 +977,10 @@ pub const InvoiceResult = tools_types.InvoiceResult;
 pub const VerifyResult = tools_types.VerifyResult;
 pub const TxResult = tools_types.TxResult;
 pub const JettonBalanceResult = tools_types.JettonBalanceResult;
+pub const JettonInfoResult = tools_types.JettonInfoResult;
+pub const JettonWalletAddressResult = tools_types.JettonWalletAddressResult;
 pub const NFTInfoResult = tools_types.NFTInfoResult;
+pub const NFTCollectionInfoResult = tools_types.NFTCollectionInfoResult;
 pub const AgentToolsConfig = tools_types.AgentToolsConfig;
 pub const ToolResponse = tools_types.ToolResponse;
 pub const ToolError = tools_types.ToolError;
@@ -927,8 +1033,14 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = ProviderAgentTools.verifyPayment;
     _ = ProviderAgentTools.waitPayment;
     _ = ProviderAgentTools.getJettonBalance;
+    _ = ProviderAgentTools.getJettonInfo;
+    _ = ProviderAgentTools.getJettonWalletAddress;
     _ = ProviderAgentTools.getNFTInfo;
+    _ = ProviderAgentTools.getNFTCollectionInfo;
     _ = ProviderAgentTools.sendTransfer;
     _ = AddressResult;
     _ = RunMethodResult;
+    _ = JettonInfoResult;
+    _ = JettonWalletAddressResult;
+    _ = NFTCollectionInfoResult;
 }

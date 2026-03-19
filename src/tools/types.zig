@@ -97,11 +97,40 @@ pub const JettonBalanceResult = struct {
     error_message: ?[]const u8 = null,
 };
 
+pub const JettonInfoResult = struct {
+    address: []const u8,
+    total_supply: []const u8,
+    mintable: bool,
+    admin: ?[]const u8,
+    content: ?[]const u8,
+    content_uri: ?[]const u8,
+    success: bool,
+    error_message: ?[]const u8 = null,
+};
+
+pub const JettonWalletAddressResult = struct {
+    owner_address: []const u8,
+    jetton_master: []const u8,
+    wallet_address: ?[]const u8,
+    success: bool,
+    error_message: ?[]const u8 = null,
+};
+
 pub const NFTInfoResult = struct {
     address: []const u8,
     owner: ?[]const u8,
     collection: ?[]const u8,
     index: []const u8,
+    content: ?[]const u8,
+    content_uri: ?[]const u8,
+    success: bool,
+    error_message: ?[]const u8 = null,
+};
+
+pub const NFTCollectionInfoResult = struct {
+    address: []const u8,
+    owner: ?[]const u8,
+    next_item_index: []const u8,
     content: ?[]const u8,
     content_uri: ?[]const u8,
     success: bool,
@@ -117,7 +146,10 @@ pub const ToolResponse = union(enum) {
     verify: VerifyResult,
     transaction: TxResult,
     jetton_balance: JettonBalanceResult,
+    jetton_info: JettonInfoResult,
+    jetton_wallet_address: JettonWalletAddressResult,
     nft_info: NFTInfoResult,
+    nft_collection_info: NFTCollectionInfoResult,
     err: ToolError,
 };
 
