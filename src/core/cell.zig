@@ -145,7 +145,10 @@ pub const Builder = struct {
         var i: u16 = bits;
         while (i > 0) {
             i -= 1;
-            const bit_val = @as(u1, @intCast((value >> @intCast(i)) & 1));
+            const bit_val: u1 = if (i >= 64)
+                0
+            else
+                @intCast((value >> @as(u6, @intCast(i))) & 1);
             try self.storeBit(bit_val);
         }
     }
@@ -211,6 +214,10 @@ pub const Builder = struct {
         if (value >= 0) {
             try self.storeUint(@intCast(value), bits);
         } else {
+            if (bits == 64) {
+                try self.storeUint(@bitCast(value), bits);
+                return;
+            }
             const mask = (@as(u64, 1) << @intCast(bits)) - 1;
             try self.storeUint(@intCast(@as(u64, @bitCast(value)) & mask), bits);
         }
@@ -357,6 +364,7 @@ pub const Slice = struct {
         const val = try self.loadUint(bits);
         const sign_bit = @as(u64, 1) << @intCast(bits - 1);
         if (val & sign_bit != 0) {
+            if (bits == 64) return @bitCast(val);
             return @bitCast(val | (@as(u64, 0xFFFFFFFFFFFFFFFF) << @intCast(bits)));
         }
         return @bitCast(val);
@@ -474,6 +482,22 @@ test "builder store uint bytes" {
     try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x23, 0x45, 0x67 }, try slice.loadBits(32));
 }
 
+test "builder store uint wider than 64 bits" {
+    var builder = Builder.init();
+    try builder.storeUint(42, 128);
+
+    var cell = try builder.toCell(std.testing.allocator);
+    defer std.testing.allocator.destroy(cell);
+
+    var slice = cell.toSlice();
+    try std.testing.expectEqualSlices(u8, &.{
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x2A,
+    }, try slice.loadBits(128));
+}
+
 test "builder store coins bytes" {
     var builder = Builder.init();
     try builder.storeCoinsBytes(&.{ 0x01, 0x23, 0x45, 0x67, 0x89 });
@@ -510,6 +534,17 @@ test "builder store and load int" {
 
     var slice = cell.toSlice();
     try std.testing.expectEqual(@as(i64, -1), try slice.loadInt(8));
+}
+
+test "builder store and load int64" {
+    var builder = Builder.init();
+    try builder.storeInt(-7, 64);
+
+    var cell = try builder.toCell(std.testing.allocator);
+    defer std.testing.allocator.destroy(cell);
+
+    var slice = cell.toSlice();
+    try std.testing.expectEqual(@as(i64, -7), try slice.loadInt(64));
 }
 
 test "store bits preserves unaligned writes" {

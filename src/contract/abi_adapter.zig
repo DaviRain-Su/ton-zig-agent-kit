@@ -989,14 +989,26 @@ fn storeAbiValue(
     }
     if (std.mem.startsWith(u8, param.type_name, "uint")) {
         const bits = try parseSizedTypeBits(param.type_name, "uint", 64);
-        if (bits > 64) return error.UnsupportedAbiType;
-        try builder.storeUint(try abiValueAsUint(value), bits);
+        const numeric_value = try abiValueAsUint(value);
+        if (bits > 64) {
+            var text_buf: [32]u8 = undefined;
+            const text = try formatUnsignedDecimalText(&text_buf, numeric_value);
+            try storeNumericTextValue(builder, allocator, param.type_name, text);
+            return;
+        }
+        try builder.storeUint(numeric_value, bits);
         return;
     }
     if (std.mem.startsWith(u8, param.type_name, "int")) {
         const bits = try parseSizedTypeBits(param.type_name, "int", 64);
-        if (bits > 64) return error.UnsupportedAbiType;
-        try builder.storeInt(try abiValueAsInt(value), bits);
+        const numeric_value = try abiValueAsInt(value);
+        if (bits > 64) {
+            var text_buf: [32]u8 = undefined;
+            const text = try formatSignedDecimalText(&text_buf, numeric_value);
+            try storeNumericTextValue(builder, allocator, param.type_name, text);
+            return;
+        }
+        try builder.storeInt(numeric_value, bits);
         return;
     }
 
@@ -1045,6 +1057,8 @@ fn abiValueToStackArgAlloc(
         std.mem.startsWith(u8, param.type_name, "int") or
         std.mem.eql(u8, param.type_name, "bool"))
     {
+        const use_raw_numeric = try numericTypeUsesWideEncoding(param.type_name);
+
         if (std.meta.activeTag(value) == .numeric_text) {
             const raw_json = try buildNumericStackArgJsonAlloc(allocator, param.type_name, value.numeric_text);
             return .{
@@ -1054,8 +1068,14 @@ fn abiValueToStackArgAlloc(
         }
 
         return switch (value) {
-            .uint => |v| .{ .arg = .{ .int = try checkedAbiUintToI64(v) } },
-            .int => |v| .{ .arg = .{ .int = v } },
+            .uint => |v| if (use_raw_numeric or v > @as(u64, @intCast(std.math.maxInt(i64))))
+                try buildUnsignedNumericStackArgAlloc(allocator, param.type_name, v)
+            else
+                .{ .arg = .{ .int = @intCast(v) } },
+            .int => |v| if (use_raw_numeric)
+                try buildSignedNumericStackArgAlloc(allocator, param.type_name, v)
+            else
+                .{ .arg = .{ .int = v } },
             else => error.InvalidAbiArguments,
         };
     }
@@ -1102,6 +1122,54 @@ fn abiValueToStackArgAlloc(
 fn parseSizedTypeBits(type_name: []const u8, prefix: []const u8, default_bits: u16) !u16 {
     if (type_name.len == prefix.len) return default_bits;
     return std.fmt.parseInt(u16, type_name[prefix.len..], 10);
+}
+
+fn numericTypeUsesWideEncoding(type_name: []const u8) !bool {
+    if (std.mem.startsWith(u8, type_name, "uint")) {
+        return (try parseSizedTypeBits(type_name, "uint", 64)) > 64;
+    }
+
+    if (std.mem.startsWith(u8, type_name, "int")) {
+        return (try parseSizedTypeBits(type_name, "int", 64)) > 64;
+    }
+
+    return false;
+}
+
+fn formatUnsignedDecimalText(buffer: *[32]u8, value: u64) ![]const u8 {
+    return std.fmt.bufPrint(buffer, "{}", .{value});
+}
+
+fn formatSignedDecimalText(buffer: *[32]u8, value: i64) ![]const u8 {
+    return std.fmt.bufPrint(buffer, "{}", .{value});
+}
+
+fn buildUnsignedNumericStackArgAlloc(
+    allocator: std.mem.Allocator,
+    type_name: []const u8,
+    value: u64,
+) !BuiltStackArg {
+    var text_buf: [32]u8 = undefined;
+    const text = try formatUnsignedDecimalText(&text_buf, value);
+    const raw_json = try buildNumericStackArgJsonAlloc(allocator, type_name, text);
+    return .{
+        .arg = .{ .raw_json = raw_json },
+        .owned_buffer = raw_json,
+    };
+}
+
+fn buildSignedNumericStackArgAlloc(
+    allocator: std.mem.Allocator,
+    type_name: []const u8,
+    value: i64,
+) !BuiltStackArg {
+    var text_buf: [32]u8 = undefined;
+    const text = try formatSignedDecimalText(&text_buf, value);
+    const raw_json = try buildNumericStackArgJsonAlloc(allocator, type_name, text);
+    return .{
+        .arg = .{ .raw_json = raw_json },
+        .owned_buffer = raw_json,
+    };
 }
 
 fn abiValueAsUint(value: AbiValue) !u64 {
@@ -1682,7 +1750,12 @@ fn storeAbiJsonValue(
                     try builder.storeCoins(@intCast(value));
                 } else {
                     const bits = try parseSizedTypeBits(param.type_name, "uint", 64);
-                    if (bits > 64) return error.UnsupportedAbiType;
+                    if (bits > 64) {
+                        var text_buf: [32]u8 = undefined;
+                        const text = try formatUnsignedDecimalText(&text_buf, @intCast(value));
+                        try storeNumericTextValue(builder, allocator, param.type_name, text);
+                        return;
+                    }
                     try builder.storeUint(@intCast(value), bits);
                 }
             },
@@ -1695,7 +1768,12 @@ fn storeAbiJsonValue(
         return switch (json_value) {
             .integer => |value| {
                 const bits = try parseSizedTypeBits(param.type_name, "int", 64);
-                if (bits > 64) return error.UnsupportedAbiType;
+                if (bits > 64) {
+                    var text_buf: [32]u8 = undefined;
+                    const text = try formatSignedDecimalText(&text_buf, value);
+                    try storeNumericTextValue(builder, allocator, param.type_name, text);
+                    return;
+                }
                 try builder.storeInt(value, bits);
             },
             .string => |value| storeNumericTextValue(builder, allocator, param.type_name, value),
@@ -3217,6 +3295,46 @@ test "abi adapter supports signed large numeric text in body encoding" {
     try std.testing.expectEqualSlices(u8, &expected, try slice.loadBits(128));
 }
 
+test "abi adapter supports direct small values for large integer body encoding" {
+    const allocator = std.testing.allocator;
+    const expected_unsigned = [_]u8{
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x2A,
+    };
+    const expected_signed = [_]u8{
+        0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xF9,
+    };
+
+    const function = FunctionDef{
+        .name = "set_direct_big",
+        .opcode = 0x55667788,
+        .inputs = &.{
+            .{ .name = "nonce", .type_name = "uint128" },
+            .{ .name = "delta", .type_name = "int128" },
+        },
+        .outputs = &.{},
+    };
+
+    const built = try buildFunctionBodyBocAlloc(allocator, function, &.{
+        .{ .uint = 42 },
+        .{ .int = -7 },
+    });
+    defer allocator.free(built);
+
+    const root = try boc.deserializeBoc(allocator, built);
+    defer root.deinit(allocator);
+
+    var slice = root.toSlice();
+    try std.testing.expectEqual(@as(u64, 0x55667788), try slice.loadUint(32));
+    try std.testing.expectEqualSlices(u8, &expected_unsigned, try slice.loadBits(128));
+    try std.testing.expectEqualSlices(u8, &expected_signed, try slice.loadBits(128));
+}
+
 test "abi adapter supports big numeric json leaves in body encoding" {
     const allocator = std.testing.allocator;
     const expected_negative = [_]u8{0xFF} ** 16;
@@ -3249,6 +3367,51 @@ test "abi adapter supports big numeric json leaves in body encoding" {
     try std.testing.expectEqual(@as(u64, 0xCAFEBABE), try slice.loadUint(32));
     try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x34, 0x56, 0x78, 0x90, 0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56, 0x78, 0x90, 0xAB, 0xCD, 0xEF }, try slice.loadBits(128));
     try std.testing.expectEqualSlices(u8, &expected_negative, try slice.loadBits(128));
+}
+
+test "abi adapter supports small integer json leaves for large integer body encoding" {
+    const allocator = std.testing.allocator;
+    const expected_unsigned = [_]u8{
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x2A,
+    };
+    const expected_signed = [_]u8{
+        0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xF9,
+    };
+
+    const function = FunctionDef{
+        .name = "set_json_config",
+        .opcode = 0xCAFED00D,
+        .inputs = &.{
+            .{
+                .name = "config",
+                .type_name = "tuple",
+                .components = &.{
+                    .{ .name = "supply", .type_name = "uint128" },
+                    .{ .name = "delta", .type_name = "int128" },
+                },
+            },
+        },
+        .outputs = &.{},
+    };
+
+    const built = try buildFunctionBodyBocAlloc(allocator, function, &.{
+        .{ .json = "{\"supply\":42,\"delta\":-7}" },
+    });
+    defer allocator.free(built);
+
+    const root = try boc.deserializeBoc(allocator, built);
+    defer root.deinit(allocator);
+
+    var slice = root.toSlice();
+    try std.testing.expectEqual(@as(u64, 0xCAFED00D), try slice.loadUint(32));
+    try std.testing.expectEqualSlices(u8, &expected_unsigned, try slice.loadBits(128));
+    try std.testing.expectEqualSlices(u8, &expected_signed, try slice.loadBits(128));
 }
 
 test "abi adapter supports scalar and tuple arrays in body encoding" {
@@ -3410,6 +3573,66 @@ test "abi adapter supports large numeric text stack args" {
     try std.testing.expect(args.args[1] == .raw_json);
     try std.testing.expectEqualStrings("[\"num\",\"0x1234567890ABCDEF1234567890ABCDEF\"]", args.args[0].raw_json);
     try std.testing.expectEqualStrings("[\"num\",\"0x0102030405060708090A0B0C0D0E0F\"]", args.args[1].raw_json);
+}
+
+test "abi adapter supports direct small values for large integer stack args" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "lookup_direct_big",
+        \\      "inputs": [
+        \\        {"name": "nonce", "type": "uint128"},
+        \\        {"name": "delta", "type": "int128"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var abi = try parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer abi.deinit(allocator);
+
+    var args = try buildStackArgsFromAbiAlloc(allocator, &abi.abi, "lookup_direct_big", &.{
+        .{ .uint = 42 },
+        .{ .int = -7 },
+    });
+    defer args.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), args.args.len);
+    try std.testing.expect(args.args[0] == .raw_json);
+    try std.testing.expect(args.args[1] == .raw_json);
+    try std.testing.expectEqualStrings("[\"num\",\"0x2A\"]", args.args[0].raw_json);
+    try std.testing.expectEqualStrings("[\"num\",\"-0x07\"]", args.args[1].raw_json);
+}
+
+test "abi adapter supports direct u64 stack args above i64 max" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "lookup_u64",
+        \\      "inputs": [
+        \\        {"name": "value", "type": "uint64"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var abi = try parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer abi.deinit(allocator);
+
+    var args = try buildStackArgsFromAbiAlloc(allocator, &abi.abi, "lookup_u64", &.{
+        .{ .uint = std.math.maxInt(u64) },
+    });
+    defer args.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), args.args.len);
+    try std.testing.expect(args.args[0] == .raw_json);
+    try std.testing.expectEqualStrings("[\"num\",\"0xFFFFFFFFFFFFFFFF\"]", args.args[0].raw_json);
 }
 
 test "abi adapter supports big numeric json leaves in stack args" {
