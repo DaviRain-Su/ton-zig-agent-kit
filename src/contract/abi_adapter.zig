@@ -782,6 +782,12 @@ fn storeAbiValue(
         try builder.storeAddress(try abiValueAsText(value));
         return;
     }
+    if (fixedBytesLength(param.type_name)) |byte_len| {
+        const bytes = try abiValueAsBytes(value);
+        try validateFixedBytesLength(bytes.len, byte_len);
+        try builder.storeBits(bytes, @intCast(bytes.len * 8));
+        return;
+    }
     if (std.mem.eql(u8, param.type_name, "bytes") or std.mem.eql(u8, param.type_name, "string")) {
         const bytes = try abiValueAsBytes(value);
         try builder.storeBits(bytes, @intCast(bytes.len * 8));
@@ -876,6 +882,16 @@ fn abiValueToStackArgAlloc(
         return switch (value) {
             .text => |v| .{ .arg = .{ .address = v } },
             else => error.InvalidAbiArguments,
+        };
+    }
+
+    if (fixedBytesLength(param.type_name)) |byte_len| {
+        const bytes = try abiValueAsBytes(value);
+        try validateFixedBytesLength(bytes.len, byte_len);
+        const encoded = try buildBytesSliceBocAlloc(allocator, bytes);
+        return .{
+            .arg = .{ .slice = encoded },
+            .owned_buffer = encoded,
         };
     }
 
@@ -1068,6 +1084,42 @@ fn isNumericAbiType(type_name: []const u8) bool {
         std.mem.eql(u8, type_name, "coins") or
         std.mem.startsWith(u8, type_name, "uint") or
         std.mem.startsWith(u8, type_name, "int");
+}
+
+fn fixedBytesLength(type_name: []const u8) ?usize {
+    const trimmed = std.mem.trim(u8, type_name, " \t\r\n");
+
+    if (parseFixedBytesSuffix(trimmed, "bytes")) |value| return value;
+    if (parseFixedBytesSuffix(trimmed, "fixedbytes")) |value| return value;
+    if (parseFixedBytesSuffix(trimmed, "fixed_bytes")) |value| return value;
+
+    if (parseFixedBytesGeneric(trimmed, "fixedbytes<")) |value| return value;
+    if (parseFixedBytesGeneric(trimmed, "fixed_bytes<")) |value| return value;
+
+    return null;
+}
+
+fn parseFixedBytesSuffix(trimmed: []const u8, comptime prefix: []const u8) ?usize {
+    if (trimmed.len <= prefix.len) return null;
+    if (!std.ascii.eqlIgnoreCase(trimmed[0..prefix.len], prefix)) return null;
+
+    const digits = trimmed[prefix.len..];
+    if (digits.len == 0) return null;
+    for (digits) |char| {
+        if (!std.ascii.isDigit(char)) return null;
+    }
+
+    return std.fmt.parseInt(usize, digits, 10) catch null;
+}
+
+fn parseFixedBytesGeneric(trimmed: []const u8, comptime prefix: []const u8) ?usize {
+    if (!std.ascii.startsWithIgnoreCase(trimmed, prefix)) return null;
+    if (trimmed.len <= prefix.len or trimmed[trimmed.len - 1] != '>') return null;
+    return std.fmt.parseInt(usize, trimmed[prefix.len .. trimmed.len - 1], 10) catch null;
+}
+
+fn validateFixedBytesLength(actual_len: usize, expected_len: usize) !void {
+    if (actual_len != expected_len) return error.InvalidAbiArguments;
 }
 
 fn matchesAbiTypeBase(type_name: []const u8, base: []const u8) bool {
@@ -1411,6 +1463,14 @@ fn storeAbiJsonValue(
         };
     }
 
+    if (fixedBytesLength(param.type_name)) |byte_len| {
+        const decoded = try decodeJsonBytesAlloc(allocator, json_value);
+        defer decoded.deinit(allocator);
+        try validateFixedBytesLength(decoded.value.len, byte_len);
+        try builder.storeBits(decoded.value, @intCast(decoded.value.len * 8));
+        return;
+    }
+
     if (std.mem.eql(u8, param.type_name, "bytes")) {
         const decoded = try decodeJsonBytesAlloc(allocator, json_value);
         defer decoded.deinit(allocator);
@@ -1558,6 +1618,16 @@ fn writeAbiStackArgJson(
             },
             else => error.InvalidAbiArguments,
         };
+    }
+
+    if (fixedBytesLength(param.type_name)) |byte_len| {
+        const decoded = try decodeJsonBytesAlloc(allocator, json_value);
+        defer decoded.deinit(allocator);
+        try validateFixedBytesLength(decoded.value.len, byte_len);
+        const body_boc = try buildBytesSliceBocAlloc(allocator, decoded.value);
+        defer allocator.free(body_boc);
+        try writeStackBocArgJson(writer, allocator, "slice", body_boc);
+        return;
     }
 
     if (std.mem.eql(u8, param.type_name, "bytes") or std.mem.eql(u8, param.type_name, "string")) {
@@ -1971,6 +2041,16 @@ fn writeDecodedOutputJsonType(
         const text = try decodeStringOutputAlloc(allocator, entry);
         defer allocator.free(text);
         try writeJsonString(writer, text);
+        return;
+    }
+
+    if (fixedBytesLength(type_name)) |byte_len| {
+        const bytes = try decodeBytesOutputAlloc(allocator, entry);
+        defer allocator.free(bytes);
+        if (bytes.len != byte_len) return error.InvalidAbiOutputs;
+        const encoded = try base64EncodeAlloc(allocator, bytes);
+        defer allocator.free(encoded);
+        try writeJsonString(writer, encoded);
         return;
     }
 
@@ -2394,6 +2474,49 @@ test "abi adapter builds function body from abi by function name" {
     try std.testing.expectEqual(@as(u64, 1), try slice.loadUint(1));
     try std.testing.expectEqual(@as(u8, 'o'), try slice.loadUint8());
     try std.testing.expectEqual(@as(u8, 'k'), try slice.loadUint8());
+}
+
+test "abi adapter supports fixed bytes in body encoding" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "set_hashes",
+        \\      "opcode": "0x55667788",
+        \\      "inputs": [
+        \\        {"name": "hash", "type": "bytes32"},
+        \\        {"name": "salt", "type": "fixedbytes<4>"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var abi = try parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer abi.deinit(allocator);
+
+    const hash_bytes = [_]u8{
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
+        0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87,
+        0x98, 0xA9, 0xBA, 0xCB, 0xDC, 0xED, 0xFE, 0x0F,
+    };
+    const salt_bytes = [_]u8{ 0xCA, 0xFE, 0xBA, 0xBE };
+
+    const built = try buildFunctionBodyFromAbiAlloc(allocator, &abi.abi, "set_hashes", &.{
+        .{ .bytes = hash_bytes[0..] },
+        .{ .bytes = salt_bytes[0..] },
+    });
+    defer allocator.free(built);
+
+    const root = try boc.deserializeBoc(allocator, built);
+    defer root.deinit(allocator);
+
+    var slice = root.toSlice();
+    try std.testing.expectEqual(@as(u64, 0x55667788), try slice.loadUint(32));
+    try std.testing.expectEqualSlices(u8, hash_bytes[0..], try slice.loadBits(hash_bytes.len * 8));
+    try std.testing.expectEqualSlices(u8, salt_bytes[0..], try slice.loadBits(salt_bytes.len * 8));
 }
 
 test "abi adapter builds tuple body from json abi value" {
@@ -2840,6 +2963,46 @@ test "abi adapter supports optional and string stack args" {
     defer third.deinit(allocator);
     var third_slice = third.toSlice();
     try std.testing.expectEqualSlices(u8, &.{ 0xCA, 0xFE }, try third_slice.loadBits(16));
+}
+
+test "abi adapter supports fixed bytes stack args" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "lookup_hash",
+        \\      "inputs": [
+        \\        {"name": "hash", "type": "fixedbytes32"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var abi = try parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer abi.deinit(allocator);
+
+    const hash_bytes = [_]u8{
+        0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x11, 0x22, 0x33,
+        0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB,
+        0xCC, 0xDD, 0xEE, 0xFF, 0x13, 0x24, 0x35, 0x46,
+        0x57, 0x68, 0x79, 0x8A, 0x9B, 0xAC, 0xBD, 0xCE,
+    };
+
+    var args = try buildStackArgsFromAbiAlloc(allocator, &abi.abi, "lookup_hash", &.{
+        .{ .bytes = hash_bytes[0..] },
+    });
+    defer args.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), args.args.len);
+    try std.testing.expect(args.args[0] == .slice);
+    try std.testing.expect(args.owned_buffers[0] != null);
+
+    const cell_value = try boc.deserializeBoc(allocator, args.args[0].slice);
+    defer cell_value.deinit(allocator);
+    var slice = cell_value.toSlice();
+    try std.testing.expectEqualSlices(u8, hash_bytes[0..], try slice.loadBits(hash_bytes.len * 8));
 }
 
 test "abi adapter supports large numeric text stack args" {
@@ -3384,4 +3547,43 @@ test "abi adapter preserves large numeric outputs as strings" {
         "{\"total_supply\":\"0x1234567890ABCDEF1234567890ABCDEF\",\"balance\":\"340282366920938463463374607431768211455\"}",
         decoded,
     );
+}
+
+test "abi adapter decodes fixed bytes outputs as base64 strings" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "get_hash",
+        \\      "outputs": [
+        \\        {"name": "hash", "type": "bytes32"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var abi = try parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer abi.deinit(allocator);
+
+    const hash_bytes = [_]u8{
+        0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7,
+        0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF,
+        0xB0, 0xB1, 0xB2, 0xB3, 0xB4, 0xB5, 0xB6, 0xB7,
+        0xB8, 0xB9, 0xBA, 0xBB, 0xBC, 0xBD, 0xBE, 0xBF,
+    };
+    const hash_b64 = try base64EncodeAlloc(allocator, hash_bytes[0..]);
+    defer allocator.free(hash_b64);
+
+    const stack = [_]types.StackEntry{
+        .{ .bytes = hash_bytes[0..] },
+    };
+
+    const decoded = try decodeFunctionOutputsFromAbiJsonAlloc(allocator, &abi.abi, "get_hash", stack[0..]);
+    defer allocator.free(decoded);
+
+    const expected = try std.fmt.allocPrint(allocator, "{{\"hash\":\"{s}\"}}", .{hash_b64});
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, decoded);
 }

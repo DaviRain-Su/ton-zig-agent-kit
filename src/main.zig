@@ -2526,7 +2526,7 @@ fn buildInspectDecodedOutputsTemplateAlloc(
         try writeInspectJsonString(&writer.writer, name);
         try writer.writer.writeByte(':');
 
-        const value = try buildInspectJsonValueTemplateAlloc(allocator, param);
+        const value = try buildInspectOutputValueTemplateAlloc(allocator, param);
         defer allocator.free(value);
         try writer.writer.writeAll(value);
     }
@@ -2567,7 +2567,7 @@ fn buildInspectCliValueTemplateAlloc(
         return allocator.dupe(u8, "str:text");
     }
 
-    if (std.mem.eql(u8, param.type_name, "bytes")) {
+    if (std.mem.eql(u8, param.type_name, "bytes") or inspectFixedBytesLength(param.type_name) != null) {
         return allocator.dupe(u8, "hex:CAFE");
     }
 
@@ -2612,12 +2612,53 @@ fn buildInspectJsonValueTemplateAlloc(
         return allocator.dupe(u8, "\"text\"");
     }
 
-    if (std.mem.eql(u8, param.type_name, "bytes")) {
+    if (std.mem.eql(u8, param.type_name, "bytes") or inspectFixedBytesLength(param.type_name) != null) {
         return allocator.dupe(u8, "{\"hex\":\"CAFE\"}");
     }
 
     if (inspectIsCellLikeType(param.type_name)) {
         return allocator.dupe(u8, "{\"boc\":\"<base64_boc>\"}");
+    }
+
+    return allocator.dupe(u8, "null");
+}
+
+fn buildInspectOutputValueTemplateAlloc(
+    allocator: std.mem.Allocator,
+    param: contract_mod.abi_adapter.ParamDef,
+) anyerror![]u8 {
+    if (inspectOptionalInnerType(param.type_name) != null) {
+        return allocator.dupe(u8, "null");
+    }
+
+    if (inspectArrayInnerType(param.type_name)) |inner_type| {
+        const value = try buildInspectOutputValueTemplateAlloc(allocator, inspectParamWithType(param, inner_type));
+        defer allocator.free(value);
+        return std.fmt.allocPrint(allocator, "[{s}]", .{value});
+    }
+
+    if (inspectIsCompositeParam(param)) {
+        return buildInspectCompositeOutputTemplateAlloc(allocator, param.components);
+    }
+
+    if (inspectIsNumericType(param.type_name)) {
+        return allocator.dupe(u8, if (std.mem.eql(u8, param.type_name, "bool")) "true" else "0");
+    }
+
+    if (std.mem.eql(u8, param.type_name, "address")) {
+        return allocator.dupe(u8, "\"0:...\"");
+    }
+
+    if (std.mem.eql(u8, param.type_name, "string")) {
+        return allocator.dupe(u8, "\"text\"");
+    }
+
+    if (std.mem.eql(u8, param.type_name, "bytes") or inspectFixedBytesLength(param.type_name) != null) {
+        return allocator.dupe(u8, "\"<base64_bytes>\"");
+    }
+
+    if (inspectIsCellLikeType(param.type_name)) {
+        return allocator.dupe(u8, "\"<base64_boc>\"");
     }
 
     return allocator.dupe(u8, "null");
@@ -2654,6 +2695,46 @@ fn buildInspectCompositeJsonTemplateAlloc(
         for (components, 0..) |component, idx| {
             if (idx != 0) try writer.writer.writeByte(',');
             const value = try buildInspectJsonValueTemplateAlloc(allocator, component);
+            defer allocator.free(value);
+            try writer.writer.writeAll(value);
+        }
+        try writer.writer.writeByte(']');
+    }
+
+    return try writer.toOwnedSlice();
+}
+
+fn buildInspectCompositeOutputTemplateAlloc(
+    allocator: std.mem.Allocator,
+    components: []const contract_mod.abi_adapter.ParamDef,
+) anyerror![]u8 {
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    var has_named_components = true;
+    for (components) |component| {
+        if (component.name.len == 0) {
+            has_named_components = false;
+            break;
+        }
+    }
+
+    if (has_named_components) {
+        try writer.writer.writeByte('{');
+        for (components, 0..) |component, idx| {
+            if (idx != 0) try writer.writer.writeByte(',');
+            try writeInspectJsonString(&writer.writer, component.name);
+            try writer.writer.writeByte(':');
+            const value = try buildInspectOutputValueTemplateAlloc(allocator, component);
+            defer allocator.free(value);
+            try writer.writer.writeAll(value);
+        }
+        try writer.writer.writeByte('}');
+    } else {
+        try writer.writer.writeByte('[');
+        for (components, 0..) |component, idx| {
+            if (idx != 0) try writer.writer.writeByte(',');
+            const value = try buildInspectOutputValueTemplateAlloc(allocator, component);
             defer allocator.free(value);
             try writer.writer.writeAll(value);
         }
@@ -2703,6 +2784,38 @@ fn inspectIsCellLikeType(type_name: []const u8) bool {
         inspectMatchesAbiTypeBase(type_name, "map_ref") or
         inspectMatchesAbiTypeBase(type_name, "hashmap_ref") or
         inspectMatchesAbiTypeBase(type_name, "hashmape_ref");
+}
+
+fn inspectFixedBytesLength(type_name: []const u8) ?usize {
+    const trimmed = std.mem.trim(u8, type_name, " \t\r\n");
+
+    if (inspectParseFixedBytesSuffix(trimmed, "bytes")) |value| return value;
+    if (inspectParseFixedBytesSuffix(trimmed, "fixedbytes")) |value| return value;
+    if (inspectParseFixedBytesSuffix(trimmed, "fixed_bytes")) |value| return value;
+
+    if (inspectParseFixedBytesGeneric(trimmed, "fixedbytes<")) |value| return value;
+    if (inspectParseFixedBytesGeneric(trimmed, "fixed_bytes<")) |value| return value;
+
+    return null;
+}
+
+fn inspectParseFixedBytesSuffix(trimmed: []const u8, comptime prefix: []const u8) ?usize {
+    if (trimmed.len <= prefix.len) return null;
+    if (!std.ascii.eqlIgnoreCase(trimmed[0..prefix.len], prefix)) return null;
+
+    const digits = trimmed[prefix.len..];
+    if (digits.len == 0) return null;
+    for (digits) |char| {
+        if (!std.ascii.isDigit(char)) return null;
+    }
+
+    return std.fmt.parseInt(usize, digits, 10) catch null;
+}
+
+fn inspectParseFixedBytesGeneric(trimmed: []const u8, comptime prefix: []const u8) ?usize {
+    if (!std.ascii.startsWithIgnoreCase(trimmed, prefix)) return null;
+    if (trimmed.len <= prefix.len or trimmed[trimmed.len - 1] != '>') return null;
+    return std.fmt.parseInt(usize, trimmed[prefix.len .. trimmed.len - 1], 10) catch null;
 }
 
 fn inspectMatchesAbiTypeBase(type_name: []const u8, base: []const u8) bool {
@@ -3165,6 +3278,20 @@ test "inspect named cli template labels arguments" {
     );
 }
 
+test "inspect cli template treats fixed bytes like hex input" {
+    const allocator = std.testing.allocator;
+
+    const param = contract_mod.abi_adapter.ParamDef{
+        .name = "hash",
+        .type_name = "bytes32",
+    };
+
+    const template = try buildInspectCliValueTemplateAlloc(allocator, param);
+    defer allocator.free(template);
+
+    try std.testing.expectEqualStrings("hex:CAFE", template);
+}
+
 test "inspect decoded outputs template builds nested json" {
     const allocator = std.testing.allocator;
 
@@ -3176,6 +3303,8 @@ test "inspect decoded outputs template builds nested json" {
             .components = &.{
                 .{ .name = "owner", .type_name = "address" },
                 .{ .name = "tags", .type_name = "string[]" },
+                .{ .name = "hash", .type_name = "bytes32" },
+                .{ .name = "code", .type_name = "cell" },
             },
         },
     };
@@ -3184,7 +3313,7 @@ test "inspect decoded outputs template builds nested json" {
     defer allocator.free(template);
 
     try std.testing.expectEqualStrings(
-        "{\"ok\":true,\"payload\":{\"owner\":\"EQ...\",\"tags\":[\"text\"]}}",
+        "{\"ok\":true,\"payload\":{\"owner\":\"0:...\",\"tags\":[\"text\"],\"hash\":\"<base64_bytes>\",\"code\":\"<base64_boc>\"}}",
         template,
     );
 }
