@@ -4,6 +4,7 @@ const std = @import("std");
 const types = @import("../core/types.zig");
 const cell = @import("../core/cell.zig");
 const boc = @import("../core/boc.zig");
+const external_message = @import("../core/external_message.zig");
 const http_client = @import("../core/http_client.zig");
 const provider_mod = @import("../core/provider.zig");
 
@@ -44,6 +45,21 @@ pub fn GenericContractType(comptime ClientType: type) type {
 
         pub fn sendMessageHex(self: *@This(), body_hex: []const u8) !types.SendBocResponse {
             return self.client.sendBocHex(body_hex);
+        }
+
+        pub fn buildExternalMessageBocAlloc(self: *@This(), body: []const u8, state_init_boc: ?[]const u8) ![]u8 {
+            return external_message.buildExternalIncomingMessageBocAlloc(
+                self.client.allocator,
+                self.address,
+                body,
+                state_init_boc,
+            );
+        }
+
+        pub fn sendExternalMessage(self: *@This(), body: []const u8, state_init_boc: ?[]const u8) !types.SendBocResponse {
+            const ext_boc = try self.buildExternalMessageBocAlloc(body, state_init_boc);
+            defer self.client.allocator.free(ext_boc);
+            return self.client.sendBoc(ext_boc);
         }
     };
 }
@@ -458,6 +474,58 @@ test "stack entry helpers support big unsigned values" {
     const text = try stackEntryAsNumberTextAlloc(allocator, &entry);
     defer allocator.free(text);
     try std.testing.expectEqualStrings("0x1234567890ABCDEF1234567890ABCDEF", text);
+}
+
+test "generic contract sendExternalMessage wraps body for destination" {
+    const allocator = std.testing.allocator;
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+        last_boc: ?[]u8 = null,
+
+        pub fn sendBoc(self: *@This(), payload: []const u8) !types.SendBocResponse {
+            self.last_boc = try self.allocator.dupe(u8, payload);
+            return .{
+                .hash = try self.allocator.dupe(u8, "external"),
+                .lt = 321,
+            };
+        }
+    };
+
+    var client = FakeClient{ .allocator = allocator };
+    defer if (client.last_boc) |value| allocator.free(value);
+
+    var builder = cell.Builder.init();
+    try builder.storeUint(0xCAFE, 16);
+    const body_cell = try builder.toCell(allocator);
+    defer body_cell.deinit(allocator);
+    const body_boc = try boc.serializeBoc(allocator, body_cell);
+    defer allocator.free(body_boc);
+
+    const Contract = GenericContractType(*FakeClient);
+    var contract = Contract.init(&client, "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8");
+
+    const response = try contract.sendExternalMessage(body_boc, null);
+    defer allocator.free(response.hash);
+
+    try std.testing.expectEqual(@as(i64, 321), response.lt);
+    try std.testing.expect(client.last_boc != null);
+
+    const ext_msg = try boc.deserializeBoc(allocator, client.last_boc.?);
+    defer ext_msg.deinit(allocator);
+
+    var slice = ext_msg.toSlice();
+    try std.testing.expectEqual(@as(u64, 0b10), try slice.loadUint(2));
+    try std.testing.expectEqual(@as(u64, 0), try slice.loadUint(2));
+    const dest = try slice.loadAddress();
+    try std.testing.expectEqual(@as(i8, 0), dest.workchain);
+    try std.testing.expectEqual(@as(u8, 0x83), dest.raw[0]);
+    _ = try slice.loadCoins();
+    try std.testing.expectEqual(@as(u64, 0), try slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 1), try slice.loadUint(1));
+    const body_ref = try slice.loadRef();
+    var body_slice = body_ref.toSlice();
+    try std.testing.expectEqual(@as(u64, 0xCAFE), try body_slice.loadUint(16));
 }
 
 test {

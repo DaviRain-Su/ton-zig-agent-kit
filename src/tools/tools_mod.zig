@@ -4,6 +4,7 @@
 const std = @import("std");
 const address_mod = @import("../core/address.zig");
 const body_builder = @import("../core/body_builder.zig");
+const external_message = @import("../core/external_message.zig");
 const core_types = @import("../core/types.zig");
 const http_client = @import("../core/http_client.zig");
 const provider_mod = @import("../core/provider.zig");
@@ -1136,6 +1137,162 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             return self.sendContractMessage(destination, amount, body_boc);
         }
 
+        /// Send an external incoming message directly to a contract, without wallet wrapping.
+        pub fn sendExternalMessage(
+            self: *@This(),
+            destination: []const u8,
+            body_boc: []const u8,
+            state_init_boc: ?[]const u8,
+        ) !tools_types.SendResult {
+            const ext_boc = external_message.buildExternalIncomingMessageBocAlloc(
+                self.allocator,
+                destination,
+                body_boc,
+                state_init_boc,
+            ) catch |err| {
+                return tools_types.SendResult{
+                    .hash = "",
+                    .lt = 0,
+                    .destination = destination,
+                    .amount = 0,
+                    .success = false,
+                    .error_message = @errorName(err),
+                };
+            };
+            defer self.allocator.free(ext_boc);
+
+            const result = self.client.sendBoc(ext_boc) catch |err| {
+                return tools_types.SendResult{
+                    .hash = "",
+                    .lt = 0,
+                    .destination = destination,
+                    .amount = 0,
+                    .success = false,
+                    .error_message = @errorName(err),
+                };
+            };
+
+            return tools_types.SendResult{
+                .hash = result.hash,
+                .lt = result.lt,
+                .destination = destination,
+                .amount = 0,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
+        /// Build and send an external incoming message body from a function schema.
+        pub fn sendExternalMessageFunction(
+            self: *@This(),
+            destination: []const u8,
+            function: abi_adapter.FunctionDef,
+            values: []const abi_adapter.AbiValue,
+            state_init_boc: ?[]const u8,
+        ) !tools_types.SendResult {
+            const body_boc = abi_adapter.buildFunctionBodyBocAlloc(self.allocator, function, values) catch |err| {
+                return tools_types.SendResult{
+                    .hash = "",
+                    .lt = 0,
+                    .destination = destination,
+                    .amount = 0,
+                    .success = false,
+                    .error_message = @errorName(err),
+                };
+            };
+            defer self.allocator.free(body_boc);
+
+            return self.sendExternalMessage(destination, body_boc, state_init_boc);
+        }
+
+        /// Build and send an external incoming message body from an ABI document.
+        pub fn sendExternalMessageAbi(
+            self: *@This(),
+            destination: []const u8,
+            abi_json: []const u8,
+            function_name: []const u8,
+            values: []const abi_adapter.AbiValue,
+            state_init_boc: ?[]const u8,
+        ) !tools_types.SendResult {
+            var abi = abi_adapter.loadAbiInfoSourceAlloc(self.allocator, abi_json) catch |err| {
+                return tools_types.SendResult{
+                    .hash = "",
+                    .lt = 0,
+                    .destination = destination,
+                    .amount = 0,
+                    .success = false,
+                    .error_message = @errorName(err),
+                };
+            };
+            defer abi.deinit(self.allocator);
+
+            const body_boc = abi_adapter.buildFunctionBodyFromAbiAlloc(
+                self.allocator,
+                &abi.abi,
+                function_name,
+                values,
+            ) catch |err| {
+                return tools_types.SendResult{
+                    .hash = "",
+                    .lt = 0,
+                    .destination = destination,
+                    .amount = 0,
+                    .success = false,
+                    .error_message = @errorName(err),
+                };
+            };
+            defer self.allocator.free(body_boc);
+
+            return self.sendExternalMessage(destination, body_boc, state_init_boc);
+        }
+
+        /// Discover ABI on-chain, build a body, and send it as an external incoming message.
+        pub fn sendExternalMessageAuto(
+            self: *@This(),
+            destination: []const u8,
+            function_name: []const u8,
+            values: []const abi_adapter.AbiValue,
+            state_init_boc: ?[]const u8,
+        ) !tools_types.SendResult {
+            var abi = abi_adapter.queryAbiDocumentAlloc(self.client, destination) catch |err| {
+                return tools_types.SendResult{
+                    .hash = "",
+                    .lt = 0,
+                    .destination = destination,
+                    .amount = 0,
+                    .success = false,
+                    .error_message = @errorName(err),
+                };
+            } orelse return tools_types.SendResult{
+                .hash = "",
+                .lt = 0,
+                .destination = destination,
+                .amount = 0,
+                .success = false,
+                .error_message = "AbiNotFound",
+            };
+            defer abi.deinit(self.allocator);
+
+            const body_boc = abi_adapter.buildFunctionBodyFromAbiAlloc(
+                self.allocator,
+                &abi.abi,
+                function_name,
+                values,
+            ) catch |err| {
+                return tools_types.SendResult{
+                    .hash = "",
+                    .lt = 0,
+                    .destination = destination,
+                    .amount = 0,
+                    .success = false,
+                    .error_message = @errorName(err),
+                };
+            };
+            defer self.allocator.free(body_boc);
+
+            return self.sendExternalMessage(destination, body_boc, state_init_boc);
+        }
+
         /// Deploy a contract by sending StateInit and an optional body.
         pub fn sendContractDeploy(
             self: *@This(),
@@ -1439,6 +1596,44 @@ test "agent tools sendTransfer auto-derives wallet and falls back to initial dep
     try std.testing.expect(client.last_boc != null);
 }
 
+test "agent tools sendExternalMessage wraps body without wallet" {
+    const allocator = std.testing.allocator;
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+        last_boc: ?[]u8 = null,
+
+        pub fn sendBoc(self: *@This(), payload: []const u8) !core_types.SendBocResponse {
+            self.last_boc = try self.allocator.dupe(u8, payload);
+            return .{
+                .hash = try self.allocator.dupe(u8, "fake"),
+                .lt = 987,
+            };
+        }
+    };
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    var client = FakeClient{ .allocator = allocator };
+    defer if (client.last_boc) |value| allocator.free(value);
+
+    const body_boc = try body_builder.buildBodyBocAlloc(allocator, &.{
+        .{ .uint = .{ .bits = 16, .value = 0xCAFE } },
+    });
+    defer allocator.free(body_boc);
+
+    var tools = FakeTools.init(allocator, &client, .{ .rpc_url = "https://example.invalid" });
+    const result = try tools.sendExternalMessage(
+        "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+        body_boc,
+        null,
+    );
+    defer allocator.free(result.hash);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqual(@as(i64, 987), result.lt);
+    try std.testing.expect(client.last_boc != null);
+}
+
 test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.runGetMethod;
     _ = AgentTools.runGetMethodAbi;
@@ -1450,6 +1645,10 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.sendContractMessageFunction;
     _ = AgentTools.sendContractMessageAbi;
     _ = AgentTools.sendContractMessageAuto;
+    _ = AgentTools.sendExternalMessage;
+    _ = AgentTools.sendExternalMessageFunction;
+    _ = AgentTools.sendExternalMessageAbi;
+    _ = AgentTools.sendExternalMessageAuto;
     _ = AgentTools.sendContractDeploy;
     _ = AgentTools.sendContractDeployAuto;
     _ = AgentTools.deployWalletSelf;
@@ -1466,6 +1665,9 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = ProviderAgentTools.getNFTInfo;
     _ = ProviderAgentTools.getNFTCollectionInfo;
     _ = ProviderAgentTools.sendTransfer;
+    _ = ProviderAgentTools.sendExternalMessage;
+    _ = ProviderAgentTools.sendExternalMessageAbi;
+    _ = ProviderAgentTools.sendExternalMessageAuto;
     _ = ProviderAgentTools.deployWalletSelf;
     _ = ProviderAgentTools.sendInitialTransfer;
     _ = AddressResult;

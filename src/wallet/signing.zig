@@ -5,6 +5,7 @@ const std = @import("std");
 const types = @import("../core/types.zig");
 const cell = @import("../core/cell.zig");
 const boc = @import("../core/boc.zig");
+const external_message = @import("../core/external_message.zig");
 const state_init = @import("../core/state_init.zig");
 const generic_contract = @import("../contract/contract.zig");
 
@@ -298,26 +299,12 @@ fn createExternalIncomingMessageCell(
     body_cell: *cell.Cell,
     state_init_boc: ?[]const u8,
 ) !*cell.Cell {
-    var builder = cell.Builder.init();
-
-    try builder.storeUint(0b10, 2); // ext_in_msg_info$10
-    try builder.storeUint(0, 2); // src: addr_none (MsgAddressExt)
-    try builder.storeAddress(wallet_addr);
-    try builder.storeCoins(0); // import_fee
-
-    if (state_init_boc) |value| {
-        const state_init_cell = try boc.deserializeBoc(allocator, value);
-        try builder.storeUint(1, 1); // state_init present
-        try builder.storeUint(1, 1); // state_init in ref
-        try builder.storeRef(state_init_cell);
-    } else {
-        try builder.storeUint(0, 1); // state_init absent
-    }
-
-    try builder.storeUint(1, 1); // body in ref
-    try builder.storeRef(body_cell);
-
-    return builder.toCell(allocator);
+    return external_message.buildExternalIncomingMessageCellAlloc(
+        allocator,
+        wallet_addr,
+        body_cell,
+        state_init_boc,
+    );
 }
 
 fn createWalletV4ExternalMessageWithId(

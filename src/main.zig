@@ -523,6 +523,183 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "sendExternal") or std.mem.eql(u8, command, "send-external")) {
+        if (args.len < 4) {
+            std.debug.print("Usage: ton-zig-agent-kit sendExternal <destination> <body_b64> [state_init_b64|none]\n", .{});
+            return;
+        }
+
+        const destination = args[2];
+        const body_boc = try decodeBase64FlexibleAlloc(allocator, args[3]);
+        defer allocator.free(body_boc);
+
+        const state_init_boc = if (args.len >= 5 and !std.mem.eql(u8, args[4], "none"))
+            try decodeBase64FlexibleAlloc(allocator, args[4])
+        else
+            null;
+        defer if (state_init_boc) |value| allocator.free(value);
+
+        const ext_boc = try ton_zig_agent_kit.core.external_message.buildExternalIncomingMessageBocAlloc(
+            allocator,
+            destination,
+            body_boc,
+            state_init_boc,
+        );
+        defer allocator.free(ext_boc);
+
+        var provider = try initDefaultProvider(allocator);
+        var result = try provider.sendBoc(ext_boc);
+        defer provider.freeSendBocResponse(&result);
+
+        std.debug.print("Submitted external incoming message:\n", .{});
+        std.debug.print("  Destination: {s}\n", .{destination});
+        std.debug.print("  Hash: {s}\n", .{result.hash});
+        std.debug.print("  LT: {d}\n", .{result.lt});
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "sendExternalHex") or std.mem.eql(u8, command, "send-external-hex")) {
+        if (args.len < 4) {
+            std.debug.print("Usage: ton-zig-agent-kit sendExternalHex <destination> <body_hex> [state_init_hex|none]\n", .{});
+            return;
+        }
+
+        const destination = args[2];
+        const body_boc = try hexToBytes(allocator, args[3]);
+        defer allocator.free(body_boc);
+
+        const state_init_boc = if (args.len >= 5 and !std.mem.eql(u8, args[4], "none"))
+            try hexToBytes(allocator, args[4])
+        else
+            null;
+        defer if (state_init_boc) |value| allocator.free(value);
+
+        const ext_boc = try ton_zig_agent_kit.core.external_message.buildExternalIncomingMessageBocAlloc(
+            allocator,
+            destination,
+            body_boc,
+            state_init_boc,
+        );
+        defer allocator.free(ext_boc);
+
+        var provider = try initDefaultProvider(allocator);
+        var result = try provider.sendBoc(ext_boc);
+        defer provider.freeSendBocResponse(&result);
+
+        std.debug.print("Submitted external incoming message:\n", .{});
+        std.debug.print("  Destination: {s}\n", .{destination});
+        std.debug.print("  Hash: {s}\n", .{result.hash});
+        std.debug.print("  LT: {d}\n", .{result.lt});
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "sendExternalAbi") or std.mem.eql(u8, command, "send-external-abi")) {
+        if (args.len < 6) {
+            std.debug.print("Usage: ton-zig-agent-kit sendExternalAbi <destination> <state_init_b64|none> <abi_json|@file|file://|http(s)://|ipfs://> <function_name_or_signature> [values...]\n", .{});
+            return;
+        }
+
+        const destination = args[2];
+        const state_init_boc = if (!std.mem.eql(u8, args[3], "none"))
+            try decodeBase64FlexibleAlloc(allocator, args[3])
+        else
+            null;
+        defer if (state_init_boc) |value| allocator.free(value);
+
+        const function_selector = args[5];
+
+        var abi = try contract_mod.abi_adapter.loadAbiInfoSourceAlloc(allocator, args[4]);
+        defer abi.deinit(allocator);
+
+        const function = try resolveCliAbiFunction(&abi.abi, function_selector, args[6..]);
+
+        var parsed_values = try parseCliAbiValuesForParams(allocator, function.inputs, args[6..]);
+        defer parsed_values.deinit(allocator);
+
+        const body_boc = try contract_mod.abi_adapter.buildFunctionBodyBocAlloc(
+            allocator,
+            function.*,
+            parsed_values.values,
+        );
+        defer allocator.free(body_boc);
+
+        const ext_boc = try ton_zig_agent_kit.core.external_message.buildExternalIncomingMessageBocAlloc(
+            allocator,
+            destination,
+            body_boc,
+            state_init_boc,
+        );
+        defer allocator.free(ext_boc);
+
+        var provider = try initDefaultProvider(allocator);
+        var result = try provider.sendBoc(ext_boc);
+        defer provider.freeSendBocResponse(&result);
+
+        std.debug.print("Submitted external ABI message:\n", .{});
+        std.debug.print("  Destination: {s}\n", .{destination});
+        std.debug.print("  ABI version: {s}\n", .{abi.abi.version});
+        std.debug.print("  Function: {s}\n", .{function_selector});
+        std.debug.print("  Hash: {s}\n", .{result.hash});
+        std.debug.print("  LT: {d}\n", .{result.lt});
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "sendExternalAutoAbi") or std.mem.eql(u8, command, "send-external-auto-abi")) {
+        if (args.len < 5) {
+            std.debug.print("Usage: ton-zig-agent-kit sendExternalAutoAbi <destination> <state_init_b64|none> <function_name_or_signature> [values...]\n", .{});
+            return;
+        }
+
+        const destination = args[2];
+        const state_init_boc = if (!std.mem.eql(u8, args[3], "none"))
+            try decodeBase64FlexibleAlloc(allocator, args[3])
+        else
+            null;
+        defer if (state_init_boc) |value| allocator.free(value);
+
+        const function_selector = args[4];
+
+        var provider = try initDefaultProvider(allocator);
+
+        var abi = (try contract_mod.abi_adapter.queryAbiDocumentAlloc(&provider, destination)) orelse {
+            std.debug.print("ABI document not found for {s}\n", .{destination});
+            return;
+        };
+        defer abi.deinit(allocator);
+
+        const function = try resolveCliAbiFunction(&abi.abi, function_selector, args[5..]);
+
+        var parsed_values = try parseCliAbiValuesForParams(allocator, function.inputs, args[5..]);
+        defer parsed_values.deinit(allocator);
+
+        const body_boc = try contract_mod.abi_adapter.buildFunctionBodyBocAlloc(
+            allocator,
+            function.*,
+            parsed_values.values,
+        );
+        defer allocator.free(body_boc);
+
+        const ext_boc = try ton_zig_agent_kit.core.external_message.buildExternalIncomingMessageBocAlloc(
+            allocator,
+            destination,
+            body_boc,
+            state_init_boc,
+        );
+        defer allocator.free(ext_boc);
+
+        var result = try provider.sendBoc(ext_boc);
+        defer provider.freeSendBocResponse(&result);
+
+        std.debug.print("Submitted external ABI message:\n", .{});
+        std.debug.print("  Destination: {s}\n", .{destination});
+        std.debug.print("  ABI source: {s}\n", .{abi.abi.uri orelse "(embedded)"});
+        std.debug.print("  ABI version: {s}\n", .{abi.abi.version});
+        std.debug.print("  Function: {s}\n", .{function_selector});
+        std.debug.print("  Hash: {s}\n", .{result.hash});
+        std.debug.print("  LT: {d}\n", .{result.lt});
+        return;
+    }
+
     if (std.mem.eql(u8, command, "parseAddress") or std.mem.eql(u8, command, "addr")) {
         if (args.len < 3) {
             std.debug.print("Usage: ton-zig-agent-kit parseAddress <address>\n", .{});
@@ -773,6 +950,46 @@ pub fn main() !void {
             _ = std.base64.standard.Encoder.encode(encoded, built);
 
             std.debug.print("Built StateInit BoC:\n", .{});
+            std.debug.print("  Base64: {s}\n", .{encoded});
+            std.debug.print("  Hex: ", .{});
+            for (built) |byte| {
+                std.debug.print("{X:0>2}", .{byte});
+            }
+            std.debug.print("\n", .{});
+            return;
+        }
+
+        if (std.mem.eql(u8, cell_cmd, "build-external")) {
+            if (args.len < 5) {
+                std.debug.print("Usage: ton-zig-agent-kit cell build-external <destination> <body_b64> [state_init_b64|none]\n", .{});
+                return;
+            }
+
+            const destination = args[3];
+            const body_boc = try decodeBase64FlexibleAlloc(allocator, args[4]);
+            defer allocator.free(body_boc);
+
+            const state_init_boc = if (args.len >= 6 and !std.mem.eql(u8, args[5], "none"))
+                try decodeBase64FlexibleAlloc(allocator, args[5])
+            else
+                null;
+            defer if (state_init_boc) |value| allocator.free(value);
+
+            const built = try ton_zig_agent_kit.core.external_message.buildExternalIncomingMessageBocAlloc(
+                allocator,
+                destination,
+                body_boc,
+                state_init_boc,
+            );
+            defer allocator.free(built);
+
+            const encoded_len = std.base64.standard.Encoder.calcSize(built.len);
+            const encoded = try allocator.alloc(u8, encoded_len);
+            defer allocator.free(encoded);
+            _ = std.base64.standard.Encoder.encode(encoded, built);
+
+            std.debug.print("Built external incoming message BoC:\n", .{});
+            std.debug.print("  Destination: {s}\n", .{destination});
             std.debug.print("  Base64: {s}\n", .{encoded});
             std.debug.print("  Hex: ", .{});
             for (built) |byte| {
@@ -3212,6 +3429,10 @@ fn printUsage() !void {
     std.debug.print("    typed args: null, int:<n>, addr:<addr>, cell:<b64>, slice:<b64>, builder:<b64>, cellhex:<hex>, slicehex:<hex>, builderhex:<hex>\n", .{});
     std.debug.print("  ton-zig-agent-kit sendBoc <boc_base64>          Submit raw BoC to the network\n", .{});
     std.debug.print("  ton-zig-agent-kit sendBocHex <boc_hex>          Submit raw BoC hex to the network\n", .{});
+    std.debug.print("  ton-zig-agent-kit sendExternal <dest> <body_b64> [state_init_b64|none]  Wrap a body in ext_in and submit it\n", .{});
+    std.debug.print("  ton-zig-agent-kit sendExternalHex <dest> <body_hex> [state_init_hex|none]  Wrap a hex body in ext_in and submit it\n", .{});
+    std.debug.print("  ton-zig-agent-kit sendExternalAbi <dest> <state_init_b64|none> <abi_source> <function_or_signature> [values...]  Build ABI body and submit external message\n", .{});
+    std.debug.print("  ton-zig-agent-kit sendExternalAutoAbi <dest> <state_init_b64|none> <function_or_signature> [values...]  Discover ABI, build body, and submit external message\n", .{});
     std.debug.print("  ton-zig-agent-kit parseAddress <address>        Parse TON address\n", .{});
     std.debug.print("  ton-zig-agent-kit createInvoice <dest> <amount>  Create payment invoice\n", .{});
     std.debug.print("\nCell/Builder/Slice operations:\n", .{});
@@ -3222,6 +3443,7 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit cell build-function <function_json> <values...>  Build body from function schema\n", .{});
     std.debug.print("  ton-zig-agent-kit cell build-abi <abi_json|@file|file://|http(s)://|ipfs://> <function_or_signature> <values...>  Build body from ABI doc\n", .{});
     std.debug.print("  ton-zig-agent-kit cell build-state-init <code_b64|none> [data_b64|none]  Build StateInit BoC\n", .{});
+    std.debug.print("  ton-zig-agent-kit cell build-external <dest> <body_b64> [state_init_b64|none]  Build external incoming message BoC\n", .{});
     std.debug.print("  ton-zig-agent-kit cell state-init-address <workchain> <state_init_b64>  Compute contract address from StateInit\n", .{});
     std.debug.print("    body ops: u<bits>:<v>, i<bits>:<v>, coins:<v>, addr:<addr>, bytes:<utf8>, hex:<hex>, ref:<b64 boc>, refhex:<hex boc>\n", .{});
     std.debug.print("    function values: null, u:<v>, i:<v>, num:<dec|0xhex>, str:<utf8>, addr:<addr>, json:<json|@file>, hex:<hex>, boc:<b64 boc>, bochex:<hex boc>\n", .{});
