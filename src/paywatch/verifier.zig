@@ -24,12 +24,13 @@ pub fn verifyPayment(
 ) !VerificationResult {
     // Get transactions for invoice address
     const txs = try client.getTransactions(invoice.address, 50);
+    defer client.freeTransactions(txs);
 
     for (txs) |tx| {
         if (try checkTransactionMatches(&tx, invoice)) {
             return VerificationResult{
                 .verified = true,
-                .tx_hash = tx.hash,
+                .tx_hash = try client.allocator.dupe(u8, tx.hash),
                 .tx_lt = tx.lt,
                 .amount = if (tx.in_msg) |msg| msg.value else null,
                 .sender = null, // TODO: format Address properly
@@ -59,31 +60,13 @@ pub fn checkTransactionMatches(
     const msg = tx.in_msg orelse return false;
 
     // Check amount matches
-    if (msg.value < invoice.amount) {
+    if (invoice.amount > 0 and msg.value < invoice.amount) {
         return false;
     }
 
-    // Check for matching comment in body
-    if (msg.body) |body_cell| {
-        var slice = body_cell.*.toSlice();
-
-        // Try to extract comment text
-        // Skip op code if present
-        if (slice.remainingBits() >= 32) {
-            const op = try slice.loadUint(32);
-            if (op == 0) { // Text comment
-                // Read remaining as text
-                const text_len = slice.remainingBits() / 8;
-                if (text_len > 0) {
-                    const text_bytes = try slice.loadBits(@intCast(text_len * 8));
-                    const text = std.mem.sliceTo(text_bytes, 0);
-
-                    // Check if invoice comment is in the text
-                    if (std.mem.indexOf(u8, text, invoice.comment) != null) {
-                        return true;
-                    }
-                }
-            }
+    if (try extractMessageComment(msg)) |comment| {
+        if (std.mem.indexOf(u8, comment, invoice.comment) != null) {
+            return true;
         }
     }
 
@@ -97,7 +80,7 @@ pub fn verifyByTxHash(
     invoice: *const invoice_mod.Invoice,
 ) !VerificationResult {
     // Look up transaction
-    const tx = try client.lookupTx(0, tx_hash) orelse return VerificationResult{
+    var tx = try client.lookupTx(0, tx_hash) orelse return VerificationResult{
         .verified = false,
         .tx_hash = null,
         .tx_lt = null,
@@ -106,12 +89,13 @@ pub fn verifyByTxHash(
         .confirmations = 0,
         .timestamp = std.time.timestamp(),
     };
+    defer client.freeTransaction(&tx);
 
     const matches = try checkTransactionMatches(&tx, invoice);
 
     return VerificationResult{
         .verified = matches,
-        .tx_hash = tx.hash,
+        .tx_hash = try client.allocator.dupe(u8, tx.hash),
         .tx_lt = tx.lt,
         .amount = if (tx.in_msg) |msg| msg.value else null,
         .sender = null, // TODO: format Address properly
@@ -139,6 +123,28 @@ pub fn batchVerifyPayments(
 /// Check if payment is confirmed (has enough confirmations)
 pub fn isConfirmed(result: *const VerificationResult, required_confirmations: u32) bool {
     return result.verified and result.confirmations >= required_confirmations;
+}
+
+fn extractMessageComment(msg: *const types.Message) !?[]const u8 {
+    if (msg.body) |body_cell| {
+        var slice = body_cell.toSlice();
+        if (slice.remainingBits() < 32) return null;
+
+        const op = try slice.loadUint(32);
+        if (op != 0) return null;
+
+        const text_bits = slice.remainingBits();
+        if (text_bits == 0) return "";
+        if (text_bits % 8 != 0) return null;
+
+        return try slice.loadBits(@intCast(text_bits));
+    }
+
+    if (msg.raw_body.len > 0) {
+        return msg.raw_body;
+    }
+
+    return null;
 }
 
 test "verification result" {

@@ -18,3 +18,12 @@ pub const TonError = types.TonError;
 pub const parseAddress = address.parseAddress;
 pub const serializeBoc = boc.serializeBoc;
 pub const deserializeBoc = boc.deserializeBoc;
+
+test {
+    _ = types;
+    _ = address;
+    _ = cell;
+    _ = boc;
+    _ = http_client;
+    _ = provider;
+}

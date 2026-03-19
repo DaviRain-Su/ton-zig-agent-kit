@@ -6,8 +6,10 @@ const TonError = ton_zig_agent_kit.core.TonError;
 const Cell = ton_zig_agent_kit.core.Cell;
 const Builder = ton_zig_agent_kit.core.Builder;
 const Slice = ton_zig_agent_kit.core.Slice;
+const StackEntry = ton_zig_agent_kit.core.types.StackEntry;
 const boc = ton_zig_agent_kit.core.boc;
 const signing = ton_zig_agent_kit.wallet.signing;
+const default_rpc_url = "https://toncenter.com/api/v2/jsonRPC";
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -40,7 +42,7 @@ pub fn main() !void {
             return;
         }
         const addr = args[2];
-        var client = try TonHttpClient.init(allocator, "https://tonapi.io", null);
+        var client = try TonHttpClient.init(allocator, default_rpc_url, null);
         defer client.deinit();
 
         const result = try client.getBalance(addr);
@@ -55,18 +57,58 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "runGetMethod") or std.mem.eql(u8, command, "get-method")) {
         if (args.len < 4) {
-            std.debug.print("Usage: ton-zig-agent-kit runGetMethod <address> <method>\n", .{});
+            std.debug.print("Usage: ton-zig-agent-kit runGetMethod <address> <method> [stack_json]\n", .{});
             return;
         }
         const addr = args[2];
         const method = args[3];
-        var client = try TonHttpClient.init(allocator, "https://tonapi.io", null);
+        const stack_json = if (args.len >= 5) args[4] else "[]";
+        var client = try TonHttpClient.init(allocator, default_rpc_url, null);
         defer client.deinit();
 
-        const result = try client.runGetMethod(addr, method, &.{});
+        var result = try client.runGetMethodJson(addr, method, stack_json);
+        defer client.freeRunGetMethodResponse(&result);
+
         std.debug.print("Address: {s}\n", .{addr});
         std.debug.print("Method: {s}\n", .{method});
-        std.debug.print("Exit code: {d}\n", .{result.exit_code});
+        std.debug.print("Stack JSON: {s}\n", .{stack_json});
+        printRunGetMethodResult(result);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "sendBoc") or std.mem.eql(u8, command, "send-boc")) {
+        if (args.len < 3) {
+            std.debug.print("Usage: ton-zig-agent-kit sendBoc <boc_base64>\n", .{});
+            return;
+        }
+
+        var client = try TonHttpClient.init(allocator, default_rpc_url, null);
+        defer client.deinit();
+
+        var result = try client.sendBocBase64(args[2]);
+        defer client.freeSendBocResponse(&result);
+
+        std.debug.print("Submitted BoC:\n", .{});
+        std.debug.print("  Hash: {s}\n", .{result.hash});
+        std.debug.print("  LT: {d}\n", .{result.lt});
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "sendBocHex") or std.mem.eql(u8, command, "send-boc-hex")) {
+        if (args.len < 3) {
+            std.debug.print("Usage: ton-zig-agent-kit sendBocHex <boc_hex>\n", .{});
+            return;
+        }
+
+        var client = try TonHttpClient.init(allocator, default_rpc_url, null);
+        defer client.deinit();
+
+        var result = try client.sendBocHex(args[2]);
+        defer client.freeSendBocResponse(&result);
+
+        std.debug.print("Submitted BoC:\n", .{});
+        std.debug.print("  Hash: {s}\n", .{result.hash});
+        std.debug.print("  LT: {d}\n", .{result.lt});
         return;
     }
 
@@ -221,7 +263,7 @@ pub fn main() !void {
                 return;
             }
             const wallet_addr = args[3];
-            var client = try TonHttpClient.init(allocator, "https://tonapi.io", null);
+            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
             defer client.deinit();
 
             const seqno = try signing.getSeqno(&client, wallet_addr);
@@ -238,7 +280,7 @@ pub fn main() !void {
             const dest = args[4];
             const amount = try std.fmt.parseInt(u64, args[5], 10);
 
-            var client = try TonHttpClient.init(allocator, "https://tonapi.io", null);
+            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
             defer client.deinit();
 
             // Generate keypair (in real usage, load from secure storage)
@@ -328,7 +370,7 @@ pub fn main() !void {
                 .status = .pending,
             };
 
-            var client = try TonHttpClient.init(allocator, "https://tonapi.io", null);
+            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
             defer client.deinit();
 
             const result = try ton_zig_agent_kit.paywatch.verifier.verifyPayment(&client, &invoice);
@@ -364,7 +406,7 @@ pub fn main() !void {
                 .status = .pending,
             };
 
-            var client = try TonHttpClient.init(allocator, "https://tonapi.io", null);
+            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
             defer client.deinit();
 
             std.debug.print("Waiting for payment (timeout: 30s)...\n", .{});
@@ -436,6 +478,49 @@ fn hexCharValue(c: u8) !u8 {
     };
 }
 
+fn printRunGetMethodResult(result: ton_zig_agent_kit.core.types.RunGetMethodResponse) void {
+    std.debug.print("Exit code: {d}\n", .{result.exit_code});
+
+    if (result.logs.len > 0) {
+        std.debug.print("Logs:\n{s}\n", .{result.logs});
+    }
+
+    if (result.stack.len == 0) {
+        std.debug.print("Stack: []\n", .{});
+        return;
+    }
+
+    std.debug.print("Stack:\n", .{});
+    for (result.stack, 0..) |entry, i| {
+        printIndent(2);
+        std.debug.print("[{d}] ", .{i});
+        printStackEntry(entry, 4);
+    }
+}
+
+fn printStackEntry(entry: StackEntry, indent: usize) void {
+    switch (entry) {
+        .number => |value| std.debug.print("number: {d}\n", .{value}),
+        .bytes => |value| std.debug.print("bytes/base64: {s}\n", .{value}),
+        .cell => |value| std.debug.print("cell(bits={d}, refs={d})\n", .{ value.bit_len, value.ref_cnt }),
+        .tuple => |items| {
+            std.debug.print("tuple[{d}]\n", .{items.len});
+            for (items, 0..) |child, i| {
+                printIndent(indent);
+                std.debug.print("[{d}] ", .{i});
+                printStackEntry(child, indent + 2);
+            }
+        },
+    }
+}
+
+fn printIndent(indent: usize) void {
+    var i: usize = 0;
+    while (i < indent) : (i += 1) {
+        std.debug.print(" ", .{});
+    }
+}
+
 fn printUsage() !void {
     std.debug.print("ton-zig-agent-kit v{s}\n", .{"0.0.1"});
     std.debug.print("A Zig-native TON contract toolkit for AI agents\n\n", .{});
@@ -443,7 +528,9 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit help                          Show this help\n", .{});
     std.debug.print("  ton-zig-agent-kit version                       Show version\n", .{});
     std.debug.print("  ton-zig-agent-kit getBalance <address>          Get TON balance\n", .{});
-    std.debug.print("  ton-zig-agent-kit runGetMethod <addr> <method>  Call get method\n", .{});
+    std.debug.print("  ton-zig-agent-kit runGetMethod <addr> <method> [stack_json]  Call any get method\n", .{});
+    std.debug.print("  ton-zig-agent-kit sendBoc <boc_base64>          Submit raw BoC to the network\n", .{});
+    std.debug.print("  ton-zig-agent-kit sendBocHex <boc_hex>          Submit raw BoC hex to the network\n", .{});
     std.debug.print("  ton-zig-agent-kit parseAddress <address>        Parse TON address\n", .{});
     std.debug.print("  ton-zig-agent-kit createInvoice <dest> <amount>  Create payment invoice\n", .{});
     std.debug.print("\nCell/Builder/Slice operations:\n", .{});
@@ -515,7 +602,7 @@ fn runBotDemo() !void {
     // Demo 4: Check balance
     std.debug.print("4. User sends /balance EQCD39vd5kB8FW5w6KH7HpNmP8GCvGajvLKGPMgY4sUXJyxqH\n", .{});
 
-    var client = try TonHttpClient.init(allocator, "https://tonapi.io", null);
+    var client = try TonHttpClient.init(allocator, default_rpc_url, null);
     defer client.deinit();
 
     const balance_result = client.getBalance("EQCD39vd5kB8FW5w6KH7HpNmP8GCvGajvLKGPMgY4sUXJyxqH") catch |err| {
@@ -542,4 +629,12 @@ fn runBotDemo() !void {
 
 test "basic test" {
     try std.testing.expect(true);
+}
+
+test "hexToBytes parses mixed case input" {
+    const allocator = std.testing.allocator;
+    const bytes = try hexToBytes(allocator, "00A1ff");
+    defer allocator.free(bytes);
+
+    try std.testing.expectEqualSlices(u8, &.{ 0x00, 0xA1, 0xff }, bytes);
 }

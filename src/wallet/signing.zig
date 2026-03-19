@@ -115,7 +115,6 @@ pub fn createWalletV4ExternalMessage(
         }
 
         const msg_cell = try msg_builder.toCell(allocator);
-        defer allocator.destroy(msg_cell);
 
         // Store action mode and message ref
         try builder.storeUint(msg.mode, 8);
@@ -124,7 +123,7 @@ pub fn createWalletV4ExternalMessage(
 
     // Serialize to bytes
     const result_cell = try builder.toCell(allocator);
-    defer allocator.destroy(result_cell);
+    defer result_cell.deinit(allocator);
 
     // Return BoC
     return try @import("../core/boc.zig").serializeBoc(allocator, result_cell);
@@ -180,7 +179,8 @@ pub fn createSignedTransfer(
 
 /// Get seqno from wallet
 pub fn getSeqno(client: *http_client.TonHttpClient, wallet_address: []const u8) !u32 {
-    const result = try client.runGetMethod(wallet_address, "seqno", &.{});
+    var result = try client.runGetMethod(wallet_address, "seqno", &.{});
+    defer client.freeRunGetMethodResponse(&result);
 
     // Parse seqno from stack
     if (result.stack.len > 0) {
@@ -237,14 +237,14 @@ test "wallet signing" {
     const keypair = try generateKeypair("test_seed");
     const private_key = keypair[0];
 
-    const msgs = &[_]WalletMessage{
+    var msgs = [_]WalletMessage{
         .{
-            .destination = "EQCD39vd5kB8FW5w6KH7HpNmP8GCvGajvLKGPMgY4sUXJyxqH",
+            .destination = "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
             .amount = 1_000_000_000,
         },
     };
 
-    const signed = try createSignedTransfer(allocator, .v4, private_key, 0, msgs);
+    const signed = try createSignedTransfer(allocator, .v4, private_key, 0, msgs[0..]);
     defer allocator.free(signed);
 
     try std.testing.expect(signed.len > 0);

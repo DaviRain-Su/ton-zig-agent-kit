@@ -304,11 +304,11 @@ pub const ErrorCode = tools_types.ErrorCode;
 
 test "agent tools init" {
     const allocator = std.testing.allocator;
-    var client = try http_client.TonHttpClient.init(allocator, "https://tonapi.io", null);
+    var client = try http_client.TonHttpClient.init(allocator, "https://toncenter.com/api/v2/jsonRPC", null);
     defer client.deinit();
 
     const config = tools_types.AgentToolsConfig{
-        .rpc_url = "https://tonapi.io",
+        .rpc_url = "https://toncenter.com/api/v2/jsonRPC",
     };
 
     const tools = AgentTools.init(allocator, &client, config);
@@ -317,14 +317,14 @@ test "agent tools init" {
 
 test "agent tools getBalance" {
     const allocator = std.testing.allocator;
-    var client = try http_client.TonHttpClient.init(allocator, "https://tonapi.io", null);
+    var client = try http_client.TonHttpClient.init(allocator, "https://toncenter.com/api/v2/jsonRPC", null);
     defer client.deinit();
 
     const config = tools_types.AgentToolsConfig{
-        .rpc_url = "https://tonapi.io",
+        .rpc_url = "https://toncenter.com/api/v2/jsonRPC",
     };
 
-    const tools = AgentTools.init(allocator, &client, config);
+    var tools = AgentTools.init(allocator, &client, config);
     const result = try tools.getBalance("EQCD39vd5kB8FW5w6KH7HpNmP8GCvGajvLKGPMgY4sUXJyxqH");
 
     // Note: May fail if network unavailable, but struct should be valid

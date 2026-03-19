@@ -6,3 +6,9 @@ pub const verifier = @import("verifier.zig");
 
 pub const Invoice = invoice.Invoice;
 pub const PaymentWatcher = watcher.PaymentWatcher;
+
+test {
+    _ = invoice;
+    _ = watcher;
+    _ = verifier;
+}

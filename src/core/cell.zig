@@ -17,7 +17,7 @@ pub const Cell = struct {
     pub fn create(allocator: std.mem.Allocator) !*Cell {
         const cell = try allocator.create(Cell);
         cell.* = Cell{
-            .data = undefined,
+            .data = [_]u8{0} ** MAX_BYTES,
             .bit_len = 0,
             .refs = .{ null, null, null, null },
             .ref_cnt = 0,
@@ -55,7 +55,7 @@ pub const Builder = struct {
 
     pub fn init() Builder {
         return Builder{
-            .data = undefined,
+            .data = [_]u8{0} ** MAX_BYTES,
             .bit_len = 0,
             .refs = .{ null, null, null, null },
             .ref_cnt = 0,
@@ -63,7 +63,18 @@ pub const Builder = struct {
     }
 
     pub fn initStack() Builder {
-        return .{};
+        return init();
+    }
+
+    fn storeBit(self: *Builder, bit_val: u1) !void {
+        if (self.bit_len >= MAX_BITS) return error.CellOverflow;
+
+        const byte_idx = self.bit_len / 8;
+        const bit_idx = 7 - @as(u3, @intCast(self.bit_len % 8));
+        const mask = @as(u8, 1) << bit_idx;
+        self.data[byte_idx] &= ~mask;
+        self.data[byte_idx] |= @as(u8, bit_val) << bit_idx;
+        self.bit_len += 1;
     }
 
     pub fn storeUint(self: *Builder, value: u64, bits: u16) !void {
@@ -75,10 +86,7 @@ pub const Builder = struct {
         while (i > 0) {
             i -= 1;
             const bit_val = @as(u1, @intCast((value >> @intCast(i)) & 1));
-            const byte_idx = self.bit_len / 8;
-            const bit_idx = 7 - @as(u3, @intCast(self.bit_len % 8));
-            self.data[byte_idx] |= @as(u8, bit_val) << bit_idx;
-            self.bit_len += 1;
+            try self.storeBit(bit_val);
         }
     }
 
@@ -86,23 +94,13 @@ pub const Builder = struct {
         if (self.bit_len + len > MAX_BITS) return error.CellOverflow;
         if (len == 0) return;
 
-        const full_bytes = len / 8;
-        const remaining_bits = len % 8;
-
-        var pos = self.bit_len;
-        for (data[0..full_bytes]) |byte| {
-            self.data[pos / 8] = byte;
-            pos += 8;
+        var bit_index: u16 = 0;
+        while (bit_index < len) : (bit_index += 1) {
+            const src_byte = data[bit_index / 8];
+            const src_bit_idx = 7 - @as(u3, @intCast(bit_index % 8));
+            const bit_val = @as(u1, @intCast((src_byte >> src_bit_idx) & 1));
+            try self.storeBit(bit_val);
         }
-
-        if (remaining_bits > 0) {
-            const byte_idx = pos / 8;
-            const mask = @as(u8, 0xFF) >> @intCast(remaining_bits);
-            self.data[byte_idx] = (self.data[byte_idx] & mask) | (data[full_bytes] & ~mask);
-            pos += remaining_bits;
-        }
-
-        self.bit_len = pos;
     }
 
     pub fn storeUint8(self: *Builder, value: u8) !void {
@@ -157,9 +155,13 @@ pub const Builder = struct {
         const T = @TypeOf(addr);
         if (T == []const u8) {
             const parsed = @import("address.zig").parseAddress(addr) catch return error.InvalidAddress;
+            try self.storeUint(0b10, 2); // addr_std
+            try self.storeUint(0, 1); // anycast absent
             try self.storeInt8(parsed.workchain);
             try self.storeBits(&parsed.raw, 256);
         } else {
+            try self.storeUint(0b10, 2); // addr_std
+            try self.storeUint(0, 1); // anycast absent
             try self.storeInt8(addr.workchain);
             try self.storeBits(&addr.raw, 256);
         }
@@ -172,9 +174,16 @@ pub const Builder = struct {
     }
 
     pub fn storeSlice(self: *Builder, s: *Slice) !void {
-        const remaining_bits = s.remainingBits();
-        if (remaining_bits > 0) {
-            try self.storeBits(s.cell.data[s.pos_bits / 8 ..], remaining_bits);
+        var src = s.*;
+
+        while (src.remainingBits() > 0) {
+            const bit = try src.loadUint(1);
+            try self.storeBit(@intCast(bit));
+        }
+
+        while (src.remainingRefs() > 0) {
+            const child = try src.loadRef();
+            try self.storeRef(child);
         }
     }
 
@@ -271,6 +280,12 @@ pub const Slice = struct {
     }
 
     pub fn loadAddress(self: *Slice) !@import("types.zig").Address {
+        const tag = try self.loadUint(2);
+        if (tag != 0b10) return error.InvalidAddress;
+
+        const has_anycast = try self.loadUint(1);
+        if (has_anycast != 0) return error.UnsupportedAddress;
+
         const workchain = try self.loadInt8();
         var raw: [32]u8 = undefined;
         for (&raw) |*b| {
@@ -291,7 +306,12 @@ pub const Slice = struct {
 
     pub fn loadBits(self: *Slice, len: u16) ![]const u8 {
         if (self.remainingBits() < len) return error.NotEnoughData;
-        const result = self.cell.data[self.pos_bits / 8 .. self.pos_bits / 8 + @as(usize, @divTrunc(len + 7, 8))];
+        if (len == 0) return &.{};
+        if (self.pos_bits % 8 != 0 or len % 8 != 0) return error.UnalignedRead;
+
+        const start = self.pos_bits / 8;
+        const byte_len = len / 8;
+        const result = self.cell.data[start .. start + byte_len];
         self.pos_bits += len;
         return result;
     }
@@ -302,6 +322,12 @@ test "builder store uint" {
     try builder.storeUint(42, 8);
     try std.testing.expectEqual(@as(u16, 8), builder.bit_len);
     try std.testing.expectEqual(@as(u8, 42), builder.data[0]);
+}
+
+test "builder starts zeroed" {
+    var builder = Builder.init();
+    try builder.storeUint(0, 8);
+    try std.testing.expectEqual(@as(u8, 0), builder.data[0]);
 }
 
 test "builder store coins zero" {
@@ -338,6 +364,35 @@ test "builder store and load int" {
 
     var slice = cell.toSlice();
     try std.testing.expectEqual(@as(i64, -1), try slice.loadInt(8));
+}
+
+test "store bits preserves unaligned writes" {
+    var builder = Builder.init();
+    try builder.storeUint(0b101, 3);
+    try builder.storeBits(&[_]u8{0b11000000}, 2);
+
+    var cell = try builder.toCell(std.testing.allocator);
+    defer std.testing.allocator.destroy(cell);
+
+    var slice = cell.toSlice();
+    try std.testing.expectEqual(@as(u64, 0b10111), try slice.loadUint(5));
+}
+
+test "store and load addr_std address" {
+    const addr = @import("types.zig").Address{
+        .workchain = 0,
+        .raw = [_]u8{0xAB} ** 32,
+    };
+
+    var builder = Builder.init();
+    try builder.storeAddress(addr);
+
+    var cell = try builder.toCell(std.testing.allocator);
+    defer std.testing.allocator.destroy(cell);
+
+    var slice = cell.toSlice();
+    const decoded = try slice.loadAddress();
+    try std.testing.expectEqualDeep(addr, decoded);
 }
 
 test "cell hash" {

@@ -87,28 +87,31 @@ pub const BotState = struct {
 pub const DemoBot = struct {
     allocator: std.mem.Allocator,
     state: BotState,
+    client: core.http_client.TonHttpClient,
     tools: AgentTools,
     merchant_address: []const u8,
 
     pub fn init(allocator: std.mem.Allocator, merchant_address: []const u8) !DemoBot {
         const config = AgentToolsConfig{
-            .rpc_url = "https://tonapi.io",
+            .rpc_url = "https://toncenter.com/api/v2/jsonRPC",
             .wallet_address = merchant_address,
         };
 
-        var client = try core.http_client.TonHttpClient.init(allocator, "https://tonapi.io", null);
-
-        return .{
+        var bot = DemoBot{
             .allocator = allocator,
             .state = BotState.init(allocator),
-            .tools = AgentTools.init(allocator, &client, config),
+            .client = try core.http_client.TonHttpClient.init(allocator, "https://toncenter.com/api/v2/jsonRPC", null),
+            .tools = undefined,
             .merchant_address = merchant_address,
         };
+
+        bot.tools = AgentTools.init(allocator, &bot.client, config);
+        return bot;
     }
 
     pub fn deinit(self: *DemoBot) void {
         self.state.deinit();
-        // Note: client is destroyed with tools
+        self.client.deinit();
     }
 
     /// Handle /start command
@@ -177,6 +180,11 @@ pub const DemoBot = struct {
 
         // Get updated status
         const updated_order = self.state.orders.get(order_id).?;
+        const tx_line = if (updated_order.tx_hash) |hash|
+            try std.fmt.allocPrint(self.allocator, "Transaction: {s}\n", .{hash})
+        else
+            null;
+        defer if (tx_line) |line| self.allocator.free(line);
 
         return try std.fmt.allocPrint(self.allocator, "Order Status\n" ++
             "ID: {s}\n" ++
@@ -186,10 +194,7 @@ pub const DemoBot = struct {
             order_id,
             @tagName(updated_order.status),
             updated_order.amount / 1_000_000_000,
-            if (updated_order.tx_hash) |hash|
-                try std.fmt.allocPrint(self.allocator, "Transaction: {s}\n", .{hash})
-            else
-                "",
+            tx_line orelse "",
         });
     }
 
@@ -248,8 +253,6 @@ test "bot state" {
     defer state.deinit();
 
     const order_id = try state.createOrder(12345, 1000000000);
-    defer allocator.free(order_id);
-
     try std.testing.expect(state.orders.contains(order_id));
 }
 

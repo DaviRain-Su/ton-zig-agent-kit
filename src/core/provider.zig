@@ -34,7 +34,7 @@ pub const MultiProvider = struct {
 
 pub fn createDefaultProvider(allocator: std.mem.Allocator) !MultiProvider {
     return MultiProvider.init(allocator, &.{
-        .{ .url = "https://tonapi.io" },
-        .{ .url = "https://toncenter.com/api/v2" },
+        .{ .url = "https://toncenter.com/api/v2/jsonRPC" },
+        .{ .url = "https://testnet.toncenter.com/api/v2/jsonRPC" },
     });
 }

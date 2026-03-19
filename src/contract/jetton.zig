@@ -176,7 +176,7 @@ pub fn createBurnMessage(
 
 test "jetton master" {
     const allocator = std.testing.allocator;
-    var client = try http_client.TonHttpClient.init(allocator, "https://tonapi.io", null);
+    var client = try http_client.TonHttpClient.init(allocator, "https://toncenter.com/api/v2/jsonRPC", null);
     defer client.deinit();
 
     const master = JettonMaster.init("EQBlqsm144Dq6SjbPIPcQWL1rzbDF7CWeYmpE6FsiVreAYeY", &client);
@@ -185,7 +185,7 @@ test "jetton master" {
 
 test "jetton wallet" {
     const allocator = std.testing.allocator;
-    var client = try http_client.TonHttpClient.init(allocator, "https://tonapi.io", null);
+    var client = try http_client.TonHttpClient.init(allocator, "https://toncenter.com/api/v2/jsonRPC", null);
     defer client.deinit();
 
     const wallet = JettonWallet.init("EQ...", &client);

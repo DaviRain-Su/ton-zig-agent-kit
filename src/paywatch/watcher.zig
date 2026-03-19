@@ -57,13 +57,14 @@ pub fn waitPayment(watcher: *PaymentWatcher) !PaymentResult {
 
         // Query transactions
         const txs = try watcher.client.getTransactions(watcher.invoice.address, 10);
+        defer watcher.client.freeTransactions(txs);
 
         // Check each transaction
         for (txs) |tx| {
             if (try checkTransactionMatchesInvoice(&tx, watcher.invoice)) {
                 return PaymentResult{
                     .found = true,
-                    .tx_hash = tx.hash,
+                    .tx_hash = try watcher.client.allocator.dupe(u8, tx.hash),
                     .tx_lt = tx.lt,
                     .amount = if (tx.in_msg) |msg| msg.value else null,
                     .sender = null, // TODO: format Address properly
@@ -94,40 +95,7 @@ pub fn startPolling(
     watcher: *PaymentWatcher,
     callback: *const fn (PaymentResult) void,
 ) !void {
-    const start_time = std.time.milliTimestamp();
-
-    while (std.time.milliTimestamp() - start_time < watcher.timeout_ms) {
-        const result = try waitPayment(watcher);
-
-        if (result.found) {
-            callback(result);
-            return;
-        }
-
-        if (invoice_mod.isExpired(watcher.invoice)) {
-            callback(PaymentResult{
-                .found = false,
-                .tx_hash = null,
-                .tx_lt = null,
-                .amount = null,
-                .sender = null,
-                .confirmed_at = std.time.timestamp(),
-                .confirmations = 0,
-            });
-            return;
-        }
-    }
-
-    // Timeout
-    callback(PaymentResult{
-        .found = false,
-        .tx_hash = null,
-        .tx_lt = null,
-        .amount = null,
-        .sender = null,
-        .confirmed_at = std.time.timestamp(),
-        .confirmations = 0,
-    });
+    callback(try waitPayment(watcher));
 }
 
 /// Check if transaction matches invoice criteria
@@ -138,8 +106,7 @@ fn checkTransactionMatchesInvoice(
     // Must have incoming message
     const msg = tx.in_msg orelse return false;
 
-    // Check amount matches (with some tolerance)
-    if (msg.value != invoice.amount) {
+    if (invoice.amount > 0 and msg.value != invoice.amount) {
         // Allow 1% tolerance for fees
         const tolerance = invoice.amount / 100;
         if (msg.value < invoice.amount - tolerance or
@@ -149,18 +116,7 @@ fn checkTransactionMatchesInvoice(
         }
     }
 
-    // Check comment in body
-    if (msg.body) |body| {
-        // Parse body to find comment
-        var slice = body.toSlice();
-
-        // Skip op code (32 bits) and query_id (64 bits) if present
-        // For simple transfers, comment is in the body directly
-
-        // Read comment as string
-        const comment_bytes = try slice.loadBits(1024); // Max comment size
-        const comment = std.mem.sliceTo(comment_bytes, 0);
-
+    if (try extractMessageComment(msg)) |comment| {
         if (std.mem.indexOf(u8, comment, invoice.comment) != null) {
             return true;
         }
@@ -169,9 +125,31 @@ fn checkTransactionMatchesInvoice(
     return false;
 }
 
+fn extractMessageComment(msg: *const types.Message) !?[]const u8 {
+    if (msg.body) |body| {
+        var slice = body.toSlice();
+        if (slice.remainingBits() < 32) return null;
+
+        const op = try slice.loadUint(32);
+        if (op != 0) return null;
+
+        const remaining_bits = slice.remainingBits();
+        if (remaining_bits == 0) return "";
+        if (remaining_bits % 8 != 0) return null;
+
+        return try slice.loadBits(@intCast(remaining_bits));
+    }
+
+    if (msg.raw_body.len > 0) {
+        return msg.raw_body;
+    }
+
+    return null;
+}
+
 test "payment watcher init" {
     const allocator = std.testing.allocator;
-    var client = try http_client.TonHttpClient.init(allocator, "https://tonapi.io", null);
+    var client = try http_client.TonHttpClient.init(allocator, "https://toncenter.com/api/v2/jsonRPC", null);
     defer client.deinit();
 
     const invoice = try invoice_mod.createInvoice(allocator, "EQ...", 1000, "Test");
