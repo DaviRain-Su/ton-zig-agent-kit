@@ -340,14 +340,23 @@ pub fn decodeFunctionOutputsJsonAlloc(
     var writer = std.io.Writer.Allocating.init(allocator);
     errdefer writer.deinit();
 
-    try writer.writer.writeByte('{');
-    for (function.outputs, stack, 0..) |param, *entry, idx| {
-        if (idx != 0) try writer.writer.writeByte(',');
-        try writeJsonString(&writer.writer, param.name);
-        try writer.writer.writeByte(':');
-        try writeDecodedOutputJson(&writer.writer, allocator, param, entry);
+    if (allParamNamesMissing(function.outputs)) {
+        try writer.writer.writeByte('[');
+        for (function.outputs, stack, 0..) |param, *entry, idx| {
+            if (idx != 0) try writer.writer.writeByte(',');
+            try writeDecodedOutputJson(&writer.writer, allocator, param, entry);
+        }
+        try writer.writer.writeByte(']');
+    } else {
+        try writer.writer.writeByte('{');
+        for (function.outputs, stack, 0..) |param, *entry, idx| {
+            if (idx != 0) try writer.writer.writeByte(',');
+            try writeDecodedFieldName(&writer.writer, param.name, idx);
+            try writer.writer.writeByte(':');
+            try writeDecodedOutputJson(&writer.writer, allocator, param, entry);
+        }
+        try writer.writer.writeByte('}');
     }
-    try writer.writer.writeByte('}');
 
     return try writer.toOwnedSlice();
 }
@@ -622,7 +631,7 @@ fn parseParamDefsAlloc(allocator: std.mem.Allocator, value: std.json.Value) anye
 }
 
 fn parseParamDefObjectAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap) anyerror!ParamDef {
-    const name = try dupRequiredObjectString(allocator, object, "name");
+    const name = try dupOptionalObjectString(allocator, object, "name");
     errdefer allocator.free(name);
 
     const type_name = try dupObjectStringWithFallback(allocator, object, "type", "type_name");
@@ -689,6 +698,18 @@ fn dupRequiredObjectString(
     key: []const u8,
 ) ![]u8 {
     const value = object.get(key) orelse return error.InvalidAbiDefinition;
+    return switch (value) {
+        .string => allocator.dupe(u8, value.string),
+        else => error.InvalidAbiDefinition,
+    };
+}
+
+fn dupOptionalObjectString(
+    allocator: std.mem.Allocator,
+    object: std.json.ObjectMap,
+    key: []const u8,
+) ![]u8 {
+    const value = object.get(key) orelse return allocator.dupe(u8, "");
     return switch (value) {
         .string => allocator.dupe(u8, value.string),
         else => error.InvalidAbiDefinition,
@@ -2094,10 +2115,20 @@ fn writeDecodedCompositeJson(
 
     if (items.len != components.len) return error.InvalidAbiOutputs;
 
+    if (allParamNamesMissing(components)) {
+        try writer.writeByte('[');
+        for (components, items, 0..) |component, *child, idx| {
+            if (idx != 0) try writer.writeByte(',');
+            try writeDecodedOutputJson(writer, allocator, component, child);
+        }
+        try writer.writeByte(']');
+        return;
+    }
+
     try writer.writeByte('{');
     for (components, items, 0..) |component, *child, idx| {
         if (idx != 0) try writer.writeByte(',');
-        try writeJsonString(writer, component.name);
+        try writeDecodedFieldName(writer, component.name, idx);
         try writer.writeByte(':');
         try writeDecodedOutputJson(writer, allocator, component, child);
     }
@@ -2147,6 +2178,25 @@ fn base64EncodeAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     const encoded = try allocator.alloc(u8, encoded_len);
     _ = std.base64.standard.Encoder.encode(encoded, bytes);
     return encoded;
+}
+
+fn allParamNamesMissing(params: []const ParamDef) bool {
+    if (params.len == 0) return false;
+    for (params) |param| {
+        if (param.name.len != 0) return false;
+    }
+    return true;
+}
+
+fn writeDecodedFieldName(writer: anytype, name: []const u8, idx: usize) !void {
+    if (name.len != 0) {
+        try writeJsonString(writer, name);
+        return;
+    }
+
+    var fallback_name_buf: [32]u8 = undefined;
+    const fallback_name = try std.fmt.bufPrint(&fallback_name_buf, "value{d}", .{idx});
+    try writeJsonString(writer, fallback_name);
 }
 
 fn writeJsonString(writer: anytype, value: []const u8) !void {
@@ -2345,6 +2395,33 @@ test "abi adapter parses tuple components from abi json" {
     try std.testing.expectEqual(@as(usize, 3), parsed.function.inputs[0].components.len);
     try std.testing.expectEqualStrings("enabled", parsed.function.inputs[0].components[0].name);
     try std.testing.expectEqualStrings("optional<string>", parsed.function.inputs[0].components[2].type_name);
+}
+
+test "abi adapter allows unnamed params and tuple components" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "name": "get_value",
+        \\  "outputs": [
+        \\    {"type": "uint32"},
+        \\    {
+        \\      "type": "tuple",
+        \\      "components": [
+        \\        {"type": "bool"},
+        \\        {"name": "owner", "type": "address"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var parsed = try parseFunctionDefJsonAlloc(allocator, json);
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), parsed.function.outputs.len);
+    try std.testing.expectEqualStrings("", parsed.function.outputs[0].name);
+    try std.testing.expectEqualStrings("", parsed.function.outputs[1].components[0].name);
+    try std.testing.expectEqualStrings("owner", parsed.function.outputs[1].components[1].name);
 }
 
 test "abi adapter parses abi document json and finds function" {
@@ -3545,6 +3622,54 @@ test "abi adapter preserves large numeric outputs as strings" {
 
     try std.testing.expectEqualStrings(
         "{\"total_supply\":\"0x1234567890ABCDEF1234567890ABCDEF\",\"balance\":\"340282366920938463463374607431768211455\"}",
+        decoded,
+    );
+}
+
+test "abi adapter decodes unnamed outputs and tuple components without empty keys" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "get_unnamed",
+        \\      "outputs": [
+        \\        {"type": "uint32"},
+        \\        {
+        \\          "type": "tuple",
+        \\          "components": [
+        \\            {"type": "bool"},
+        \\            {"name": "owner", "type": "address"}
+        \\          ]
+        \\        }
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var abi = try parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer abi.deinit(allocator);
+
+    const addr_boc = try buildAddressStackSliceBocAlloc(allocator, "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8");
+    defer allocator.free(addr_boc);
+    const addr_cell = try boc.deserializeBoc(allocator, addr_boc);
+    defer addr_cell.deinit(allocator);
+
+    var nested = [_]types.StackEntry{
+        .{ .number = 1 },
+        .{ .slice = addr_cell },
+    };
+    const stack = [_]types.StackEntry{
+        .{ .number = 7 },
+        .{ .tuple = nested[0..] },
+    };
+
+    const decoded = try decodeFunctionOutputsFromAbiJsonAlloc(allocator, &abi.abi, "get_unnamed", stack[0..]);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqualStrings(
+        "[7,{\"value0\":true,\"owner\":\"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8\"}]",
         decoded,
     );
 }
