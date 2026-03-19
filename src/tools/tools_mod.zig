@@ -1192,8 +1192,15 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 };
             };
 
-            const wallet_addr = self.config.wallet_address orelse "";
-            const result = signing.sendMessages(self.client, .v4, private_key, wallet_addr, msgs) catch |err| {
+            const result = signing.sendMessagesAuto(
+                self.client,
+                .v4,
+                private_key,
+                self.config.wallet_address,
+                self.config.wallet_workchain,
+                self.config.wallet_id,
+                msgs,
+            ) catch |err| {
                 return tools_types.SendResult{
                     .hash = "",
                     .lt = 0,
@@ -1377,6 +1384,58 @@ test "agent tools sendInitialTransfer submits first transfer without configured 
         "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
         result.destination,
     );
+    try std.testing.expect(client.last_boc != null);
+}
+
+test "agent tools sendTransfer auto-derives wallet and falls back to initial deployment" {
+    const allocator = std.testing.allocator;
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+        last_boc: ?[]u8 = null,
+
+        pub fn runGetMethod(self: *@This(), wallet_address: []const u8, method: []const u8, stack: []const []const u8) !core_types.RunGetMethodResponse {
+            _ = self;
+            _ = wallet_address;
+            _ = method;
+            _ = stack;
+            return error.InvalidResponse;
+        }
+
+        pub fn freeRunGetMethodResponse(self: *@This(), response: *core_types.RunGetMethodResponse) void {
+            _ = self;
+            _ = response;
+        }
+
+        pub fn sendBoc(self: *@This(), payload: []const u8) !core_types.SendBocResponse {
+            self.last_boc = try self.allocator.dupe(u8, payload);
+            return .{
+                .hash = try self.allocator.dupe(u8, "fake"),
+                .lt = 789,
+            };
+        }
+    };
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    var client = FakeClient{ .allocator = allocator };
+    defer if (client.last_boc) |value| allocator.free(value);
+
+    const keypair = try signing.generateKeypair("tools-wallet-send-auto");
+    const config = tools_types.AgentToolsConfig{
+        .rpc_url = "https://example.invalid",
+        .wallet_private_key = keypair[0],
+    };
+
+    var tools = FakeTools.init(allocator, &client, config);
+    const result = try tools.sendTransfer(
+        "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+        321,
+        null,
+    );
+    defer allocator.free(result.hash);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqual(@as(i64, 789), result.lt);
     try std.testing.expect(client.last_boc != null);
 }
 

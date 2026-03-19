@@ -83,6 +83,20 @@ pub fn walletV4CodeBocAlloc(allocator: std.mem.Allocator) ![]u8 {
     return decodeHexAlloc(allocator, wallet_v4r2_code_boc_hex);
 }
 
+fn encodeHexPrefixedLowerAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const hex_chars = "0123456789abcdef";
+    const out = try allocator.alloc(u8, 2 + bytes.len * 2);
+    errdefer allocator.free(out);
+
+    out[0] = '0';
+    out[1] = 'x';
+    for (bytes, 0..) |byte, idx| {
+        out[2 + idx * 2] = hex_chars[byte >> 4];
+        out[2 + idx * 2 + 1] = hex_chars[byte & 0x0f];
+    }
+    return out;
+}
+
 pub fn buildWalletV4DataCellAlloc(
     allocator: std.mem.Allocator,
     public_key: [32]u8,
@@ -589,6 +603,38 @@ pub fn sendInitialMessages(
     return try client.sendBoc(signed_transfer);
 }
 
+fn verifyWalletPublicKey(private_key: [32]u8, wallet_public_key: [32]u8) !void {
+    const key_pair = try ed25519KeyPairFromSeed(private_key);
+    const public_key = key_pair.public_key.toBytes();
+    if (!std.mem.eql(u8, &wallet_public_key, &public_key)) return error.InvalidWalletPublicKey;
+}
+
+fn sendPreparedMessages(
+    client: anytype,
+    version: WalletVersion,
+    private_key: [32]u8,
+    wallet_address: []const u8,
+    wallet_id: u32,
+    seqno: u32,
+    msgs: []const WalletMessage,
+) !types.SendBocResponse {
+    const allocator = std.heap.page_allocator;
+    const valid_until = @as(u32, @intCast(std.time.timestamp())) + 60;
+    const signed_transfer = try createSignedTransferWithWalletId(
+        allocator,
+        version,
+        private_key,
+        wallet_address,
+        wallet_id,
+        seqno,
+        msgs,
+        valid_until,
+    );
+    defer allocator.free(signed_transfer);
+
+    return try client.sendBoc(signed_transfer);
+}
+
 pub fn sendMessages(
     client: anytype,
     version: WalletVersion,
@@ -596,27 +642,40 @@ pub fn sendMessages(
     wallet_address: []const u8,
     msgs: []const WalletMessage,
 ) !types.SendBocResponse {
-    const allocator = std.heap.page_allocator;
-
     const wallet_info = try getWalletInfo(client, wallet_address);
-    const key_pair = try ed25519KeyPairFromSeed(private_key);
-    const public_key = key_pair.public_key.toBytes();
-    if (!std.mem.eql(u8, &wallet_info.public_key, &public_key)) return error.InvalidWalletPublicKey;
+    try verifyWalletPublicKey(private_key, wallet_info.public_key);
+    return sendPreparedMessages(client, version, private_key, wallet_address, wallet_info.wallet_id, wallet_info.seqno, msgs);
+}
 
-    const valid_until = @as(u32, @intCast(std.time.timestamp())) + 60;
-    const signed_transfer = try createSignedTransferWithWalletId(
-        allocator,
-        version,
-        private_key,
-        wallet_address,
-        wallet_info.wallet_id,
-        wallet_info.seqno,
-        msgs,
-        valid_until,
-    );
-    defer allocator.free(signed_transfer);
+pub fn sendMessagesAuto(
+    client: anytype,
+    version: WalletVersion,
+    private_key: [32]u8,
+    wallet_address: ?[]const u8,
+    workchain: i8,
+    wallet_id: u32,
+    msgs: []const WalletMessage,
+) !types.SendBocResponse {
+    if (wallet_address) |addr| {
+        return sendMessages(client, version, private_key, addr, msgs);
+    }
 
-    return try client.sendBoc(signed_transfer);
+    const allocator = std.heap.page_allocator;
+    var init = try deriveWalletV4InitFromPrivateKeyAlloc(allocator, workchain, wallet_id, private_key);
+    defer init.deinit(allocator);
+
+    const raw_address = try init.address.toRawAlloc(allocator);
+    defer allocator.free(raw_address);
+
+    const wallet_info = getWalletInfo(client, raw_address) catch |err| {
+        if (err == error.InvalidResponse) {
+            return sendInitialMessages(client, version, private_key, workchain, wallet_id, msgs);
+        }
+        return err;
+    };
+
+    try verifyWalletPublicKey(private_key, wallet_info.public_key);
+    return sendPreparedMessages(client, version, private_key, raw_address, wallet_info.wallet_id, wallet_info.seqno, msgs);
 }
 
 test "wallet keypair generation" {
@@ -1013,6 +1072,163 @@ test "sendInitialTransfer sends deployment message with seqno zero" {
     _ = try signed_slice.loadUint32();
     try std.testing.expectEqual(@as(u32, 0), try signed_slice.loadUint32());
     try std.testing.expectEqual(simple_send_opcode, try signed_slice.loadUint32());
+}
+
+test "sendMessagesAuto falls back to initial deployment when wallet info is unavailable" {
+    const allocator = std.testing.allocator;
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+        last_boc: ?[]u8 = null,
+
+        pub fn runGetMethod(self: *@This(), wallet_address: []const u8, method: []const u8, stack: []const []const u8) !types.RunGetMethodResponse {
+            _ = self;
+            _ = wallet_address;
+            _ = method;
+            _ = stack;
+            return error.InvalidResponse;
+        }
+
+        pub fn freeRunGetMethodResponse(self: *@This(), response: *types.RunGetMethodResponse) void {
+            _ = self;
+            _ = response;
+        }
+
+        pub fn sendBoc(self: *@This(), payload: []const u8) !types.SendBocResponse {
+            self.last_boc = try self.allocator.dupe(u8, payload);
+            return .{
+                .hash = try self.allocator.dupe(u8, "fake"),
+                .lt = 1,
+            };
+        }
+    };
+
+    var client = FakeClient{ .allocator = allocator };
+    defer if (client.last_boc) |value| allocator.free(value);
+
+    const keypair = try generateKeypair("wallet-auto-fallback");
+    const result = try sendMessagesAuto(
+        &client,
+        .v4,
+        keypair[0],
+        null,
+        0,
+        default_wallet_id_v4,
+        &[_]WalletMessage{
+            .{
+                .destination = "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+                .amount = 888,
+            },
+        },
+    );
+    defer allocator.free(result.hash);
+
+    try std.testing.expect(client.last_boc != null);
+    const ext_msg = try boc.deserializeBoc(allocator, client.last_boc.?);
+    defer ext_msg.deinit(allocator);
+
+    var ext_slice = ext_msg.toSlice();
+    _ = try ext_slice.loadUint(2);
+    _ = try ext_slice.loadUint(2);
+    _ = try ext_slice.loadAddress();
+    _ = try ext_slice.loadCoins();
+    try std.testing.expectEqual(@as(u64, 1), try ext_slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 1), try ext_slice.loadUint(1));
+}
+
+test "sendMessagesAuto uses deployed wallet when address is provided" {
+    const allocator = std.testing.allocator;
+    const keypair = try generateKeypair("wallet-auto-deployed");
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+        public_key_hex: []const u8,
+        last_boc: ?[]u8 = null,
+
+        pub fn runGetMethod(self: *@This(), wallet_address: []const u8, method: []const u8, stack: []const []const u8) !types.RunGetMethodResponse {
+            _ = wallet_address;
+            _ = stack;
+
+            const entry = if (std.mem.eql(u8, method, "seqno"))
+                types.StackEntry{ .number = 7 }
+            else if (std.mem.eql(u8, method, "get_subwallet_id"))
+                types.StackEntry{ .number = default_wallet_id_v4 }
+            else if (std.mem.eql(u8, method, "get_public_key"))
+                types.StackEntry{ .big_number = try self.allocator.dupe(u8, self.public_key_hex) }
+            else
+                return error.InvalidResponse;
+
+            const entries = try self.allocator.alloc(types.StackEntry, 1);
+            entries[0] = entry;
+            return .{
+                .exit_code = 0,
+                .stack = entries,
+                .logs = "",
+            };
+        }
+
+        pub fn freeRunGetMethodResponse(self: *@This(), response: *types.RunGetMethodResponse) void {
+            for (response.stack) |*entry| {
+                switch (entry.*) {
+                    .big_number => |value| self.allocator.free(value),
+                    else => {},
+                }
+            }
+            self.allocator.free(response.stack);
+        }
+
+        pub fn sendBoc(self: *@This(), payload: []const u8) !types.SendBocResponse {
+            self.last_boc = try self.allocator.dupe(u8, payload);
+            return .{
+                .hash = try self.allocator.dupe(u8, "fake"),
+                .lt = 2,
+            };
+        }
+    };
+
+    const public_key_hex = try encodeHexPrefixedLowerAlloc(allocator, &keypair[1]);
+    defer allocator.free(public_key_hex);
+
+    var client = FakeClient{
+        .allocator = allocator,
+        .public_key_hex = public_key_hex,
+    };
+    defer if (client.last_boc) |value| allocator.free(value);
+
+    const result = try sendMessagesAuto(
+        &client,
+        .v4,
+        keypair[0],
+        "0:0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+        0,
+        default_wallet_id_v4,
+        &[_]WalletMessage{
+            .{
+                .destination = "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+                .amount = 1,
+            },
+        },
+    );
+    defer allocator.free(result.hash);
+
+    try std.testing.expect(client.last_boc != null);
+    const ext_msg = try boc.deserializeBoc(allocator, client.last_boc.?);
+    defer ext_msg.deinit(allocator);
+
+    var ext_slice = ext_msg.toSlice();
+    _ = try ext_slice.loadUint(2);
+    _ = try ext_slice.loadUint(2);
+    _ = try ext_slice.loadAddress();
+    _ = try ext_slice.loadCoins();
+    try std.testing.expectEqual(@as(u64, 0), try ext_slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 1), try ext_slice.loadUint(1));
+
+    const signed_body = try ext_slice.loadRef();
+    var signed_slice = signed_body.toSlice();
+    _ = try signed_slice.loadBits(512);
+    _ = try signed_slice.loadUint32();
+    _ = try signed_slice.loadUint32();
+    try std.testing.expectEqual(@as(u32, 7), try signed_slice.loadUint32());
 }
 
 test "wallet public key helper parses stack entry" {
