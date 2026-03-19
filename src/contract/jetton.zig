@@ -110,7 +110,7 @@ pub const WalletData = struct {
     }
 };
 
-fn parseJettonData(allocator: std.mem.Allocator, stack: []const types.StackEntry) !JettonData {
+pub fn parseJettonData(allocator: std.mem.Allocator, stack: []const types.StackEntry) !JettonData {
     if (stack.len < 4) return error.InvalidResponse;
 
     return JettonData{
@@ -122,7 +122,7 @@ fn parseJettonData(allocator: std.mem.Allocator, stack: []const types.StackEntry
     };
 }
 
-fn parseJettonWalletData(allocator: std.mem.Allocator, stack: []const types.StackEntry) !WalletData {
+pub fn parseJettonWalletData(allocator: std.mem.Allocator, stack: []const types.StackEntry) !WalletData {
     if (stack.len < 3) return error.InvalidResponse;
 
     const owner_addr = (try generic_contract.stackEntryAsOptionalAddress(&stack[1])) orelse return error.InvalidAddress;

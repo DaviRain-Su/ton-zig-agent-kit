@@ -5,6 +5,7 @@ const std = @import("std");
 const address_mod = @import("../core/address.zig");
 const body_builder = @import("../core/body_builder.zig");
 const http_client = @import("../core/http_client.zig");
+const provider_mod = @import("../core/provider.zig");
 const state_init = @import("../core/state_init.zig");
 const paywatch = @import("../paywatch/paywatch.zig");
 const wallet = @import("../wallet/wallet.zig");
@@ -15,12 +16,13 @@ const jetton = @import("../contract/jetton.zig");
 const nft = @import("../contract/nft.zig");
 const tools_types = @import("types.zig");
 
-pub const AgentTools = struct {
+fn AgentToolsImpl(comptime ClientType: type) type {
+    return struct {
     allocator: std.mem.Allocator,
-    client: *http_client.TonHttpClient,
+    client: ClientType,
     config: tools_types.AgentToolsConfig,
 
-    pub fn init(allocator: std.mem.Allocator, client: *http_client.TonHttpClient, config: tools_types.AgentToolsConfig) AgentTools {
+    pub fn init(allocator: std.mem.Allocator, client: ClientType, config: tools_types.AgentToolsConfig) @This() {
         return .{
             .allocator = allocator,
             .client = client,
@@ -29,7 +31,7 @@ pub const AgentTools = struct {
     }
 
     /// Get TON balance for address
-    pub fn getBalance(self: *AgentTools, target_address: []const u8) !tools_types.BalanceResult {
+    pub fn getBalance(self: *@This(), target_address: []const u8) !tools_types.BalanceResult {
         const resp = self.client.getBalance(target_address) catch |err| {
             return tools_types.BalanceResult{
                 .address = target_address,
@@ -56,7 +58,7 @@ pub const AgentTools = struct {
 
     /// Compute the deployed contract address for a StateInit BoC and workchain.
     pub fn computeStateInitAddress(
-        self: *AgentTools,
+        self: *@This(),
         workchain: i8,
         state_init_boc: []const u8,
     ) !tools_types.AddressResult {
@@ -102,9 +104,22 @@ pub const AgentTools = struct {
     }
 
     /// Run any contract get-method with typed stack arguments
-    pub fn runGetMethod(self: *AgentTools, contract_address: []const u8, method: []const u8, args: []const contract.StackArg) !tools_types.RunMethodResult {
-        var generic = contract.GenericContract.init(self.client, contract_address);
-        var result = generic.callGetMethodArgs(method, args) catch |err| {
+    pub fn runGetMethod(self: *@This(), contract_address: []const u8, method: []const u8, args: []const contract.StackArg) !tools_types.RunMethodResult {
+        const stack_input = contract.buildStackArgsJsonAlloc(self.allocator, args) catch |err| {
+            return tools_types.RunMethodResult{
+                .address = contract_address,
+                .method = method,
+                .exit_code = -1,
+                .stack_json = "[]",
+                .decoded_json = null,
+                .logs = "",
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        defer self.allocator.free(stack_input);
+
+        var result = self.client.runGetMethodJson(contract_address, method, stack_input) catch |err| {
             return tools_types.RunMethodResult{
                 .address = contract_address,
                 .method = method,
@@ -146,7 +161,7 @@ pub const AgentTools = struct {
 
     /// Run a get-method using ABI input/output definitions
     pub fn runGetMethodAbi(
-        self: *AgentTools,
+        self: *@This(),
         contract_address: []const u8,
         abi_json: []const u8,
         function_name: []const u8,
@@ -180,8 +195,21 @@ pub const AgentTools = struct {
         };
         defer args.deinit(self.allocator);
 
-        var generic = contract.GenericContract.init(self.client, contract_address);
-        var result = generic.callGetMethodArgs(function_name, args.args) catch |err| {
+        const stack_input = contract.buildStackArgsJsonAlloc(self.allocator, args.args) catch |err| {
+            return tools_types.RunMethodResult{
+                .address = contract_address,
+                .method = function_name,
+                .exit_code = -1,
+                .stack_json = "[]",
+                .decoded_json = null,
+                .logs = "",
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        defer self.allocator.free(stack_input);
+
+        var result = self.client.runGetMethodJson(contract_address, function_name, stack_input) catch |err| {
             return tools_types.RunMethodResult{
                 .address = contract_address,
                 .method = function_name,
@@ -245,7 +273,7 @@ pub const AgentTools = struct {
 
     /// Run a get-method by discovering the contract ABI URI on-chain
     pub fn runGetMethodAuto(
-        self: *AgentTools,
+        self: *@This(),
         contract_address: []const u8,
         function_name: []const u8,
         values: []const abi_adapter.AbiValue,
@@ -287,8 +315,21 @@ pub const AgentTools = struct {
         };
         defer args.deinit(self.allocator);
 
-        var generic = contract.GenericContract.init(self.client, contract_address);
-        var result = generic.callGetMethodArgs(function_name, args.args) catch |err| {
+        const stack_input = contract.buildStackArgsJsonAlloc(self.allocator, args.args) catch |err| {
+            return tools_types.RunMethodResult{
+                .address = contract_address,
+                .method = function_name,
+                .exit_code = -1,
+                .stack_json = "[]",
+                .decoded_json = null,
+                .logs = "",
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        defer self.allocator.free(stack_input);
+
+        var result = self.client.runGetMethodJson(contract_address, function_name, stack_input) catch |err| {
             return tools_types.RunMethodResult{
                 .address = contract_address,
                 .method = function_name,
@@ -351,7 +392,7 @@ pub const AgentTools = struct {
     }
 
     /// Create payment invoice
-    pub fn createInvoice(self: *AgentTools, amount: u64, description: []const u8) !tools_types.InvoiceResult {
+    pub fn createInvoice(self: *@This(), amount: u64, description: []const u8) !tools_types.InvoiceResult {
         const dest = self.config.wallet_address orelse "";
 
         const invoice = paywatch.invoice.createInvoice(self.allocator, dest, amount, description) catch |err| {
@@ -380,7 +421,7 @@ pub const AgentTools = struct {
     }
 
     /// Verify payment by comment
-    pub fn verifyPayment(self: *AgentTools, comment: []const u8) !tools_types.VerifyResult {
+    pub fn verifyPayment(self: *@This(), comment: []const u8) !tools_types.VerifyResult {
         const dest = self.config.wallet_address orelse "";
 
         // Create temporary invoice for verification
@@ -422,7 +463,7 @@ pub const AgentTools = struct {
     }
 
     /// Wait for payment with timeout
-    pub fn waitPayment(self: *AgentTools, comment: []const u8, timeout_ms: u32) !tools_types.VerifyResult {
+    pub fn waitPayment(self: *@This(), comment: []const u8, timeout_ms: u32) !tools_types.VerifyResult {
         const dest = self.config.wallet_address orelse "";
 
         const temp_invoice = paywatch.invoice.Invoice{
@@ -437,14 +478,12 @@ pub const AgentTools = struct {
             .status = .pending,
         };
 
-        var watcher = paywatch.watcher.PaymentWatcher.init(
-            &temp_invoice,
+        const result = paywatch.watcher.waitPaymentWithClient(
             self.client,
+            &temp_invoice,
             5000, // 5s poll interval
             timeout_ms,
-        );
-
-        const result = paywatch.watcher.waitPayment(&watcher) catch |err| {
+        ) catch |err| {
             return tools_types.VerifyResult{
                 .verified = false,
                 .tx_hash = null,
@@ -470,10 +509,8 @@ pub const AgentTools = struct {
     }
 
     /// Get Jetton balance
-    pub fn getJettonBalance(self: *AgentTools, wallet_address: []const u8, jetton_master: []const u8) !tools_types.JettonBalanceResult {
-        var jwallet = jetton.JettonWallet.init(wallet_address, self.client);
-
-        const data = jwallet.getWalletData() catch |err| {
+    pub fn getJettonBalance(self: *@This(), wallet_address: []const u8, jetton_master: []const u8) !tools_types.JettonBalanceResult {
+        var result = self.client.runGetMethod(wallet_address, "get_wallet_data", &.{}) catch |err| {
             return tools_types.JettonBalanceResult{
                 .address = wallet_address,
                 .jetton_master = jetton_master,
@@ -484,6 +521,32 @@ pub const AgentTools = struct {
                 .error_message = @errorName(err),
             };
         };
+        defer self.client.freeRunGetMethodResponse(&result);
+
+        if (result.exit_code != 0) {
+            return tools_types.JettonBalanceResult{
+                .address = wallet_address,
+                .jetton_master = jetton_master,
+                .balance = "0",
+                .decimals = 9,
+                .symbol = null,
+                .success = false,
+                .error_message = "ContractError",
+            };
+        }
+
+        var data = jetton.parseJettonWalletData(self.allocator, result.stack) catch |err| {
+            return tools_types.JettonBalanceResult{
+                .address = wallet_address,
+                .jetton_master = jetton_master,
+                .balance = "0",
+                .decimals = 9,
+                .symbol = null,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        defer data.deinit(self.allocator);
 
         const balance = try std.fmt.allocPrint(self.allocator, "{d}", .{data.balance});
 
@@ -499,10 +562,35 @@ pub const AgentTools = struct {
     }
 
     /// Get NFT info
-    pub fn getNFTInfo(self: *AgentTools, nft_address: []const u8) !tools_types.NFTInfoResult {
-        var item = nft.NFTItem.init(nft_address, self.client);
+    pub fn getNFTInfo(self: *@This(), nft_address: []const u8) !tools_types.NFTInfoResult {
+        var result = self.client.runGetMethod(nft_address, "get_nft_data", &.{}) catch |err| {
+            return tools_types.NFTInfoResult{
+                .address = nft_address,
+                .owner = null,
+                .collection = null,
+                .index = "0",
+                .content = null,
+                .content_uri = null,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        defer self.client.freeRunGetMethodResponse(&result);
 
-        var data = item.getNFTData() catch |err| {
+        if (result.exit_code != 0) {
+            return tools_types.NFTInfoResult{
+                .address = nft_address,
+                .owner = null,
+                .collection = null,
+                .index = "0",
+                .content = null,
+                .content_uri = null,
+                .success = false,
+                .error_message = "ContractError",
+            };
+        }
+
+        var data = nft.parseNFTData(self.allocator, result.stack) catch |err| {
             return tools_types.NFTInfoResult{
                 .address = nft_address,
                 .owner = null,
@@ -543,7 +631,7 @@ pub const AgentTools = struct {
     }
 
     /// Send TON transfer (if wallet configured)
-    pub fn sendTransfer(self: *AgentTools, destination: []const u8, amount: u64, comment: ?[]const u8) !tools_types.SendResult {
+    pub fn sendTransfer(self: *@This(), destination: []const u8, amount: u64, comment: ?[]const u8) !tools_types.SendResult {
         const msgs = &[_]wallet.signing.WalletMessage{
             .{
                 .destination = destination,
@@ -555,7 +643,7 @@ pub const AgentTools = struct {
     }
 
     /// Send an arbitrary contract body BoC via the configured wallet
-    pub fn sendContractMessage(self: *AgentTools, destination: []const u8, amount: u64, body_boc: []const u8) !tools_types.SendResult {
+    pub fn sendContractMessage(self: *@This(), destination: []const u8, amount: u64, body_boc: []const u8) !tools_types.SendResult {
         const msgs = &[_]wallet.signing.WalletMessage{
             .{
                 .destination = destination,
@@ -567,7 +655,7 @@ pub const AgentTools = struct {
     }
 
     /// Build and send an arbitrary contract body from typed operations
-    pub fn sendContractMessageOps(self: *AgentTools, destination: []const u8, amount: u64, ops: []const body_builder.BodyOp) !tools_types.SendResult {
+    pub fn sendContractMessageOps(self: *@This(), destination: []const u8, amount: u64, ops: []const body_builder.BodyOp) !tools_types.SendResult {
         const body_boc = body_builder.buildBodyBocAlloc(self.allocator, ops) catch |err| {
             return tools_types.SendResult{
                 .hash = "",
@@ -585,7 +673,7 @@ pub const AgentTools = struct {
 
     /// Build and send a contract body from a function schema and typed values
     pub fn sendContractMessageFunction(
-        self: *AgentTools,
+        self: *@This(),
         destination: []const u8,
         amount: u64,
         function: abi_adapter.FunctionDef,
@@ -608,7 +696,7 @@ pub const AgentTools = struct {
 
     /// Build and send a contract body from a full ABI document and function name
     pub fn sendContractMessageAbi(
-        self: *AgentTools,
+        self: *@This(),
         destination: []const u8,
         amount: u64,
         abi_json: []const u8,
@@ -649,7 +737,7 @@ pub const AgentTools = struct {
 
     /// Build and send a contract body by discovering the destination ABI URI on-chain
     pub fn sendContractMessageAuto(
-        self: *AgentTools,
+        self: *@This(),
         destination: []const u8,
         amount: u64,
         function_name: []const u8,
@@ -696,7 +784,7 @@ pub const AgentTools = struct {
 
     /// Deploy a contract by sending StateInit and an optional body.
     pub fn sendContractDeploy(
-        self: *AgentTools,
+        self: *@This(),
         destination: []const u8,
         amount: u64,
         state_init_boc: []const u8,
@@ -717,7 +805,7 @@ pub const AgentTools = struct {
 
     /// Derive destination from StateInit and send a deploy message there.
     pub fn sendContractDeployAuto(
-        self: *AgentTools,
+        self: *@This(),
         workchain: i8,
         amount: u64,
         state_init_boc: []const u8,
@@ -738,7 +826,7 @@ pub const AgentTools = struct {
         return self.sendContractDeploy(addr.raw_address, amount, state_init_boc, body_boc);
     }
 
-    fn sendWalletMessages(self: *AgentTools, destination: []const u8, amount: u64, msgs: []const wallet.signing.WalletMessage) !tools_types.SendResult {
+    fn sendWalletMessages(self: *@This(), destination: []const u8, amount: u64, msgs: []const wallet.signing.WalletMessage) !tools_types.SendResult {
         const private_key = self.config.wallet_private_key orelse {
             return tools_types.SendResult{
                 .hash = "",
@@ -771,7 +859,11 @@ pub const AgentTools = struct {
             .error_message = null,
         };
     }
-};
+    };
+}
+
+pub const AgentTools = AgentToolsImpl(*http_client.TonHttpClient);
+pub const ProviderAgentTools = AgentToolsImpl(*provider_mod.MultiProvider);
 
 // Re-export types
 pub const BalanceResult = tools_types.BalanceResult;
@@ -829,6 +921,14 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.sendContractMessageAuto;
     _ = AgentTools.sendContractDeploy;
     _ = AgentTools.sendContractDeployAuto;
+    _ = ProviderAgentTools.runGetMethod;
+    _ = ProviderAgentTools.runGetMethodAbi;
+    _ = ProviderAgentTools.runGetMethodAuto;
+    _ = ProviderAgentTools.verifyPayment;
+    _ = ProviderAgentTools.waitPayment;
+    _ = ProviderAgentTools.getJettonBalance;
+    _ = ProviderAgentTools.getNFTInfo;
+    _ = ProviderAgentTools.sendTransfer;
     _ = AddressResult;
     _ = RunMethodResult;
 }

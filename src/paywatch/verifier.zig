@@ -2,10 +2,10 @@
 //! Verifies payment status on-chain
 
 const std = @import("std");
+const address_mod = @import("../core/address.zig");
 const types = @import("../core/types.zig");
 const cell = @import("../core/cell.zig");
 const invoice_mod = @import("invoice.zig");
-const http_client = @import("../core/http_client.zig");
 
 pub const VerificationResult = struct {
     verified: bool,
@@ -19,7 +19,7 @@ pub const VerificationResult = struct {
 
 /// Verify payment by checking invoice against blockchain
 pub fn verifyPayment(
-    client: *http_client.TonHttpClient,
+    client: anytype,
     invoice: *const invoice_mod.Invoice,
 ) !VerificationResult {
     // Get transactions for invoice address
@@ -28,12 +28,18 @@ pub fn verifyPayment(
 
     for (txs) |tx| {
         if (try checkTransactionMatches(&tx, invoice)) {
+            const tx_hash = try client.allocator.dupe(u8, tx.hash);
+            errdefer client.allocator.free(tx_hash);
+
+            const sender = try formatIncomingSenderAlloc(client.allocator, tx.in_msg);
+            errdefer if (sender) |value| client.allocator.free(value);
+
             return VerificationResult{
                 .verified = true,
-                .tx_hash = try client.allocator.dupe(u8, tx.hash),
+                .tx_hash = tx_hash,
                 .tx_lt = tx.lt,
                 .amount = if (tx.in_msg) |msg| msg.value else null,
-                .sender = null, // TODO: format Address properly
+                .sender = sender,
                 .confirmations = 1, // Would check block depth
                 .timestamp = tx.timestamp,
             };
@@ -75,7 +81,7 @@ pub fn checkTransactionMatches(
 
 /// Verify payment by transaction hash
 pub fn verifyByTxHash(
-    client: *http_client.TonHttpClient,
+    client: anytype,
     tx_hash: []const u8,
     invoice: *const invoice_mod.Invoice,
 ) !VerificationResult {
@@ -92,13 +98,18 @@ pub fn verifyByTxHash(
     defer client.freeTransaction(&tx);
 
     const matches = try checkTransactionMatches(&tx, invoice);
+    const resolved_tx_hash = try client.allocator.dupe(u8, tx.hash);
+    errdefer client.allocator.free(resolved_tx_hash);
+
+    const sender = try formatIncomingSenderAlloc(client.allocator, tx.in_msg);
+    errdefer if (sender) |value| client.allocator.free(value);
 
     return VerificationResult{
         .verified = matches,
-        .tx_hash = try client.allocator.dupe(u8, tx.hash),
+        .tx_hash = resolved_tx_hash,
         .tx_lt = tx.lt,
         .amount = if (tx.in_msg) |msg| msg.value else null,
-        .sender = null, // TODO: format Address properly
+        .sender = sender,
         .confirmations = 1,
         .timestamp = tx.timestamp,
     };
@@ -107,7 +118,7 @@ pub fn verifyByTxHash(
 /// Batch verify multiple invoices
 pub fn batchVerifyPayments(
     allocator: std.mem.Allocator,
-    client: *http_client.TonHttpClient,
+    client: anytype,
     invoices: []const invoice_mod.Invoice,
 ) ![]VerificationResult {
     var results = try allocator.alloc(VerificationResult, invoices.len);
@@ -145,6 +156,12 @@ fn extractMessageComment(msg: *const types.Message) !?[]const u8 {
     }
 
     return null;
+}
+
+fn formatIncomingSenderAlloc(allocator: std.mem.Allocator, msg: ?*types.Message) !?[]u8 {
+    const value = msg orelse return null;
+    const source = value.source orelse return null;
+    return address_mod.formatRaw(allocator, &source);
 }
 
 test "verification result" {

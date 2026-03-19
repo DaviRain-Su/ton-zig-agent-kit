@@ -2,6 +2,7 @@
 //! Monitors address for payments matching invoice criteria
 
 const std = @import("std");
+const address_mod = @import("../core/address.zig");
 const types = @import("../core/types.zig");
 const invoice_mod = @import("invoice.zig");
 const http_client = @import("../core/http_client.zig");
@@ -39,11 +40,25 @@ pub const PaymentResult = struct {
 
 /// Wait for payment with polling
 pub fn waitPayment(watcher: *PaymentWatcher) !PaymentResult {
+    return waitPaymentWithClient(
+        watcher.client,
+        watcher.invoice,
+        watcher.poll_interval_ms,
+        watcher.timeout_ms,
+    );
+}
+
+pub fn waitPaymentWithClient(
+    client: anytype,
+    invoice: *const invoice_mod.Invoice,
+    poll_interval_ms: u32,
+    timeout_ms: u32,
+) !PaymentResult {
     const start_time = std.time.milliTimestamp();
 
-    while (std.time.milliTimestamp() - start_time < watcher.timeout_ms) {
+    while (std.time.milliTimestamp() - start_time < timeout_ms) {
         // Check if invoice expired
-        if (invoice_mod.isExpired(watcher.invoice)) {
+        if (invoice_mod.isExpired(invoice)) {
             return PaymentResult{
                 .found = false,
                 .tx_hash = null,
@@ -56,18 +71,24 @@ pub fn waitPayment(watcher: *PaymentWatcher) !PaymentResult {
         }
 
         // Query transactions
-        const txs = try watcher.client.getTransactions(watcher.invoice.address, 10);
-        defer watcher.client.freeTransactions(txs);
+        const txs = try client.getTransactions(invoice.address, 10);
+        defer client.freeTransactions(txs);
 
         // Check each transaction
         for (txs) |tx| {
-            if (try checkTransactionMatchesInvoice(&tx, watcher.invoice)) {
+            if (try checkTransactionMatchesInvoice(&tx, invoice)) {
+                const tx_hash = try client.allocator.dupe(u8, tx.hash);
+                errdefer client.allocator.free(tx_hash);
+
+                const sender = try formatIncomingSenderAlloc(client.allocator, tx.in_msg);
+                errdefer if (sender) |value| client.allocator.free(value);
+
                 return PaymentResult{
                     .found = true,
-                    .tx_hash = try watcher.client.allocator.dupe(u8, tx.hash),
+                    .tx_hash = tx_hash,
                     .tx_lt = tx.lt,
                     .amount = if (tx.in_msg) |msg| msg.value else null,
-                    .sender = null, // TODO: format Address properly
+                    .sender = sender,
                     .confirmed_at = std.time.timestamp(),
                     .confirmations = 1,
                 };
@@ -75,7 +96,7 @@ pub fn waitPayment(watcher: *PaymentWatcher) !PaymentResult {
         }
 
         // Sleep before next poll
-        std.Thread.sleep(watcher.poll_interval_ms * std.time.ns_per_ms);
+        std.Thread.sleep(poll_interval_ms * std.time.ns_per_ms);
     }
 
     // Timeout reached
@@ -145,6 +166,12 @@ fn extractMessageComment(msg: *const types.Message) !?[]const u8 {
     }
 
     return null;
+}
+
+fn formatIncomingSenderAlloc(allocator: std.mem.Allocator, msg: ?*types.Message) !?[]u8 {
+    const value = msg orelse return null;
+    const source = value.source orelse return null;
+    return address_mod.formatRaw(allocator, &source);
 }
 
 test "payment watcher init" {

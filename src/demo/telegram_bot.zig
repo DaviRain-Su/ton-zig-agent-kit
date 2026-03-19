@@ -6,7 +6,7 @@ const core = @import("../core/core.zig");
 const tools = @import("../tools/tools_mod.zig");
 const paywatch = @import("../paywatch/paywatch.zig");
 
-const AgentTools = tools.AgentTools;
+const AgentTools = tools.ProviderAgentTools;
 const AgentToolsConfig = tools.AgentToolsConfig;
 
 /// Bot state for tracking orders
@@ -87,7 +87,7 @@ pub const BotState = struct {
 pub const DemoBot = struct {
     allocator: std.mem.Allocator,
     state: BotState,
-    client: core.http_client.TonHttpClient,
+    client: core.provider.MultiProvider,
     tools: AgentTools,
     merchant_address: []const u8,
 
@@ -100,7 +100,9 @@ pub const DemoBot = struct {
         var bot = DemoBot{
             .allocator = allocator,
             .state = BotState.init(allocator),
-            .client = try core.http_client.TonHttpClient.init(allocator, "https://toncenter.com/api/v2/jsonRPC", null),
+            .client = try core.provider.MultiProvider.init(allocator, &.{
+                .{ .url = "https://toncenter.com/api/v2/jsonRPC" },
+            }),
             .tools = undefined,
             .merchant_address = merchant_address,
         };
@@ -111,7 +113,6 @@ pub const DemoBot = struct {
 
     pub fn deinit(self: *DemoBot) void {
         self.state.deinit();
-        self.client.deinit();
     }
 
     /// Handle /start command

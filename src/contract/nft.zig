@@ -84,7 +84,7 @@ test "nft basic" {
     _ = getCollectionData;
 }
 
-fn parseNFTData(allocator: std.mem.Allocator, stack: []const types.StackEntry) !NFTData {
+pub fn parseNFTData(allocator: std.mem.Allocator, stack: []const types.StackEntry) !NFTData {
     if (stack.len < 5) return error.InvalidResponse;
 
     return NFTData{
@@ -96,7 +96,7 @@ fn parseNFTData(allocator: std.mem.Allocator, stack: []const types.StackEntry) !
     };
 }
 
-fn parseCollectionData(allocator: std.mem.Allocator, stack: []const types.StackEntry) !CollectionData {
+pub fn parseCollectionData(allocator: std.mem.Allocator, stack: []const types.StackEntry) !CollectionData {
     if (stack.len < 3) return error.InvalidResponse;
 
     return CollectionData{

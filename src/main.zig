@@ -973,10 +973,9 @@ pub fn main() !void {
                 .status = .pending,
             };
 
-            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-            defer client.deinit();
+            var provider = try initDefaultProvider(allocator);
 
-            const result = try ton_zig_agent_kit.paywatch.verifier.verifyPayment(&client, &invoice);
+            const result = try ton_zig_agent_kit.paywatch.verifier.verifyPayment(&provider, &invoice);
 
             std.debug.print("Verification result:\n", .{});
             std.debug.print("  Verified: {any}\n", .{result.verified});
@@ -985,6 +984,9 @@ pub fn main() !void {
             }
             if (result.amount) |amt| {
                 std.debug.print("  Amount: {d} nanotons\n", .{amt});
+            }
+            if (result.sender) |sender| {
+                std.debug.print("  Sender: {s}\n", .{sender});
             }
             return;
         }
@@ -1009,19 +1011,16 @@ pub fn main() !void {
                 .status = .pending,
             };
 
-            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-            defer client.deinit();
+            var provider = try initDefaultProvider(allocator);
 
             std.debug.print("Waiting for payment (timeout: 30s)...\n", .{});
 
-            var watcher = ton_zig_agent_kit.paywatch.watcher.PaymentWatcher.init(
+            const result = try ton_zig_agent_kit.paywatch.watcher.waitPaymentWithClient(
+                &provider,
                 &invoice,
-                &client,
                 5000, // 5s poll interval
                 30000, // 30s timeout
             );
-
-            const result = try ton_zig_agent_kit.paywatch.watcher.waitPayment(&watcher);
 
             if (result.found) {
                 std.debug.print("Payment found!\n", .{});
@@ -1030,6 +1029,9 @@ pub fn main() !void {
                 }
                 if (result.amount) |amt| {
                     std.debug.print("  Amount: {d} nanotons\n", .{amt});
+                }
+                if (result.sender) |sender| {
+                    std.debug.print("  Sender: {s}\n", .{sender});
                 }
             } else {
                 std.debug.print("Payment not found (timeout or expired)\n", .{});
