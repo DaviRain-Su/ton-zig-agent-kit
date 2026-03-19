@@ -125,6 +125,157 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "jetton")) {
+        if (args.len < 3) {
+            std.debug.print("Usage: ton-zig-agent-kit jetton <info|wallet-address|wallet-data>\n", .{});
+            return;
+        }
+
+        const jetton_cmd = args[2];
+        var provider = try initDefaultProvider(allocator);
+
+        if (std.mem.eql(u8, jetton_cmd, "info")) {
+            if (args.len < 4) {
+                std.debug.print("Usage: ton-zig-agent-kit jetton info <master_address>\n", .{});
+                return;
+            }
+
+            var master = contract_mod.jetton.ProviderJettonMaster.init(args[3], &provider);
+            var data = try master.getJettonData();
+            defer data.deinit(allocator);
+
+            const total_supply = try std.fmt.allocPrint(allocator, "{d}", .{data.total_supply});
+            defer allocator.free(total_supply);
+            const admin = if (data.admin) |value|
+                try ton_zig_agent_kit.core.address.formatRaw(allocator, &value)
+            else
+                null;
+            defer if (admin) |value| allocator.free(value);
+
+            std.debug.print("Jetton master:\n", .{});
+            std.debug.print("  Address: {s}\n", .{args[3]});
+            std.debug.print("  Total supply: {s}\n", .{total_supply});
+            std.debug.print("  Mintable: {s}\n", .{if (data.mintable) "yes" else "no"});
+            std.debug.print("  Admin: {s}\n", .{admin orelse "(none)"});
+            std.debug.print("  Content URI: {s}\n", .{data.content_uri orelse "(none)"});
+            std.debug.print("  Content BoC: {s}\n", .{if (data.content != null) "present" else "missing"});
+            return;
+        }
+
+        if (std.mem.eql(u8, jetton_cmd, "wallet-address")) {
+            if (args.len < 5) {
+                std.debug.print("Usage: ton-zig-agent-kit jetton wallet-address <master_address> <owner_address>\n", .{});
+                return;
+            }
+
+            var master = contract_mod.jetton.ProviderJettonMaster.init(args[3], &provider);
+            const wallet_address = try master.getWalletAddress(args[4]);
+
+            std.debug.print("Jetton wallet address:\n", .{});
+            std.debug.print("  Master: {s}\n", .{args[3]});
+            std.debug.print("  Owner: {s}\n", .{args[4]});
+            std.debug.print("  Wallet: {s}\n", .{wallet_address});
+            return;
+        }
+
+        if (std.mem.eql(u8, jetton_cmd, "wallet-data")) {
+            if (args.len < 4) {
+                std.debug.print("Usage: ton-zig-agent-kit jetton wallet-data <wallet_address>\n", .{});
+                return;
+            }
+
+            var wallet_contract = contract_mod.jetton.ProviderJettonWallet.init(args[3], &provider);
+            var data = try wallet_contract.getWalletData();
+            defer data.deinit(allocator);
+
+            const balance = try std.fmt.allocPrint(allocator, "{d}", .{data.balance});
+            defer allocator.free(balance);
+
+            std.debug.print("Jetton wallet data:\n", .{});
+            std.debug.print("  Address: {s}\n", .{args[3]});
+            std.debug.print("  Balance: {s}\n", .{balance});
+            std.debug.print("  Owner: {s}\n", .{data.owner});
+            std.debug.print("  Master: {s}\n", .{data.master});
+            return;
+        }
+
+        std.debug.print("Unknown jetton command: {s}\n", .{jetton_cmd});
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "nft")) {
+        if (args.len < 3) {
+            std.debug.print("Usage: ton-zig-agent-kit nft <info|collection-info>\n", .{});
+            return;
+        }
+
+        const nft_cmd = args[2];
+        var provider = try initDefaultProvider(allocator);
+
+        if (std.mem.eql(u8, nft_cmd, "info")) {
+            if (args.len < 4) {
+                std.debug.print("Usage: ton-zig-agent-kit nft info <item_address>\n", .{});
+                return;
+            }
+
+            var item = contract_mod.nft.ProviderNFTItem.init(args[3], &provider);
+            var data = try item.getNFTData();
+            defer data.deinit(allocator);
+
+            const index = try std.fmt.allocPrint(allocator, "{d}", .{data.index});
+            defer allocator.free(index);
+            const owner = if (data.owner) |value|
+                try ton_zig_agent_kit.core.address.formatRaw(allocator, &value)
+            else
+                null;
+            defer if (owner) |value| allocator.free(value);
+            const collection = if (data.collection) |value|
+                try ton_zig_agent_kit.core.address.formatRaw(allocator, &value)
+            else
+                null;
+            defer if (collection) |value| allocator.free(value);
+
+            std.debug.print("NFT item:\n", .{});
+            std.debug.print("  Address: {s}\n", .{args[3]});
+            std.debug.print("  Index: {s}\n", .{index});
+            std.debug.print("  Owner: {s}\n", .{owner orelse "(none)"});
+            std.debug.print("  Collection: {s}\n", .{collection orelse "(none)"});
+            std.debug.print("  Content URI: {s}\n", .{data.content_uri orelse "(none)"});
+            std.debug.print("  Content BoC: {s}\n", .{if (data.content != null) "present" else "missing"});
+            return;
+        }
+
+        if (std.mem.eql(u8, nft_cmd, "collection-info")) {
+            if (args.len < 4) {
+                std.debug.print("Usage: ton-zig-agent-kit nft collection-info <collection_address>\n", .{});
+                return;
+            }
+
+            var collection = contract_mod.nft.ProviderNFTCollection.init(args[3], &provider);
+            var data = try collection.getCollectionData();
+            defer data.deinit(allocator);
+
+            const next_item_index = try std.fmt.allocPrint(allocator, "{d}", .{data.next_item_index});
+            defer allocator.free(next_item_index);
+            const owner = if (data.owner) |value|
+                try ton_zig_agent_kit.core.address.formatRaw(allocator, &value)
+            else
+                null;
+            defer if (owner) |value| allocator.free(value);
+
+            std.debug.print("NFT collection:\n", .{});
+            std.debug.print("  Address: {s}\n", .{args[3]});
+            std.debug.print("  Owner: {s}\n", .{owner orelse "(none)"});
+            std.debug.print("  Next item index: {s}\n", .{next_item_index});
+            std.debug.print("  Content URI: {s}\n", .{data.content_uri orelse "(none)"});
+            std.debug.print("  Content BoC: {s}\n", .{if (data.content != null) "present" else "missing"});
+            return;
+        }
+
+        std.debug.print("Unknown nft command: {s}\n", .{nft_cmd});
+        return;
+    }
+
     if (std.mem.eql(u8, command, "runGetMethodTyped") or std.mem.eql(u8, command, "get-method-typed")) {
         if (args.len < 4) {
             std.debug.print("Usage: ton-zig-agent-kit runGetMethodTyped <address> <method> [null|int:<n>|addr:<addr>|cell:<b64>|slice:<b64>|builder:<b64>|cellhex:<hex>|slicehex:<hex>|builderhex:<hex> ...]\n", .{});
@@ -1508,6 +1659,11 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit runGetMethodTyped <addr> <method> [typed_args...]  Call get method with typed args\n", .{});
     std.debug.print("  ton-zig-agent-kit runGetMethodAbi <addr> <abi_json|@file|file://|http(s)://|ipfs://> <function> [values...]  Call get method with ABI decode\n", .{});
     std.debug.print("  ton-zig-agent-kit runGetMethodAuto <addr> <function> [values...]  Discover ABI and call get method\n", .{});
+    std.debug.print("  ton-zig-agent-kit jetton info <master>          Read Jetton master metadata\n", .{});
+    std.debug.print("  ton-zig-agent-kit jetton wallet-address <master> <owner>  Resolve Jetton wallet address\n", .{});
+    std.debug.print("  ton-zig-agent-kit jetton wallet-data <wallet>   Read Jetton wallet balance/owner/master\n", .{});
+    std.debug.print("  ton-zig-agent-kit nft info <item>               Read NFT item metadata\n", .{});
+    std.debug.print("  ton-zig-agent-kit nft collection-info <collection>  Read NFT collection metadata\n", .{});
     std.debug.print("    typed args: null, int:<n>, addr:<addr>, cell:<b64>, slice:<b64>, builder:<b64>, cellhex:<hex>, slicehex:<hex>, builderhex:<hex>\n", .{});
     std.debug.print("  ton-zig-agent-kit sendBoc <boc_base64>          Submit raw BoC to the network\n", .{});
     std.debug.print("  ton-zig-agent-kit sendBocHex <boc_hex>          Submit raw BoC hex to the network\n", .{});
