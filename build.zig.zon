@@ -1,0 +1,13 @@
+.{
+    .name = .ton_zig_agent_kit,
+    .version = "0.0.1",
+    .fingerprint = 0xf125ebd8aedbc082,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "PLAN.md",
+    },
+}
