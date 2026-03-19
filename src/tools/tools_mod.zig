@@ -30,6 +30,430 @@ const BuiltAbiInspect = struct {
     }
 };
 
+fn buildAbiCliArgsTemplateAlloc(
+    allocator: std.mem.Allocator,
+    params: []const abi_adapter.ParamDef,
+) anyerror![]u8 {
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    for (params, 0..) |param, idx| {
+        if (idx != 0) try writer.writer.writeByte(' ');
+        const value = try buildAbiCliValueTemplateAlloc(allocator, param);
+        defer allocator.free(value);
+        try writer.writer.writeAll(value);
+    }
+
+    return try writer.toOwnedSlice();
+}
+
+fn buildAbiNamedCliArgsTemplateAlloc(
+    allocator: std.mem.Allocator,
+    params: []const abi_adapter.ParamDef,
+) anyerror![]u8 {
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    for (params, 0..) |param, idx| {
+        if (idx != 0) try writer.writer.writeByte(' ');
+
+        var fallback_name_buf: [32]u8 = undefined;
+        const name = if (param.name.len > 0)
+            param.name
+        else
+            try std.fmt.bufPrint(&fallback_name_buf, "arg{d}", .{idx});
+
+        try writer.writer.print("{s}=", .{name});
+
+        const value = try buildAbiCliValueTemplateAlloc(allocator, param);
+        defer allocator.free(value);
+        try writer.writer.writeAll(value);
+    }
+
+    return try writer.toOwnedSlice();
+}
+
+fn buildAbiDecodedOutputsTemplateAlloc(
+    allocator: std.mem.Allocator,
+    params: []const abi_adapter.ParamDef,
+) anyerror![]u8 {
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    try writer.writer.writeByte('{');
+    for (params, 0..) |param, idx| {
+        if (idx != 0) try writer.writer.writeByte(',');
+
+        var fallback_name_buf: [32]u8 = undefined;
+        const name = if (param.name.len > 0)
+            param.name
+        else
+            try std.fmt.bufPrint(&fallback_name_buf, "value{d}", .{idx});
+
+        try writeAbiTemplateJsonString(&writer.writer, name);
+        try writer.writer.writeByte(':');
+
+        const value = try buildAbiOutputValueTemplateAlloc(allocator, param);
+        defer allocator.free(value);
+        try writer.writer.writeAll(value);
+    }
+    try writer.writer.writeByte('}');
+
+    return try writer.toOwnedSlice();
+}
+
+fn buildAbiCliValueTemplateAlloc(
+    allocator: std.mem.Allocator,
+    param: abi_adapter.ParamDef,
+) anyerror![]u8 {
+    if (abiTemplateOptionalInnerType(param.type_name) != null) {
+        return allocator.dupe(u8, "null");
+    }
+
+    if (abiTemplateArrayInnerType(param.type_name)) |inner_type| {
+        const value = try buildAbiJsonValueTemplateAlloc(allocator, abiTemplateParamWithType(param, inner_type));
+        defer allocator.free(value);
+        return std.fmt.allocPrint(allocator, "json:[{s}]", .{value});
+    }
+
+    if (abiTemplateIsCompositeParam(param)) {
+        const value = try buildAbiJsonValueTemplateAlloc(allocator, param);
+        defer allocator.free(value);
+        return std.fmt.allocPrint(allocator, "json:{s}", .{value});
+    }
+
+    if (std.mem.eql(u8, param.type_name, "bool")) {
+        return allocator.dupe(u8, "num:1");
+    }
+
+    if (std.mem.eql(u8, param.type_name, "address")) {
+        return allocator.dupe(u8, "addr:EQ...");
+    }
+
+    if (std.mem.eql(u8, param.type_name, "string")) {
+        return allocator.dupe(u8, "str:text");
+    }
+
+    if (std.mem.eql(u8, param.type_name, "bytes") or abiTemplateFixedBytesLength(param.type_name) != null) {
+        return allocator.dupe(u8, "hex:CAFE");
+    }
+
+    if (abiTemplateIsCellLikeType(param.type_name)) {
+        return allocator.dupe(u8, "boc:<base64_boc>");
+    }
+
+    if (abiTemplateIsNumericType(param.type_name)) {
+        return allocator.dupe(u8, "num:0");
+    }
+
+    return allocator.dupe(u8, "json:null");
+}
+
+fn buildAbiJsonValueTemplateAlloc(
+    allocator: std.mem.Allocator,
+    param: abi_adapter.ParamDef,
+) anyerror![]u8 {
+    if (abiTemplateOptionalInnerType(param.type_name) != null) {
+        return allocator.dupe(u8, "null");
+    }
+
+    if (abiTemplateArrayInnerType(param.type_name)) |inner_type| {
+        const value = try buildAbiJsonValueTemplateAlloc(allocator, abiTemplateParamWithType(param, inner_type));
+        defer allocator.free(value);
+        return std.fmt.allocPrint(allocator, "[{s}]", .{value});
+    }
+
+    if (abiTemplateIsCompositeParam(param)) {
+        return buildAbiCompositeJsonTemplateAlloc(allocator, param.components);
+    }
+
+    if (abiTemplateIsNumericType(param.type_name)) {
+        return allocator.dupe(u8, if (std.mem.eql(u8, param.type_name, "bool")) "true" else "0");
+    }
+
+    if (std.mem.eql(u8, param.type_name, "address")) {
+        return allocator.dupe(u8, "\"EQ...\"");
+    }
+
+    if (std.mem.eql(u8, param.type_name, "string")) {
+        return allocator.dupe(u8, "\"text\"");
+    }
+
+    if (std.mem.eql(u8, param.type_name, "bytes") or abiTemplateFixedBytesLength(param.type_name) != null) {
+        return allocator.dupe(u8, "{\"hex\":\"CAFE\"}");
+    }
+
+    if (abiTemplateIsCellLikeType(param.type_name)) {
+        return allocator.dupe(u8, "{\"boc\":\"<base64_boc>\"}");
+    }
+
+    return allocator.dupe(u8, "null");
+}
+
+fn buildAbiOutputValueTemplateAlloc(
+    allocator: std.mem.Allocator,
+    param: abi_adapter.ParamDef,
+) anyerror![]u8 {
+    if (abiTemplateOptionalInnerType(param.type_name) != null) {
+        return allocator.dupe(u8, "null");
+    }
+
+    if (abiTemplateArrayInnerType(param.type_name)) |inner_type| {
+        const value = try buildAbiOutputValueTemplateAlloc(allocator, abiTemplateParamWithType(param, inner_type));
+        defer allocator.free(value);
+        return std.fmt.allocPrint(allocator, "[{s}]", .{value});
+    }
+
+    if (abiTemplateIsCompositeParam(param)) {
+        return buildAbiCompositeOutputTemplateAlloc(allocator, param.components);
+    }
+
+    if (abiTemplateIsNumericType(param.type_name)) {
+        return allocator.dupe(u8, if (std.mem.eql(u8, param.type_name, "bool")) "true" else "0");
+    }
+
+    if (std.mem.eql(u8, param.type_name, "address")) {
+        return allocator.dupe(u8, "\"0:...\"");
+    }
+
+    if (std.mem.eql(u8, param.type_name, "string")) {
+        return allocator.dupe(u8, "\"text\"");
+    }
+
+    if (std.mem.eql(u8, param.type_name, "bytes") or abiTemplateFixedBytesLength(param.type_name) != null) {
+        return allocator.dupe(u8, "\"<base64_bytes>\"");
+    }
+
+    if (abiTemplateIsCellLikeType(param.type_name)) {
+        return allocator.dupe(u8, "\"<base64_boc>\"");
+    }
+
+    return allocator.dupe(u8, "null");
+}
+
+fn buildAbiCompositeJsonTemplateAlloc(
+    allocator: std.mem.Allocator,
+    components: []const abi_adapter.ParamDef,
+) anyerror![]u8 {
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    var has_named_components = true;
+    for (components) |component| {
+        if (component.name.len == 0) {
+            has_named_components = false;
+            break;
+        }
+    }
+
+    if (has_named_components) {
+        try writer.writer.writeByte('{');
+        for (components, 0..) |component, idx| {
+            if (idx != 0) try writer.writer.writeByte(',');
+            try writeAbiTemplateJsonString(&writer.writer, component.name);
+            try writer.writer.writeByte(':');
+            const value = try buildAbiJsonValueTemplateAlloc(allocator, component);
+            defer allocator.free(value);
+            try writer.writer.writeAll(value);
+        }
+        try writer.writer.writeByte('}');
+    } else {
+        try writer.writer.writeByte('[');
+        for (components, 0..) |component, idx| {
+            if (idx != 0) try writer.writer.writeByte(',');
+            const value = try buildAbiJsonValueTemplateAlloc(allocator, component);
+            defer allocator.free(value);
+            try writer.writer.writeAll(value);
+        }
+        try writer.writer.writeByte(']');
+    }
+
+    return try writer.toOwnedSlice();
+}
+
+fn buildAbiCompositeOutputTemplateAlloc(
+    allocator: std.mem.Allocator,
+    components: []const abi_adapter.ParamDef,
+) anyerror![]u8 {
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    var has_named_components = true;
+    for (components) |component| {
+        if (component.name.len == 0) {
+            has_named_components = false;
+            break;
+        }
+    }
+
+    if (has_named_components) {
+        try writer.writer.writeByte('{');
+        for (components, 0..) |component, idx| {
+            if (idx != 0) try writer.writer.writeByte(',');
+            try writeAbiTemplateJsonString(&writer.writer, component.name);
+            try writer.writer.writeByte(':');
+            const value = try buildAbiOutputValueTemplateAlloc(allocator, component);
+            defer allocator.free(value);
+            try writer.writer.writeAll(value);
+        }
+        try writer.writer.writeByte('}');
+    } else {
+        try writer.writer.writeByte('[');
+        for (components, 0..) |component, idx| {
+            if (idx != 0) try writer.writer.writeByte(',');
+            const value = try buildAbiOutputValueTemplateAlloc(allocator, component);
+            defer allocator.free(value);
+            try writer.writer.writeAll(value);
+        }
+        try writer.writer.writeByte(']');
+    }
+
+    return try writer.toOwnedSlice();
+}
+
+fn abiTemplateParamWithType(
+    param: abi_adapter.ParamDef,
+    type_name: []const u8,
+) abi_adapter.ParamDef {
+    return .{
+        .name = param.name,
+        .type_name = type_name,
+        .components = param.components,
+    };
+}
+
+fn abiTemplateIsCompositeParam(param: abi_adapter.ParamDef) bool {
+    return param.components.len > 0 or
+        std.mem.eql(u8, param.type_name, "tuple") or
+        std.mem.eql(u8, param.type_name, "struct");
+}
+
+fn abiTemplateIsNumericType(type_name: []const u8) bool {
+    return std.mem.eql(u8, type_name, "bool") or
+        std.mem.eql(u8, type_name, "coins") or
+        std.mem.startsWith(u8, type_name, "uint") or
+        std.mem.startsWith(u8, type_name, "int");
+}
+
+fn abiTemplateIsCellLikeType(type_name: []const u8) bool {
+    return abiTemplateMatchesAbiTypeBase(type_name, "cell") or
+        abiTemplateMatchesAbiTypeBase(type_name, "slice") or
+        abiTemplateMatchesAbiTypeBase(type_name, "builder") or
+        abiTemplateMatchesAbiTypeBase(type_name, "ref") or
+        abiTemplateMatchesAbiTypeBase(type_name, "boc") or
+        abiTemplateMatchesAbiTypeBase(type_name, "ref_boc") or
+        abiTemplateMatchesAbiTypeBase(type_name, "cell_ref") or
+        abiTemplateMatchesAbiTypeBase(type_name, "dict") or
+        abiTemplateMatchesAbiTypeBase(type_name, "map") or
+        abiTemplateMatchesAbiTypeBase(type_name, "hashmap") or
+        abiTemplateMatchesAbiTypeBase(type_name, "hashmape") or
+        abiTemplateMatchesAbiTypeBase(type_name, "dict_ref") or
+        abiTemplateMatchesAbiTypeBase(type_name, "map_ref") or
+        abiTemplateMatchesAbiTypeBase(type_name, "hashmap_ref") or
+        abiTemplateMatchesAbiTypeBase(type_name, "hashmape_ref");
+}
+
+fn abiTemplateFixedBytesLength(type_name: []const u8) ?usize {
+    const trimmed = std.mem.trim(u8, type_name, " \t\r\n");
+
+    if (abiTemplateParseFixedBytesSuffix(trimmed, "bytes")) |value| return value;
+    if (abiTemplateParseFixedBytesSuffix(trimmed, "fixedbytes")) |value| return value;
+    if (abiTemplateParseFixedBytesSuffix(trimmed, "fixed_bytes")) |value| return value;
+
+    if (abiTemplateParseFixedBytesGeneric(trimmed, "fixedbytes<")) |value| return value;
+    if (abiTemplateParseFixedBytesGeneric(trimmed, "fixed_bytes<")) |value| return value;
+
+    return null;
+}
+
+fn abiTemplateParseFixedBytesSuffix(trimmed: []const u8, comptime prefix: []const u8) ?usize {
+    if (trimmed.len <= prefix.len) return null;
+    if (!std.ascii.eqlIgnoreCase(trimmed[0..prefix.len], prefix)) return null;
+
+    const digits = trimmed[prefix.len..];
+    if (digits.len == 0) return null;
+    for (digits) |char| {
+        if (!std.ascii.isDigit(char)) return null;
+    }
+
+    return std.fmt.parseInt(usize, digits, 10) catch null;
+}
+
+fn abiTemplateParseFixedBytesGeneric(trimmed: []const u8, comptime prefix: []const u8) ?usize {
+    if (!std.ascii.startsWithIgnoreCase(trimmed, prefix)) return null;
+    if (trimmed.len <= prefix.len or trimmed[trimmed.len - 1] != '>') return null;
+    return std.fmt.parseInt(usize, trimmed[prefix.len .. trimmed.len - 1], 10) catch null;
+}
+
+fn abiTemplateMatchesAbiTypeBase(type_name: []const u8, base: []const u8) bool {
+    const trimmed = std.mem.trim(u8, type_name, " \t\r\n");
+    if (trimmed.len < base.len) return false;
+    if (!std.ascii.eqlIgnoreCase(trimmed[0..base.len], base)) return false;
+    return trimmed.len == base.len or trimmed[base.len] == '<' or trimmed[base.len] == ' ';
+}
+
+fn abiTemplateOptionalInnerType(type_name: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, type_name, " \t\r\n");
+
+    if (std.mem.startsWith(u8, trimmed, "maybe<") and trimmed.len > "maybe<>".len and trimmed[trimmed.len - 1] == '>') {
+        return std.mem.trim(u8, trimmed["maybe<".len .. trimmed.len - 1], " \t\r\n");
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "optional<") and trimmed.len > "optional<>".len and trimmed[trimmed.len - 1] == '>') {
+        return std.mem.trim(u8, trimmed["optional<".len .. trimmed.len - 1], " \t\r\n");
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "maybe ")) {
+        return std.mem.trim(u8, trimmed["maybe ".len..], " \t\r\n");
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "optional ")) {
+        return std.mem.trim(u8, trimmed["optional ".len..], " \t\r\n");
+    }
+
+    return null;
+}
+
+fn abiTemplateArrayInnerType(type_name: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trim(u8, type_name, " \t\r\n");
+
+    if (trimmed.len > 2 and std.mem.endsWith(u8, trimmed, "[]")) {
+        return std.mem.trim(u8, trimmed[0 .. trimmed.len - 2], " \t\r\n");
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "array<") and trimmed.len > "array<>".len and trimmed[trimmed.len - 1] == '>') {
+        return std.mem.trim(u8, trimmed["array<".len .. trimmed.len - 1], " \t\r\n");
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "list<") and trimmed.len > "list<>".len and trimmed[trimmed.len - 1] == '>') {
+        return std.mem.trim(u8, trimmed["list<".len .. trimmed.len - 1], " \t\r\n");
+    }
+
+    if (std.mem.startsWith(u8, trimmed, "array ")) {
+        return std.mem.trim(u8, trimmed["array ".len..], " \t\r\n");
+    }
+
+    return null;
+}
+
+fn writeAbiTemplateJsonString(writer: anytype, value: []const u8) !void {
+    try writer.writeByte('"');
+    for (value) |char| {
+        switch (char) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            0x08 => try writer.writeAll("\\b"),
+            0x0c => try writer.writeAll("\\f"),
+            0x00...0x07, 0x0b, 0x0e...0x1f => try writer.print("\\u00{X:0>2}", .{char}),
+            else => try writer.writeByte(char),
+        }
+    }
+    try writer.writeByte('"');
+}
+
 fn AgentToolsImpl(comptime ClientType: type) type {
     const supports_standard_wrappers = ClientType == *http_client.TonHttpClient or ClientType == *provider_mod.MultiProvider;
     const JettonMasterClient = if (ClientType == *http_client.TonHttpClient)
@@ -265,6 +689,12 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                     if (idx != 0) try writer.writer.writeByte(',');
                     const selector = try abi_adapter.buildFunctionSelectorAlloc(self.allocator, function);
                     defer self.allocator.free(selector);
+                    const input_template = try buildAbiCliArgsTemplateAlloc(self.allocator, function.inputs);
+                    defer self.allocator.free(input_template);
+                    const named_input_template = try buildAbiNamedCliArgsTemplateAlloc(self.allocator, function.inputs);
+                    defer self.allocator.free(named_input_template);
+                    const output_template = try buildAbiDecodedOutputsTemplateAlloc(self.allocator, function.outputs);
+                    defer self.allocator.free(output_template);
 
                     try writer.writer.writeByte('{');
                     var wrote_function = false;
@@ -276,6 +706,12 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                         try writeJsonFieldPrefix(&writer.writer, &wrote_function, "opcode");
                         try writer.writer.print("\"0x{X}\"", .{opcode});
                     }
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_function, "input_template");
+                    try writeJsonString(&writer.writer, input_template);
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_function, "named_input_template");
+                    try writeJsonString(&writer.writer, named_input_template);
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_function, "decoded_output_template");
+                    try writeJsonString(&writer.writer, output_template);
                     try writer.writer.writeByte('}');
                 }
                 try writer.writer.writeByte(']');
@@ -286,6 +722,8 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                     if (idx != 0) try writer.writer.writeByte(',');
                     const selector = try abi_adapter.buildEventSelectorAlloc(self.allocator, event);
                     defer self.allocator.free(selector);
+                    const decoded_template = try buildAbiDecodedOutputsTemplateAlloc(self.allocator, event.inputs);
+                    defer self.allocator.free(decoded_template);
 
                     try writer.writer.writeByte('{');
                     var wrote_event = false;
@@ -297,6 +735,8 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                         try writeJsonFieldPrefix(&writer.writer, &wrote_event, "opcode");
                         try writer.writer.print("\"0x{X}\"", .{opcode});
                     }
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_event, "decoded_fields_template");
+                    try writeJsonString(&writer.writer, decoded_template);
                     try writer.writer.writeByte('}');
                 }
                 try writer.writer.writeByte(']');
@@ -3008,6 +3448,9 @@ test "agent tools inspectContract summarizes wallet and abi metadata" {
     try std.testing.expect(result.abi_json != null);
     try std.testing.expect(std.mem.indexOf(u8, result.abi_json.?, "\"document_version\":\"1.0\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.abi_json.?, "\"selector\":\"transfer(address,coins)\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.abi_json.?, "\"input_template\":\"addr:EQ... num:0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.abi_json.?, "\"named_input_template\":\"to=addr:EQ... amount=num:0\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.abi_json.?, "\"decoded_output_template\":\"{}\"") != null);
     try std.testing.expect(result.details_json != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"seqno\":7") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"wallet_id\":2864434397") != null);
