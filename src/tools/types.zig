@@ -51,12 +51,16 @@ pub const DecodedBodyResult = struct {
 
 pub const BodyAnalysisResult = struct {
     opcode: ?u32,
+    opcode_name: ?[]const u8,
     comment: ?[]const u8,
     tail_utf8: ?[]const u8,
+    decoded_json: ?[]const u8,
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.opcode_name) |value| allocator.free(value);
         if (self.comment) |value| allocator.free(value);
         if (self.tail_utf8) |value| allocator.free(value);
+        if (self.decoded_json) |value| allocator.free(value);
         self.* = undefined;
     }
 };
@@ -100,12 +104,14 @@ pub const ObservedMessageSummaryResult = struct {
     direction: ObservedMessageDirection,
     count: u32,
     opcode: ?u32,
+    opcode_name: ?[]const u8,
     comment: ?[]const u8,
     utf8_tail: ?[]const u8,
     abi_kind: ?DecodedBodyKind,
     abi_selector: ?[]const u8,
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.opcode_name) |value| allocator.free(value);
         if (self.comment) |value| allocator.free(value);
         if (self.utf8_tail) |value| allocator.free(value);
         if (self.abi_selector) |value| allocator.free(value);

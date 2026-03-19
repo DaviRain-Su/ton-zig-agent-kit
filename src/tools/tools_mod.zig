@@ -738,8 +738,10 @@ fn AgentToolsImpl(comptime ClientType: type) type {
         }
 
         fn freeBodyAnalysisAlloc(allocator: std.mem.Allocator, analysis: *tools_types.BodyAnalysisResult) void {
+            if (analysis.opcode_name) |value| allocator.free(value);
             if (analysis.comment) |value| allocator.free(value);
             if (analysis.tail_utf8) |value| allocator.free(value);
+            if (analysis.decoded_json) |value| allocator.free(value);
             analysis.* = undefined;
         }
 
@@ -770,11 +772,15 @@ fn AgentToolsImpl(comptime ClientType: type) type {
 
             const result = tools_types.BodyAnalysisResult{
                 .opcode = analysis.opcode,
+                .opcode_name = analysis.opcode_name,
                 .comment = analysis.comment,
                 .tail_utf8 = analysis.tail_utf8,
+                .decoded_json = analysis.decoded_json,
             };
+            analysis.opcode_name = null;
             analysis.comment = null;
             analysis.tail_utf8 = null;
+            analysis.decoded_json = null;
             return result;
         }
 
@@ -837,6 +843,12 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 try writeJsonFieldPrefix(writer, &wrote_any, "opcode");
                 if (item.opcode) |opcode| {
                     try writer.print("\"0x{X}\"", .{opcode});
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writeJsonFieldPrefix(writer, &wrote_any, "opcode_name");
+                if (item.opcode_name) |value| {
+                    try writeJsonString(writer, value);
                 } else {
                     try writer.writeAll("null");
                 }
@@ -1615,6 +1627,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             decoded_body: ?tools_types.DecodedBodyResult,
         ) !void {
             const opcode = if (analysis) |value| value.opcode else null;
+            const opcode_name = if (analysis) |value| value.opcode_name else null;
             const comment = if (analysis) |value| value.comment else null;
             const utf8_tail = if (analysis) |value| value.tail_utf8 else null;
             const abi_kind = if (decoded_body) |value| value.kind else null;
@@ -1623,6 +1636,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             for (items.items) |*item| {
                 if (item.direction != direction) continue;
                 if (item.opcode != opcode) continue;
+                if (!optionalStringsEqual(item.opcode_name, opcode_name)) continue;
                 if (!optionalStringsEqual(item.comment, comment)) continue;
                 if (!optionalStringsEqual(item.utf8_tail, utf8_tail)) continue;
                 if (item.abi_kind != abi_kind) continue;
@@ -1635,6 +1649,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 .direction = direction,
                 .count = 1,
                 .opcode = opcode,
+                .opcode_name = try self.dupOptionalStringAlloc(opcode_name),
                 .comment = try self.dupOptionalStringAlloc(comment),
                 .utf8_tail = try self.dupOptionalStringAlloc(utf8_tail),
                 .abi_kind = abi_kind,
@@ -5464,6 +5479,7 @@ test "agent tools inspectContract summarizes wallet and abi metadata" {
     try std.testing.expectEqualStrings("transfer(address,coins)", result.observed_messages[0].abi_selector.?);
     try std.testing.expectEqual(tools_types.ObservedMessageDirection.outgoing, result.observed_messages[1].direction);
     try std.testing.expectEqual(@as(?u32, 0), result.observed_messages[1].opcode);
+    try std.testing.expectEqualStrings("comment", result.observed_messages[1].opcode_name.?);
     try std.testing.expectEqualStrings("refund", result.observed_messages[1].comment.?);
     try std.testing.expect(result.details_json != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"seqno\":7") != null);
@@ -5471,6 +5487,7 @@ test "agent tools inspectContract summarizes wallet and abi metadata" {
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"public_key\":\"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"observed_messages\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"abi_selector\":\"transfer(address,coins)\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"opcode_name\":\"comment\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"comment\":\"refund\"") != null);
 }
 

@@ -993,11 +993,17 @@ pub fn main() !void {
             } else {
                 std.debug.print("  Opcode: (none)\n", .{});
             }
+            if (analysis.opcode_name) |value| {
+                std.debug.print("  Opcode name: {s}\n", .{value});
+            }
             if (analysis.comment) |value| {
                 std.debug.print("  Comment: {s}\n", .{value});
             }
             if (analysis.tail_utf8) |value| {
                 std.debug.print("  UTF-8 tail: {s}\n", .{value});
+            }
+            if (analysis.decoded_json) |value| {
+                std.debug.print("  Decoded fields:\n{s}\n", .{value});
             }
             if (analysis.empty()) {
                 std.debug.print("  No obvious UTF-8/comment payload detected\n", .{});
@@ -3333,11 +3339,17 @@ fn printBodyAnalysis(allocator: std.mem.Allocator, body: *const Cell) void {
     if (analysis.opcode) |opcode| {
         std.debug.print("  Body opcode: 0x{X}\n", .{opcode});
     }
+    if (analysis.opcode_name) |value| {
+        std.debug.print("  Body opcode name: {s}\n", .{value});
+    }
     if (analysis.comment) |value| {
         std.debug.print("  Body comment: {s}\n", .{value});
     }
     if (analysis.tail_utf8) |value| {
         std.debug.print("  Body UTF-8 tail: {s}\n", .{value});
+    }
+    if (analysis.decoded_json) |value| {
+        std.debug.print("  Body decoded:\n{s}\n", .{value});
     }
 }
 
@@ -3555,6 +3567,9 @@ fn printInspectObservedMessages(items: []const ton_zig_agent_kit.tools.tools_mod
         }
         if (item.opcode) |opcode| {
             std.debug.print(" op=0x{X}", .{opcode});
+        }
+        if (item.opcode_name) |value| {
+            std.debug.print(" {s}", .{value});
         }
         if (item.abi_kind) |kind| {
             std.debug.print(" {s}", .{switch (kind) {
