@@ -1,5 +1,6 @@
 //! Common types for TON interactions
 
+const std = @import("std");
 const cell = @import("cell.zig");
 
 pub const Address = struct {
@@ -7,93 +8,28 @@ pub const Address = struct {
     workchain: i8,
 
     pub fn parseUserFriendly(str: []const u8) !Address {
-        _ = str;
-        return error.InvalidAddress;
+        return @import("address.zig").parseAddress(str);
     }
     pub fn parseRaw(str: []const u8) !Address {
-        _ = str;
-        return error.InvalidAddress;
+        return @import("address.zig").parseAddress(str);
     }
     pub fn toUserFriendly(self: *const Address) []const u8 {
-        _ = self;
-        return "";
+        return @import("address.zig").addressToUserFriendly(self, false);
+    }
+    pub fn toUserFriendlyAlloc(self: *const Address, allocator: std.mem.Allocator, bounceable: bool, testnet: bool) ![]u8 {
+        return @import("address.zig").addressToUserFriendlyAlloc(allocator, self, bounceable, testnet);
     }
     pub fn toRaw(self: *const Address) []const u8 {
-        _ = self;
-        return "";
+        return @import("address.zig").formatRaw(std.heap.page_allocator, self) catch "";
+    }
+    pub fn toRawAlloc(self: *const Address, allocator: std.mem.Allocator) ![]u8 {
+        return @import("address.zig").formatRaw(allocator, self);
     }
 };
 
-pub const Cell = struct {
-    data: [128]u8,
-    bit_len: u16,
-    refs: [4]?*Cell,
-    ref_cnt: u2,
-};
-
-pub const Builder = struct {
-    data: [128]u8,
-    bit_len: u16,
-    refs: [4]?*Cell,
-    ref_cnt: u2,
-
-    pub fn init() Builder {
-        return .{};
-    }
-    pub fn storeUint(self: *Builder, value: u64, bits: u16) !void {
-        _ = self;
-        _ = value;
-        _ = bits;
-        return error.InvalidCell;
-    }
-    pub fn storeCoins(self: *Builder, coins: u64) !void {
-        _ = self;
-        _ = coins;
-        return error.InvalidCell;
-    }
-    pub fn storeAddress(self: *Builder, addr: *const Address) !void {
-        _ = self;
-        _ = addr;
-        return error.InvalidCell;
-    }
-    pub fn storeSlice(self: *Builder, slice: *const Slice) !void {
-        _ = self;
-        _ = slice;
-        return error.InvalidCell;
-    }
-    pub fn toCell(self: *Builder) !*Cell {
-        _ = self;
-        return error.InvalidCell;
-    }
-};
-
-pub const Slice = struct {
-    cell: *Cell,
-    pos_bits: u16,
-    pos_refs: u2,
-
-    pub fn loadUint(self: *Slice, comptime bits: u16) u64 {
-        _ = self;
-        _ = bits;
-        return 0;
-    }
-    pub fn loadCoins(self: *Slice) u64 {
-        _ = self;
-        return 0;
-    }
-    pub fn loadAddress(self: *Slice) !Address {
-        _ = self;
-        return error.InvalidAddress;
-    }
-    pub fn loadRef(self: *Slice) !*Cell {
-        _ = self;
-        return error.InvalidCell;
-    }
-    pub fn empty(self: *const Slice) bool {
-        _ = self;
-        return true;
-    }
-};
+pub const Cell = cell.Cell;
+pub const Builder = cell.Builder;
+pub const Slice = cell.Slice;
 
 pub const RunGetMethodResponse = struct {
     exit_code: i32,
@@ -147,3 +83,31 @@ pub const TonError = error{
     Timeout,
     NotFound,
 };
+
+test "core types address helpers delegate to real implementation" {
+    const allocator = std.testing.allocator;
+
+    const parsed = try Address.parseUserFriendly("EQDKbjIcfM6ezt8KjKJJLshZJJSqX7XOA4ff-W72r5gqPrHF");
+    try std.testing.expectEqual(@as(i8, 0), parsed.workchain);
+
+    const raw = try parsed.toRawAlloc(allocator);
+    defer allocator.free(raw);
+    try std.testing.expectEqualStrings("0:ca6e321c7cce9ecedf0a8ca2492ec8592494aa5fb5ce0387dff96ef6af982a3e", raw);
+
+    const bounceable = try parsed.toUserFriendlyAlloc(allocator, true, false);
+    defer allocator.free(bounceable);
+    try std.testing.expectEqualStrings("EQDKbjIcfM6ezt8KjKJJLshZJJSqX7XOA4ff-W72r5gqPrHF", bounceable);
+}
+
+test "core types cell aliases expose working builder and slice" {
+    const allocator = std.testing.allocator;
+
+    var builder = Builder.init();
+    try builder.storeUint(0xCAFE, 16);
+    const value = try builder.toCell(allocator);
+    defer value.deinit(allocator);
+
+    var slice = value.toSlice();
+    try std.testing.expectEqual(@as(u64, 0xCAFE), try slice.loadUint(16));
+    try std.testing.expect(slice.empty());
+}

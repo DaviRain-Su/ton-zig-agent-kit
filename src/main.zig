@@ -77,6 +77,41 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "inspectContract") or std.mem.eql(u8, command, "inspect-contract")) {
+        if (args.len < 3) {
+            std.debug.print("Usage: ton-zig-agent-kit inspectContract <address>\n", .{});
+            return;
+        }
+
+        const addr = args[2];
+        var client = try TonHttpClient.init(allocator, default_rpc_url, null);
+        defer client.deinit();
+
+        const supported = try contract_mod.abi_adapter.querySupportedInterfaces(&client, addr);
+        var abi = try contract_mod.abi_adapter.queryAbiIpfs(&client, addr);
+        defer if (abi) |*info| info.deinit(allocator);
+
+        std.debug.print("Address: {s}\n", .{addr});
+        if (supported) |value| {
+            std.debug.print("Supported interfaces:\n", .{});
+            std.debug.print("  wallet: {s}\n", .{if (value.has_wallet) "yes" else "no"});
+            std.debug.print("  jetton: {s}\n", .{if (value.has_jetton) "yes" else "no"});
+            std.debug.print("  nft: {s}\n", .{if (value.has_nft) "yes" else "no"});
+            std.debug.print("  abi: {s}\n", .{if (value.has_abi) "yes" else "no"});
+        } else {
+            std.debug.print("Supported interfaces: none detected\n", .{});
+        }
+
+        if (abi) |info| {
+            std.debug.print("ABI:\n", .{});
+            std.debug.print("  kind: {s}\n", .{info.version});
+            std.debug.print("  uri: {s}\n", .{info.uri orelse "(missing)"});
+        } else {
+            std.debug.print("ABI: not detected\n", .{});
+        }
+        return;
+    }
+
     if (std.mem.eql(u8, command, "runGetMethodTyped") or std.mem.eql(u8, command, "get-method-typed")) {
         if (args.len < 4) {
             std.debug.print("Usage: ton-zig-agent-kit runGetMethodTyped <address> <method> [int:<n>|addr:<addr>|cell:<b64>|slice:<b64>|cellhex:<hex>|slicehex:<hex> ...]\n", .{});
@@ -656,6 +691,7 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit version                       Show version\n", .{});
     std.debug.print("  ton-zig-agent-kit getBalance <address>          Get TON balance\n", .{});
     std.debug.print("  ton-zig-agent-kit runGetMethod <addr> <method> [stack_json]  Call any get method\n", .{});
+    std.debug.print("  ton-zig-agent-kit inspectContract <addr>        Detect standard interfaces and ABI URI\n", .{});
     std.debug.print("  ton-zig-agent-kit runGetMethodTyped <addr> <method> [typed_args...]  Call get method with typed args\n", .{});
     std.debug.print("  ton-zig-agent-kit sendBoc <boc_base64>          Submit raw BoC to the network\n", .{});
     std.debug.print("  ton-zig-agent-kit sendBocHex <boc_hex>          Submit raw BoC hex to the network\n", .{});
