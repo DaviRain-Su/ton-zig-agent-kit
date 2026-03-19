@@ -276,6 +276,126 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "paywatch") or std.mem.eql(u8, command, "watch")) {
+        if (args.len < 3) {
+            std.debug.print("Usage: ton-zig-agent-kit paywatch <invoice|verify|wait>\n", .{});
+            return;
+        }
+        const watch_cmd = args[2];
+
+        if (std.mem.eql(u8, watch_cmd, "invoice")) {
+            if (args.len < 5) {
+                std.debug.print("Usage: ton-zig-agent-kit paywatch invoice <destination> <amount_tons>\n", .{});
+                return;
+            }
+            const destination = args[3];
+            const amount = try std.fmt.parseInt(u64, args[4], 10);
+            const amount_nanoton = amount * 1_000_000_000;
+
+            const invoice = try ton_zig_agent_kit.paywatch.invoice.createInvoice(allocator, destination, amount_nanoton, "Payment");
+            defer allocator.free(invoice.id);
+            defer allocator.free(invoice.comment);
+            defer allocator.free(invoice.payment_url);
+
+            std.debug.print("Invoice created:\n", .{});
+            std.debug.print("  ID: {s}\n", .{invoice.id});
+            std.debug.print("  Address: {s}\n", .{invoice.address});
+            std.debug.print("  Amount: {d} TON ({d} nanotons)\n", .{ amount, amount_nanoton });
+            std.debug.print("  Comment: {s}\n", .{invoice.comment});
+            std.debug.print("  Payment URL: {s}\n", .{invoice.payment_url});
+            std.debug.print("  Expires: {d}\n", .{invoice.expires_at.?});
+            return;
+        }
+
+        if (std.mem.eql(u8, watch_cmd, "verify")) {
+            if (args.len < 5) {
+                std.debug.print("Usage: ton-zig-agent-kit paywatch verify <address> <comment>\n", .{});
+                return;
+            }
+            const address = args[3];
+            const comment = args[4];
+
+            // Create a temporary invoice for verification
+            const invoice = ton_zig_agent_kit.paywatch.invoice.Invoice{
+                .id = "verify",
+                .address = address,
+                .comment = comment,
+                .amount = 0,
+                .description = "",
+                .payment_url = "",
+                .created_at = std.time.timestamp(),
+                .expires_at = null,
+                .status = .pending,
+            };
+
+            var client = try TonHttpClient.init(allocator, "https://tonapi.io", null);
+            defer client.deinit();
+
+            const result = try ton_zig_agent_kit.paywatch.verifier.verifyPayment(&client, &invoice);
+
+            std.debug.print("Verification result:\n", .{});
+            std.debug.print("  Verified: {any}\n", .{result.verified});
+            if (result.tx_hash) |hash| {
+                std.debug.print("  Transaction: {s}\n", .{hash});
+            }
+            if (result.amount) |amt| {
+                std.debug.print("  Amount: {d} nanotons\n", .{amt});
+            }
+            return;
+        }
+
+        if (std.mem.eql(u8, watch_cmd, "wait")) {
+            if (args.len < 5) {
+                std.debug.print("Usage: ton-zig-agent-kit paywatch wait <address> <comment>\n", .{});
+                return;
+            }
+            const address = args[3];
+            const comment = args[4];
+
+            const invoice = ton_zig_agent_kit.paywatch.invoice.Invoice{
+                .id = "wait",
+                .address = address,
+                .comment = comment,
+                .amount = 0,
+                .description = "",
+                .payment_url = "",
+                .created_at = std.time.timestamp(),
+                .expires_at = std.time.timestamp() + 300, // 5 min timeout
+                .status = .pending,
+            };
+
+            var client = try TonHttpClient.init(allocator, "https://tonapi.io", null);
+            defer client.deinit();
+
+            std.debug.print("Waiting for payment (timeout: 30s)...\n", .{});
+
+            var watcher = ton_zig_agent_kit.paywatch.watcher.PaymentWatcher.init(
+                &invoice,
+                &client,
+                5000, // 5s poll interval
+                30000, // 30s timeout
+            );
+
+            const result = try ton_zig_agent_kit.paywatch.watcher.waitPayment(&watcher);
+
+            if (result.found) {
+                std.debug.print("Payment found!\n", .{});
+                if (result.tx_hash) |hash| {
+                    std.debug.print("  Transaction: {s}\n", .{hash});
+                }
+                if (result.amount) |amt| {
+                    std.debug.print("  Amount: {d} nanotons\n", .{amt});
+                }
+            } else {
+                std.debug.print("Payment not found (timeout or expired)\n", .{});
+            }
+            return;
+        }
+
+        std.debug.print("Unknown paywatch command: {s}\n", .{watch_cmd});
+        return;
+    }
+
     try printUsage();
 }
 
@@ -318,6 +438,10 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit wallet genkey                Generate keypair\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet seqno <addr>          Get wallet seqno\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send <src> <dst> <amount>  Send TON\n", .{});
+    std.debug.print("\nPayment watch operations:\n", .{});
+    std.debug.print("  ton-zig-agent-kit paywatch invoice <dest> <amount>  Create invoice\n", .{});
+    std.debug.print("  ton-zig-agent-kit paywatch verify <addr> <comment>  Verify payment\n", .{});
+    std.debug.print("  ton-zig-agent-kit paywatch wait <addr> <comment>    Wait for payment\n", .{});
 }
 
 test "basic test" {

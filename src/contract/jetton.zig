@@ -179,7 +179,7 @@ test "jetton master" {
     var client = try http_client.TonHttpClient.init(allocator, "https://tonapi.io", null);
     defer client.deinit();
 
-    var master = JettonMaster.init("EQBlqsm144Dq6SjbPIPcQWL1rzbDF7CWeYmpE6FsiVreAYeY", &client);
+    const master = JettonMaster.init("EQBlqsm144Dq6SjbPIPcQWL1rzbDF7CWeYmpE6FsiVreAYeY", &client);
     _ = master;
 }
 
@@ -188,6 +188,6 @@ test "jetton wallet" {
     var client = try http_client.TonHttpClient.init(allocator, "https://tonapi.io", null);
     defer client.deinit();
 
-    var wallet = JettonWallet.init("EQ...", &client);
+    const wallet = JettonWallet.init("EQ...", &client);
     _ = wallet;
 }

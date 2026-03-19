@@ -1,5 +1,7 @@
 //! Common types for TON interactions
 
+const cell = @import("cell.zig");
+
 pub const Address = struct {
     raw: [32]u8,
     workchain: i8,
@@ -129,7 +131,7 @@ pub const Message = struct {
     source: ?Address,
     destination: ?Address,
     value: u64,
-    body: ?*Cell,
+    body: ?*cell.Cell,
     raw_body: []const u8,
 };
 
