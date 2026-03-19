@@ -9,6 +9,7 @@ const Slice = ton_zig_agent_kit.core.Slice;
 const StackEntry = ton_zig_agent_kit.core.types.StackEntry;
 const BodyOp = ton_zig_agent_kit.core.body_builder.BodyOp;
 const contract_mod = ton_zig_agent_kit.contract;
+const AbiValue = contract_mod.abi_adapter.AbiValue;
 const boc = ton_zig_agent_kit.core.boc;
 const signing = ton_zig_agent_kit.wallet.signing;
 const default_rpc_url = "https://toncenter.com/api/v2/jsonRPC";
@@ -215,7 +216,7 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "cell")) {
         if (args.len < 3) {
-            std.debug.print("Usage: ton-zig-agent-kit cell <create|encode|decode|hash|build-typed>\n", .{});
+            std.debug.print("Usage: ton-zig-agent-kit cell <create|encode|decode|hash|build-typed|build-function>\n", .{});
             return;
         }
         const cell_cmd = args[2];
@@ -319,13 +320,48 @@ pub fn main() !void {
             return;
         }
 
+        if (std.mem.eql(u8, cell_cmd, "build-function")) {
+            if (args.len < 4) {
+                std.debug.print("Usage: ton-zig-agent-kit cell build-function <function_json> <values...>\n", .{});
+                return;
+            }
+
+            var function_def = try contract_mod.abi_adapter.parseFunctionDefJsonAlloc(allocator, args[3]);
+            defer function_def.deinit(allocator);
+
+            var parsed_values = try parseCliAbiValues(allocator, args[4..]);
+            defer parsed_values.deinit(allocator);
+
+            const built = try contract_mod.abi_adapter.buildFunctionBodyBocAlloc(
+                allocator,
+                function_def.function,
+                parsed_values.values,
+            );
+            defer allocator.free(built);
+
+            const encoded_len = std.base64.standard.Encoder.calcSize(built.len);
+            const encoded = try allocator.alloc(u8, encoded_len);
+            defer allocator.free(encoded);
+            _ = std.base64.standard.Encoder.encode(encoded, built);
+
+            std.debug.print("Built function body BoC:\n", .{});
+            std.debug.print("  Function: {s}\n", .{function_def.function.name});
+            std.debug.print("  Base64: {s}\n", .{encoded});
+            std.debug.print("  Hex: ", .{});
+            for (built) |byte| {
+                std.debug.print("{X:0>2}", .{byte});
+            }
+            std.debug.print("\n", .{});
+            return;
+        }
+
         std.debug.print("Unknown cell command: {s}\n", .{cell_cmd});
         return;
     }
 
     if (std.mem.eql(u8, command, "wallet")) {
         if (args.len < 3) {
-            std.debug.print("Usage: ton-zig-agent-kit wallet <genkey|seqno|send|send-body|send-body-hex|send-ops>\n", .{});
+            std.debug.print("Usage: ton-zig-agent-kit wallet <genkey|seqno|send|send-body|send-body-hex|send-ops|send-function>\n", .{});
             return;
         }
         const wallet_cmd = args[2];
@@ -462,6 +498,44 @@ pub fn main() !void {
             defer client.freeSendBocResponse(&result);
 
             std.debug.print("Typed contract message submitted:\n", .{});
+            std.debug.print("  Hash: {s}\n", .{result.hash});
+            std.debug.print("  LT: {d}\n", .{result.lt});
+            return;
+        }
+
+        if (std.mem.eql(u8, wallet_cmd, "send-function")) {
+            if (args.len < 8) {
+                std.debug.print("Usage: ton-zig-agent-kit wallet send-function <wallet_addr> <dest> <amount_nanoton> <function_json> <values...>\n", .{});
+                return;
+            }
+            const wallet_addr = args[3];
+            const dest = args[4];
+            const amount = try std.fmt.parseInt(u64, args[5], 10);
+
+            var function_def = try contract_mod.abi_adapter.parseFunctionDefJsonAlloc(allocator, args[6]);
+            defer function_def.deinit(allocator);
+
+            var parsed_values = try parseCliAbiValues(allocator, args[7..]);
+            defer parsed_values.deinit(allocator);
+
+            const body = try contract_mod.abi_adapter.buildFunctionBodyBocAlloc(
+                allocator,
+                function_def.function,
+                parsed_values.values,
+            );
+            defer allocator.free(body);
+
+            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
+            defer client.deinit();
+
+            const keypair = try signing.generateKeypair("my_seed_phrase");
+            const private_key = keypair[0];
+
+            var result = try signing.sendBody(&client, .v4, private_key, wallet_addr, dest, amount, body);
+            defer client.freeSendBocResponse(&result);
+
+            std.debug.print("Function contract message submitted:\n", .{});
+            std.debug.print("  Function: {s}\n", .{function_def.function.name});
             std.debug.print("  Hash: {s}\n", .{result.hash});
             std.debug.print("  LT: {d}\n", .{result.lt});
             return;
@@ -671,6 +745,21 @@ const ParsedIntBodyOp = struct {
     value: i64,
 };
 
+const ParsedCliAbiValues = struct {
+    values: []AbiValue,
+    owned_buffers: []?[]u8,
+
+    fn deinit(self: *ParsedCliAbiValues, allocator: std.mem.Allocator) void {
+        for (self.owned_buffers) |buffer| {
+            if (buffer) |value| allocator.free(value);
+        }
+        allocator.free(self.owned_buffers);
+        allocator.free(self.values);
+        self.values = &.{};
+        self.owned_buffers = &.{};
+    }
+};
+
 fn parseCliBodyOps(allocator: std.mem.Allocator, specs: []const []const u8) !ParsedCliBodyOps {
     const parsed_ops = try allocator.alloc(BodyOp, specs.len);
     errdefer allocator.free(parsed_ops);
@@ -742,6 +831,70 @@ fn parseCliBodyOps(allocator: std.mem.Allocator, specs: []const []const u8) !Par
 
     return .{
         .ops = parsed_ops,
+        .owned_buffers = owned_buffers,
+    };
+}
+
+fn parseCliAbiValues(allocator: std.mem.Allocator, specs: []const []const u8) !ParsedCliAbiValues {
+    const values = try allocator.alloc(AbiValue, specs.len);
+    errdefer allocator.free(values);
+
+    const owned_buffers = try allocator.alloc(?[]u8, specs.len);
+    for (owned_buffers) |*buffer| buffer.* = null;
+    errdefer {
+        for (owned_buffers) |buffer| {
+            if (buffer) |value| allocator.free(value);
+        }
+        allocator.free(owned_buffers);
+    }
+
+    for (specs, 0..) |spec, i| {
+        if (std.mem.startsWith(u8, spec, "u:")) {
+            values[i] = .{ .uint = try parseStackUint(spec["u:".len..]) };
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, spec, "i:")) {
+            values[i] = .{ .int = try parseStackInt(spec["i:".len..]) };
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, spec, "str:")) {
+            values[i] = .{ .text = spec["str:".len..] };
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, spec, "addr:")) {
+            values[i] = .{ .text = spec["addr:".len..] };
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, spec, "hex:")) {
+            const decoded = try hexToBytes(allocator, spec["hex:".len..]);
+            owned_buffers[i] = decoded;
+            values[i] = .{ .bytes = decoded };
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, spec, "boc:")) {
+            const decoded = try decodeBase64FlexibleAlloc(allocator, spec["boc:".len..]);
+            owned_buffers[i] = decoded;
+            values[i] = .{ .boc = decoded };
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, spec, "bochex:")) {
+            const decoded = try hexToBytes(allocator, spec["bochex:".len..]);
+            owned_buffers[i] = decoded;
+            values[i] = .{ .boc = decoded };
+            continue;
+        }
+
+        return error.InvalidAbiValueSpec;
+    }
+
+    return .{
+        .values = values,
         .owned_buffers = owned_buffers,
     };
 }
@@ -960,7 +1113,9 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit cell encode <hex>            Encode data to BoC\n", .{});
     std.debug.print("  ton-zig-agent-kit cell hash <hex>              Get cell hash\n", .{});
     std.debug.print("  ton-zig-agent-kit cell build-typed <ops...>    Build body BoC from typed ops\n", .{});
+    std.debug.print("  ton-zig-agent-kit cell build-function <function_json> <values...>  Build body from function schema\n", .{});
     std.debug.print("    body ops: u<bits>:<v>, i<bits>:<v>, coins:<v>, addr:<addr>, bytes:<utf8>, hex:<hex>, ref:<b64 boc>, refhex:<hex boc>\n", .{});
+    std.debug.print("    function values: u:<v>, i:<v>, str:<utf8>, addr:<addr>, hex:<hex>, boc:<b64 boc>, bochex:<hex boc>\n", .{});
     std.debug.print("\nWallet operations:\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet genkey                Generate keypair\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet seqno <addr>          Get wallet seqno\n", .{});
@@ -968,6 +1123,7 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit wallet send-body <src> <dst> <amount> <body_b64>  Send raw contract body\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-body-hex <src> <dst> <amount> <body_hex>  Send raw contract body hex\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-ops <src> <dst> <amount> <ops...>  Build and send typed contract body\n", .{});
+    std.debug.print("  ton-zig-agent-kit wallet send-function <src> <dst> <amount> <function_json> <values...>  Build and send function body\n", .{});
     std.debug.print("\nPayment watch operations:\n", .{});
     std.debug.print("  ton-zig-agent-kit paywatch invoice <dest> <amount>  Create invoice\n", .{});
     std.debug.print("  ton-zig-agent-kit paywatch verify <addr> <comment>  Verify payment\n", .{});
@@ -1106,4 +1262,24 @@ test "parse cli body ops" {
     try std.testing.expectEqualStrings("OK", parsed.ops[4].bytes);
     try std.testing.expectEqualSlices(u8, &.{ 0xCA, 0xFE }, parsed.ops[5].bytes);
     try std.testing.expectEqualSlices(u8, &.{ 0xB5, 0xEE, 0x9C, 0x72 }, parsed.ops[6].ref_boc[0..4]);
+}
+
+test "parse cli abi values" {
+    const allocator = std.testing.allocator;
+    var parsed = try parseCliAbiValues(allocator, &.{
+        "u:0x12345678",
+        "i:-1",
+        "str:hello",
+        "addr:0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+        "hex:CAFE",
+        "bochex:b5ee9c72410101010003000001ab8958a94a",
+    });
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 6), parsed.values.len);
+    try std.testing.expectEqual(@as(u64, 0x12345678), parsed.values[0].uint);
+    try std.testing.expectEqual(@as(i64, -1), parsed.values[1].int);
+    try std.testing.expectEqualStrings("hello", parsed.values[2].text);
+    try std.testing.expectEqualSlices(u8, &.{ 0xCA, 0xFE }, parsed.values[4].bytes);
+    try std.testing.expectEqualSlices(u8, &.{ 0xB5, 0xEE, 0x9C, 0x72 }, parsed.values[5].boc[0..4]);
 }

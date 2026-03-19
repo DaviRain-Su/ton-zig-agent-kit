@@ -9,6 +9,7 @@ const paywatch = @import("../paywatch/paywatch.zig");
 const wallet = @import("../wallet/wallet.zig");
 const signing = @import("../wallet/signing.zig");
 const contract = @import("../contract/contract.zig");
+const abi_adapter = @import("../contract/abi_adapter.zig");
 const jetton = @import("../contract/jetton.zig");
 const nft = @import("../contract/nft.zig");
 const tools_types = @import("types.zig");
@@ -320,6 +321,29 @@ pub const AgentTools = struct {
         return self.sendContractMessage(destination, amount, body_boc);
     }
 
+    /// Build and send a contract body from a function schema and typed values
+    pub fn sendContractMessageFunction(
+        self: *AgentTools,
+        destination: []const u8,
+        amount: u64,
+        function: abi_adapter.FunctionDef,
+        values: []const abi_adapter.AbiValue,
+    ) !tools_types.SendResult {
+        const body_boc = abi_adapter.buildFunctionBodyBocAlloc(self.allocator, function, values) catch |err| {
+            return tools_types.SendResult{
+                .hash = "",
+                .lt = 0,
+                .destination = destination,
+                .amount = amount,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        defer self.allocator.free(body_boc);
+
+        return self.sendContractMessage(destination, amount, body_boc);
+    }
+
     fn sendWalletMessages(self: *AgentTools, destination: []const u8, amount: u64, msgs: []const wallet.signing.WalletMessage) !tools_types.SendResult {
         const private_key = self.config.wallet_private_key orelse {
             return tools_types.SendResult{
@@ -402,5 +426,6 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.runGetMethod;
     _ = AgentTools.sendContractMessage;
     _ = AgentTools.sendContractMessageOps;
+    _ = AgentTools.sendContractMessageFunction;
     _ = RunMethodResult;
 }
