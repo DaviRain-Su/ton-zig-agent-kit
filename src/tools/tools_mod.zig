@@ -11,6 +11,7 @@ const external_message = @import("../core/external_message.zig");
 const core_types = @import("../core/types.zig");
 const http_client = @import("../core/http_client.zig");
 const provider_mod = @import("../core/provider.zig");
+const stack_inspector = @import("../core/stack_inspector.zig");
 const state_init = @import("../core/state_init.zig");
 const paywatch = @import("../paywatch/paywatch.zig");
 const wallet = @import("../wallet/wallet.zig");
@@ -2095,6 +2096,19 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             };
         }
 
+        fn buildRunMethodStackSummaryAlloc(
+            self: *@This(),
+            stack: []const core_types.StackEntry,
+        ) !struct {
+            json: []u8,
+            unsupported_count: u32,
+        } {
+            return .{
+                .json = try stack_inspector.summarizeStackJsonAlloc(self.allocator, stack),
+                .unsupported_count = stack_inspector.countUnsupportedStackEntries(stack),
+            };
+        }
+
         /// Run any contract get-method with typed stack arguments
         pub fn runGetMethod(self: *@This(), contract_address: []const u8, method: []const u8, args: []const contract.StackArg) !tools_types.RunMethodResult {
             const stack_input = contract.buildStackArgsJsonAlloc(self.allocator, args) catch |err| {
@@ -2137,6 +2151,21 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                     .error_message = @errorName(err),
                 };
             };
+            errdefer self.allocator.free(stack_json);
+
+            const stack_summary = self.buildRunMethodStackSummaryAlloc(result.stack) catch |err| {
+                return tools_types.RunMethodResult{
+                    .address = contract_address,
+                    .method = method,
+                    .exit_code = result.exit_code,
+                    .stack_json = stack_json,
+                    .decoded_json = null,
+                    .logs = "",
+                    .success = false,
+                    .error_message = @errorName(err),
+                };
+            };
+            errdefer self.allocator.free(stack_summary.json);
 
             const logs = try self.allocator.dupe(u8, result.logs);
             return tools_types.RunMethodResult{
@@ -2144,6 +2173,8 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 .method = method,
                 .exit_code = result.exit_code,
                 .stack_json = stack_json,
+                .stack_summary_json = stack_summary.json,
+                .unsupported_count = stack_summary.unsupported_count,
                 .decoded_json = null,
                 .logs = logs,
                 .success = true,
@@ -2263,6 +2294,20 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             };
             errdefer self.allocator.free(stack_json);
 
+            const stack_summary = self.buildRunMethodStackSummaryAlloc(result.stack) catch |err| {
+                return tools_types.RunMethodResult{
+                    .address = contract_address,
+                    .method = function_name,
+                    .exit_code = result.exit_code,
+                    .stack_json = stack_json,
+                    .decoded_json = null,
+                    .logs = "",
+                    .success = false,
+                    .error_message = @errorName(err),
+                };
+            };
+            errdefer self.allocator.free(stack_summary.json);
+
             const logs = try self.allocator.dupe(u8, result.logs);
             errdefer self.allocator.free(logs);
 
@@ -2276,6 +2321,8 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                     .method = function_name,
                     .exit_code = result.exit_code,
                     .stack_json = stack_json,
+                    .stack_summary_json = stack_summary.json,
+                    .unsupported_count = stack_summary.unsupported_count,
                     .decoded_json = null,
                     .logs = logs,
                     .success = false,
@@ -2289,6 +2336,8 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 .method = function_name,
                 .exit_code = result.exit_code,
                 .stack_json = stack_json,
+                .stack_summary_json = stack_summary.json,
+                .unsupported_count = stack_summary.unsupported_count,
                 .decoded_json = decoded_json,
                 .logs = logs,
                 .success = true,
@@ -2416,6 +2465,20 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             };
             errdefer self.allocator.free(stack_json);
 
+            const stack_summary = self.buildRunMethodStackSummaryAlloc(result.stack) catch |err| {
+                return tools_types.RunMethodResult{
+                    .address = contract_address,
+                    .method = function_name,
+                    .exit_code = result.exit_code,
+                    .stack_json = stack_json,
+                    .decoded_json = null,
+                    .logs = "",
+                    .success = false,
+                    .error_message = @errorName(err),
+                };
+            };
+            errdefer self.allocator.free(stack_summary.json);
+
             const logs = try self.allocator.dupe(u8, result.logs);
             errdefer self.allocator.free(logs);
 
@@ -2429,6 +2492,8 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                     .method = function_name,
                     .exit_code = result.exit_code,
                     .stack_json = stack_json,
+                    .stack_summary_json = stack_summary.json,
+                    .unsupported_count = stack_summary.unsupported_count,
                     .decoded_json = null,
                     .logs = logs,
                     .success = false,
@@ -2442,6 +2507,8 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 .method = function_name,
                 .exit_code = result.exit_code,
                 .stack_json = stack_json,
+                .stack_summary_json = stack_summary.json,
+                .unsupported_count = stack_summary.unsupported_count,
                 .decoded_json = decoded_json,
                 .logs = logs,
                 .success = true,
@@ -4902,6 +4969,80 @@ test "agent tools decodeEventBodyAuto discovers abi and decodes event body" {
     try std.testing.expectEqual(@as(?u32, 0x01020304), result.opcode);
     try std.testing.expectEqualStrings("Transfer(coins,bool)", result.selector);
     try std.testing.expectEqualStrings("{\"amount\":99,\"active\":true}", result.decoded_json);
+}
+
+test "agent tools runGetMethod includes stack summary for unsupported entries" {
+    const allocator = std.testing.allocator;
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+
+        fn freeEntry(self: *@This(), entry: *core_types.StackEntry) void {
+            switch (entry.*) {
+                .tuple => |items| {
+                    for (items) |*child| self.freeEntry(child);
+                    if (items.len > 0) self.allocator.free(items);
+                },
+                .list => |items| {
+                    for (items) |*child| self.freeEntry(child);
+                    if (items.len > 0) self.allocator.free(items);
+                },
+                .big_number => |value| if (value.len > 0) self.allocator.free(value),
+                .unsupported => |value| if (value.len > 0) self.allocator.free(value),
+                .bytes => |value| if (value.len > 0) self.allocator.free(value),
+                .cell => |value| value.deinit(self.allocator),
+                .slice => |value| value.deinit(self.allocator),
+                .builder => |value| value.deinit(self.allocator),
+                else => {},
+            }
+        }
+
+        pub fn runGetMethodJson(self: *@This(), addr: []const u8, method: []const u8, stack_json: []const u8) anyerror!core_types.RunGetMethodResponse {
+            _ = addr;
+            _ = method;
+            _ = stack_json;
+
+            const nested = try self.allocator.alloc(core_types.StackEntry, 2);
+            nested[0] = .{ .unsupported = try self.allocator.dupe(u8, "{\"@type\":\"tvm.stackEntryCont\",\"continuation\":{\"pc\":7}}") };
+            nested[1] = .{ .big_number = try self.allocator.dupe(u8, "340282366920938463463374607431768211455") };
+
+            const stack = try self.allocator.alloc(core_types.StackEntry, 2);
+            stack[0] = .{ .tuple = nested };
+            stack[1] = .{ .number = 5 };
+
+            return .{
+                .exit_code = 0,
+                .stack = stack,
+                .logs = "vm log",
+            };
+        }
+
+        pub fn freeRunGetMethodResponse(self: *@This(), response: *core_types.RunGetMethodResponse) void {
+            for (response.stack) |*entry| self.freeEntry(entry);
+            if (response.stack.len > 0) self.allocator.free(response.stack);
+        }
+    };
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    var client = FakeClient{ .allocator = allocator };
+    var tools = FakeTools.init(allocator, &client, .{ .rpc_url = "https://example.invalid" });
+
+    const result = try tools.runGetMethod(
+        "0:1111111111111111111111111111111111111111111111111111111111111111",
+        "mystery",
+        &.{},
+    );
+    defer allocator.free(result.stack_json);
+    defer allocator.free(result.stack_summary_json);
+    defer allocator.free(result.logs);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqual(@as(u32, 1), result.unsupported_count);
+    try std.testing.expect(std.mem.indexOf(u8, result.stack_json, "\"unsupported\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stack_summary_json, "\"unsupported_count\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stack_summary_json, "\"raw_tag\":\"tvm.stackEntryCont\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.stack_summary_json, "\"kind\":\"tuple\"") != null);
+    try std.testing.expectEqualStrings("vm log", result.logs);
 }
 
 test "agent tools getTransactions returns summary results" {

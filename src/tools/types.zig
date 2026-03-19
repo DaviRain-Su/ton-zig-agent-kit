@@ -26,6 +26,8 @@ pub const RunMethodResult = struct {
     method: []const u8,
     exit_code: i32,
     stack_json: []const u8,
+    stack_summary_json: []const u8 = "{\"items\":[],\"unsupported_count\":0}",
+    unsupported_count: u32 = 0,
     decoded_json: ?[]const u8 = null,
     logs: []const u8,
     success: bool,

@@ -174,7 +174,7 @@ pub fn main() !void {
         std.debug.print("Address: {s}\n", .{addr});
         std.debug.print("Method: {s}\n", .{method});
         std.debug.print("Stack JSON: {s}\n", .{stack_json});
-        printRunGetMethodResult(result);
+        try printRunGetMethodResult(allocator, result);
         return;
     }
 
@@ -546,7 +546,7 @@ pub fn main() !void {
         std.debug.print("Address: {s}\n", .{addr});
         std.debug.print("Method: {s}\n", .{method});
         std.debug.print("Typed args: {d}\n", .{parsed_args.args.len});
-        printRunGetMethodResult(result);
+        try printRunGetMethodResult(allocator, result);
         return;
     }
 
@@ -583,7 +583,7 @@ pub fn main() !void {
         std.debug.print("Address: {s}\n", .{addr});
         std.debug.print("ABI version: {s}\n", .{abi.abi.version});
         std.debug.print("Function: {s}\n", .{function_selector});
-        printRunGetMethodResult(result);
+        try printRunGetMethodResult(allocator, result);
 
         const decoded = try contract_mod.abi_adapter.decodeFunctionOutputsJsonAlloc(
             allocator,
@@ -634,7 +634,7 @@ pub fn main() !void {
         std.debug.print("ABI source: {s}\n", .{abi.abi.uri orelse "(embedded)"});
         std.debug.print("ABI version: {s}\n", .{abi.abi.version});
         std.debug.print("Function: {s}\n", .{function_selector});
-        printRunGetMethodResult(result);
+        try printRunGetMethodResult(allocator, result);
 
         const decoded = try contract_mod.abi_adapter.decodeFunctionOutputsJsonAlloc(
             allocator,
@@ -3361,7 +3361,7 @@ fn printTransactionDetails(
     }
 }
 
-fn printRunGetMethodResult(result: ton_zig_agent_kit.core.types.RunGetMethodResponse) void {
+fn printRunGetMethodResult(allocator: std.mem.Allocator, result: ton_zig_agent_kit.core.types.RunGetMethodResponse) !void {
     std.debug.print("Exit code: {d}\n", .{result.exit_code});
 
     if (result.logs.len > 0) {
@@ -3378,6 +3378,14 @@ fn printRunGetMethodResult(result: ton_zig_agent_kit.core.types.RunGetMethodResp
         printIndent(2);
         std.debug.print("[{d}] ", .{i});
         printStackEntry(entry, 4);
+    }
+
+    const unsupported_count = ton_zig_agent_kit.core.countUnsupportedStackEntries(result.stack);
+    if (unsupported_count > 0) {
+        const summary_json = try ton_zig_agent_kit.core.summarizeStackJsonAlloc(allocator, result.stack);
+        defer allocator.free(summary_json);
+
+        std.debug.print("Stack analysis ({d} unsupported entries):\n{s}\n", .{ unsupported_count, summary_json });
     }
 }
 
