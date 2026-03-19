@@ -329,12 +329,12 @@ fn buildStackJson(allocator: std.mem.Allocator, stack: []const []const u8) ![]u8
 }
 
 fn parseStack(allocator: std.mem.Allocator, value: std.json.Value) anyerror![]types.StackEntry {
-    if (value != .array) return error.InvalidResponse;
+    const items = try extractStackItems(value);
 
-    const entries = try allocator.alloc(types.StackEntry, value.array.items.len);
+    const entries = try allocator.alloc(types.StackEntry, items.len);
     errdefer allocator.free(entries);
 
-    for (value.array.items, 0..) |item, i| {
+    for (items, 0..) |item, i| {
         entries[i] = try parseStackEntry(allocator, item);
     }
 
@@ -342,52 +342,152 @@ fn parseStack(allocator: std.mem.Allocator, value: std.json.Value) anyerror![]ty
 }
 
 fn parseStackEntry(allocator: std.mem.Allocator, value: std.json.Value) anyerror!types.StackEntry {
-    if (value != .array or value.array.items.len == 0) return error.InvalidResponse;
-    if (value.array.items[0] != .string) return error.InvalidResponse;
+    const normalized = try normalizeStackEntry(allocator, value);
+    defer if (normalized.owned_tag) |tag| allocator.free(tag);
 
-    const tag = value.array.items[0].string;
-
-    if (std.mem.eql(u8, tag, "null")) {
+    if (std.mem.eql(u8, normalized.tag, "null")) {
         return .{ .null = {} };
     }
 
-    if (value.array.items.len < 2) return error.InvalidResponse;
-    const raw_value = value.array.items[1];
+    if (normalized.payload == null) return error.InvalidResponse;
+    const raw_value = normalized.payload.?;
 
-    if (std.mem.eql(u8, tag, "num") or std.mem.eql(u8, tag, "int")) {
+    if (std.mem.eql(u8, normalized.tag, "num") or std.mem.eql(u8, normalized.tag, "int")) {
         return try parseTonNumber(allocator, raw_value);
     }
 
-    if (std.mem.eql(u8, tag, "tuple")) {
+    if (std.mem.eql(u8, normalized.tag, "tuple")) {
         const items = try parseStack(allocator, raw_value);
         return .{ .tuple = items };
     }
 
-    if (std.mem.eql(u8, tag, "list")) {
+    if (std.mem.eql(u8, normalized.tag, "list")) {
         const items = try parseStack(allocator, raw_value);
         return .{ .list = items };
     }
 
-    if (std.mem.eql(u8, tag, "bytes")) {
-        return .{ .bytes = try dupJsonString(allocator, raw_value) };
+    if (std.mem.eql(u8, normalized.tag, "bytes")) {
+        return .{ .bytes = try dupStackString(allocator, raw_value) };
     }
 
-    if (std.mem.eql(u8, tag, "cell") or std.mem.eql(u8, tag, "slice") or std.mem.eql(u8, tag, "builder")) {
+    if (std.mem.eql(u8, normalized.tag, "cell") or std.mem.eql(u8, normalized.tag, "slice") or std.mem.eql(u8, normalized.tag, "builder")) {
         const boc_base64 = try extractStackBytes(raw_value);
         const boc_bytes = try decodeBase64Flexible(allocator, boc_base64);
         defer allocator.free(boc_bytes);
 
         const parsed_cell = try boc.deserializeBoc(allocator, boc_bytes);
-        if (std.mem.eql(u8, tag, "cell")) {
+        if (std.mem.eql(u8, normalized.tag, "cell")) {
             return .{ .cell = parsed_cell };
         }
-        if (std.mem.eql(u8, tag, "slice")) {
+        if (std.mem.eql(u8, normalized.tag, "slice")) {
             return .{ .slice = parsed_cell };
         }
         return .{ .builder = parsed_cell };
     }
 
     return error.UnsupportedStackEntry;
+}
+
+const NormalizedStackEntry = struct {
+    tag: []const u8,
+    payload: ?std.json.Value,
+    owned_tag: ?[]u8 = null,
+};
+
+fn normalizeStackEntry(allocator: std.mem.Allocator, value: std.json.Value) !NormalizedStackEntry {
+    return switch (value) {
+        .array => {
+            if (value.array.items.len == 0) return error.InvalidResponse;
+            if (value.array.items[0] != .string) return error.InvalidResponse;
+            const normalized_tag = try normalizeStackTagAlloc(allocator, value.array.items[0].string);
+
+            return .{
+                .tag = normalized_tag,
+                .payload = if (value.array.items.len >= 2) value.array.items[1] else null,
+                .owned_tag = normalized_tag,
+            };
+        },
+        .object => {
+            const raw_tag = if (value.object.get("type")) |tag_val|
+                try dupJsonString(allocator, tag_val)
+            else if (value.object.get("@type")) |tag_val|
+                try dupJsonString(allocator, tag_val)
+            else
+                return error.InvalidResponse;
+            errdefer allocator.free(raw_tag);
+            const normalized_tag = try normalizeStackTagAlloc(allocator, raw_tag);
+            allocator.free(raw_tag);
+
+            return .{
+                .tag = normalized_tag,
+                .payload = stackEntryObjectPayload(value.object),
+                .owned_tag = normalized_tag,
+            };
+        },
+        else => error.InvalidResponse,
+    };
+}
+
+fn normalizeStackTagAlloc(allocator: std.mem.Allocator, raw_tag: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, raw_tag, " \t\r\n");
+    var normalized = try allocator.alloc(u8, trimmed.len);
+    errdefer allocator.free(normalized);
+
+    for (trimmed, 0..) |char, idx| {
+        normalized[idx] = std.ascii.toLower(char);
+    }
+
+    if (std.mem.startsWith(u8, normalized, "tvm.")) {
+        const out = try allocator.dupe(u8, normalized["tvm.".len..]);
+        allocator.free(normalized);
+        normalized = out;
+    }
+
+    if (std.mem.eql(u8, normalized, "vm_stk_null") or std.mem.eql(u8, normalized, "none")) {
+        const out = try allocator.dupe(u8, "null");
+        allocator.free(normalized);
+        return out;
+    }
+
+    if (std.mem.eql(u8, normalized, "number")) {
+        const out = try allocator.dupe(u8, "num");
+        allocator.free(normalized);
+        return out;
+    }
+
+    if (std.mem.eql(u8, normalized, "integer")) {
+        const out = try allocator.dupe(u8, "int");
+        allocator.free(normalized);
+        return out;
+    }
+
+    return normalized;
+}
+
+fn stackEntryObjectPayload(object: std.json.ObjectMap) ?std.json.Value {
+    return object.get("value") orelse
+        object.get("val") orelse
+        object.get("bytes") orelse
+        object.get("cell") orelse
+        object.get("slice") orelse
+        object.get("builder") orelse
+        object.get("items") orelse
+        object.get("list") orelse
+        object.get("tuple");
+}
+
+fn extractStackItems(value: std.json.Value) ![]const std.json.Value {
+    return switch (value) {
+        .array => value.array.items,
+        .object => if (stackEntryObjectPayload(value.object)) |payload|
+            switch (payload) {
+                .array => payload.array.items,
+                else => error.InvalidResponse,
+            }
+        else
+            error.InvalidResponse,
+        else => error.InvalidResponse,
+    };
 }
 
 fn freeStackEntry(allocator: std.mem.Allocator, entry: *types.StackEntry) void {
@@ -417,9 +517,29 @@ fn extractStackBytes(value: std.json.Value) ![]const u8 {
                 .string => bytes_value.string,
                 else => error.InvalidResponse,
             }
+        else if (value.object.get("boc")) |boc_value|
+            switch (boc_value) {
+                .string => boc_value.string,
+                else => error.InvalidResponse,
+            }
+        else if (value.object.get("value")) |nested_value|
+            try extractStackBytes(nested_value)
         else
             error.InvalidResponse,
         else => error.UnsupportedStackEntry,
+    };
+}
+
+fn dupStackString(allocator: std.mem.Allocator, value: std.json.Value) ![]u8 {
+    return switch (value) {
+        .string => allocator.dupe(u8, value.string),
+        .object => if (value.object.get("value")) |nested|
+            dupStackString(allocator, nested)
+        else if (value.object.get("bytes")) |nested|
+            dupStackString(allocator, nested)
+        else
+            error.InvalidResponse,
+        else => error.InvalidResponse,
     };
 }
 
@@ -437,6 +557,12 @@ fn parseTonNumber(allocator: std.mem.Allocator, value: std.json.Value) !types.St
                 else => return error.InvalidResponse,
             }
         },
+        .object => if (value.object.get("value")) |nested|
+            parseTonNumber(allocator, nested)
+        else if (value.object.get("number")) |nested|
+            parseTonNumber(allocator, nested)
+        else
+            error.InvalidResponse,
         else => error.InvalidResponse,
     };
 }
@@ -818,6 +944,93 @@ test "parse runGetMethod stack supports null list builder and bytes" {
     try std.testing.expectEqual(@as(usize, 2), stack[2].list.len);
     try std.testing.expectEqual(@as(i64, 42), stack[2].list[0].number);
     try std.testing.expectEqualStrings("https://example.com/abi.json", stack[2].list[1].bytes);
+}
+
+test "parse runGetMethod stack supports object entries and tvm tags" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "result": {
+        \\    "exit_code": 0,
+        \\    "stack": [
+        \\      {"type":"tvm.Number","value":"0x2a"},
+        \\      {"type":"tvm.Slice","value":{"bytes":"te6cckEBAQEABgAACP/////btDe4"}},
+        \\      {"type":"bytes","value":"hello"},
+        \\      {"type":"tvm.Tuple","items":[
+        \\        {"type":"int","value":{"number":"-1"}},
+        \\        {"type":"null"}
+        \\      ]}
+        \\    ],
+        \\    "logs": ""
+        \\  }
+        \\}
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+
+    const stack = try parseStack(allocator, parsed.value.object.get("result").?.object.get("stack").?);
+    defer {
+        var client = TonHttpClient{
+            .allocator = allocator,
+            .base_url = "",
+            .api_key = null,
+            .http_client = .{ .allocator = allocator },
+        };
+        var response = types.RunGetMethodResponse{
+            .exit_code = 0,
+            .stack = stack,
+            .logs = "",
+        };
+        client.freeRunGetMethodResponse(&response);
+    }
+
+    try std.testing.expectEqual(@as(i64, 42), stack[0].number);
+    try std.testing.expectEqual(@as(u16, 32), stack[1].slice.bit_len);
+    try std.testing.expectEqualStrings("hello", stack[2].bytes);
+    try std.testing.expectEqual(@as(usize, 2), stack[3].tuple.len);
+    try std.testing.expectEqual(@as(i64, -1), stack[3].tuple[0].number);
+    try std.testing.expect(std.meta.activeTag(stack[3].tuple[1]) == .null);
+}
+
+test "parse runGetMethod stack supports object wrapped list payload" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "result": {
+        \\    "exit_code": 0,
+        \\    "stack": {
+        \\      "items": [
+        \\        {"type":"list","value":{"items":[{"type":"num","value":"0x2"}]}}
+        \\      ]
+        \\    },
+        \\    "logs": ""
+        \\  }
+        \\}
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+
+    const stack = try parseStack(allocator, parsed.value.object.get("result").?.object.get("stack").?);
+    defer {
+        var client = TonHttpClient{
+            .allocator = allocator,
+            .base_url = "",
+            .api_key = null,
+            .http_client = .{ .allocator = allocator },
+        };
+        var response = types.RunGetMethodResponse{
+            .exit_code = 0,
+            .stack = stack,
+            .logs = "",
+        };
+        client.freeRunGetMethodResponse(&response);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), stack.len);
+    try std.testing.expectEqual(@as(usize, 1), stack[0].list.len);
+    try std.testing.expectEqual(@as(i64, 2), stack[0].list[0].number);
 }
 
 test "decode base64 flexible accepts standard and url safe" {
