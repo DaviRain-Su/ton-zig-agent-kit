@@ -187,6 +187,26 @@ pub const ContractInspectResult = struct {
     }
 };
 
+pub const AbiParamTemplateResult = struct {
+    name: []const u8,
+    type_name: []const u8,
+    cli_template: []const u8,
+    json_template: []const u8,
+    decoded_template: []const u8,
+    components: []AbiParamTemplateResult,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.name.len > 0) allocator.free(self.name);
+        if (self.type_name.len > 0) allocator.free(self.type_name);
+        if (self.cli_template.len > 0) allocator.free(self.cli_template);
+        if (self.json_template.len > 0) allocator.free(self.json_template);
+        if (self.decoded_template.len > 0) allocator.free(self.decoded_template);
+        for (self.components) |*item| item.deinit(allocator);
+        if (self.components.len > 0) allocator.free(self.components);
+        self.* = undefined;
+    }
+};
+
 pub const AbiFunctionTemplateResult = struct {
     name: []const u8,
     selector: []const u8,
@@ -194,6 +214,8 @@ pub const AbiFunctionTemplateResult = struct {
     input_template: []const u8,
     named_input_template: []const u8,
     decoded_output_template: []const u8,
+    inputs: []AbiParamTemplateResult,
+    outputs: []AbiParamTemplateResult,
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         if (self.name.len > 0) allocator.free(self.name);
@@ -201,6 +223,10 @@ pub const AbiFunctionTemplateResult = struct {
         if (self.input_template.len > 0) allocator.free(self.input_template);
         if (self.named_input_template.len > 0) allocator.free(self.named_input_template);
         if (self.decoded_output_template.len > 0) allocator.free(self.decoded_output_template);
+        for (self.inputs) |*item| item.deinit(allocator);
+        if (self.inputs.len > 0) allocator.free(self.inputs);
+        for (self.outputs) |*item| item.deinit(allocator);
+        if (self.outputs.len > 0) allocator.free(self.outputs);
         self.* = undefined;
     }
 };
@@ -210,11 +236,14 @@ pub const AbiEventTemplateResult = struct {
     selector: []const u8,
     opcode: ?u32,
     decoded_fields_template: []const u8,
+    fields: []AbiParamTemplateResult,
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         if (self.name.len > 0) allocator.free(self.name);
         if (self.selector.len > 0) allocator.free(self.selector);
         if (self.decoded_fields_template.len > 0) allocator.free(self.decoded_fields_template);
+        for (self.fields) |*item| item.deinit(allocator);
+        if (self.fields.len > 0) allocator.free(self.fields);
         self.* = undefined;
     }
 };

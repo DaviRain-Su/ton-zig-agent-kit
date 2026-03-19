@@ -807,6 +807,34 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                     .input_template = try buildAbiCliArgsTemplateAlloc(self.allocator, function.inputs),
                     .named_input_template = try buildAbiNamedCliArgsTemplateAlloc(self.allocator, function.inputs),
                     .decoded_output_template = try buildAbiDecodedOutputsTemplateAlloc(self.allocator, function.outputs),
+                    .inputs = try self.buildAbiParamTemplateResultsAlloc(function.inputs),
+                    .outputs = try self.buildAbiParamTemplateResultsAlloc(function.outputs),
+                };
+                built += 1;
+            }
+
+            return items;
+        }
+
+        fn buildAbiParamTemplateResultsAlloc(
+            self: *@This(),
+            params: []const abi_adapter.ParamDef,
+        ) ![]tools_types.AbiParamTemplateResult {
+            const items = try self.allocator.alloc(tools_types.AbiParamTemplateResult, params.len);
+            var built: usize = 0;
+            errdefer {
+                for (items[0..built]) |*item| item.deinit(self.allocator);
+                if (items.len > 0) self.allocator.free(items);
+            }
+
+            for (params, 0..) |param, idx| {
+                items[idx] = .{
+                    .name = try self.allocator.dupe(u8, param.name),
+                    .type_name = try self.allocator.dupe(u8, param.type_name),
+                    .cli_template = try buildAbiCliValueTemplateAlloc(self.allocator, param),
+                    .json_template = try buildAbiJsonValueTemplateAlloc(self.allocator, param),
+                    .decoded_template = try buildAbiOutputValueTemplateAlloc(self.allocator, param),
+                    .components = try self.buildAbiParamTemplateResultsAlloc(param.components),
                 };
                 built += 1;
             }
@@ -831,6 +859,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                     .selector = try abi_adapter.buildEventSelectorAlloc(self.allocator, event),
                     .opcode = event.opcode,
                     .decoded_fields_template = try buildAbiDecodedOutputsTemplateAlloc(self.allocator, event.inputs),
+                    .fields = try self.buildAbiParamTemplateResultsAlloc(event.inputs),
                 };
                 built += 1;
             }
@@ -2934,6 +2963,7 @@ pub const TxResult = tools_types.TxResult;
 pub const TransactionListResult = tools_types.TransactionListResult;
 pub const TransactionDetailResult = tools_types.TransactionDetailResult;
 pub const ContractInspectResult = tools_types.ContractInspectResult;
+pub const AbiParamTemplateResult = tools_types.AbiParamTemplateResult;
 pub const AbiFunctionTemplateResult = tools_types.AbiFunctionTemplateResult;
 pub const AbiEventTemplateResult = tools_types.AbiEventTemplateResult;
 pub const AbiDescribeResult = tools_types.AbiDescribeResult;
@@ -3644,6 +3674,9 @@ test "agent tools inspectContract summarizes wallet and abi metadata" {
     try std.testing.expectEqual(@as(usize, 1), result.functions.len);
     try std.testing.expectEqualStrings("transfer", result.functions[0].name);
     try std.testing.expectEqualStrings("to=addr:EQ... amount=num:0", result.functions[0].named_input_template);
+    try std.testing.expectEqual(@as(usize, 2), result.functions[0].inputs.len);
+    try std.testing.expectEqualStrings("address", result.functions[0].inputs[0].type_name);
+    try std.testing.expectEqualStrings("addr:EQ...", result.functions[0].inputs[0].cli_template);
     try std.testing.expectEqual(@as(usize, 0), result.events.len);
     try std.testing.expect(result.details_json != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"seqno\":7") != null);
@@ -3702,9 +3735,19 @@ test "agent tools describeAbi returns structured templates for direct source" {
     try std.testing.expectEqualStrings("addr:EQ... num:0", result.functions[0].input_template);
     try std.testing.expectEqualStrings("to=addr:EQ... amount=num:0", result.functions[0].named_input_template);
     try std.testing.expectEqualStrings("{\"ok\":true}", result.functions[0].decoded_output_template);
+    try std.testing.expectEqual(@as(usize, 2), result.functions[0].inputs.len);
+    try std.testing.expectEqualStrings("to", result.functions[0].inputs[0].name);
+    try std.testing.expectEqualStrings("address", result.functions[0].inputs[0].type_name);
+    try std.testing.expectEqualStrings("addr:EQ...", result.functions[0].inputs[0].cli_template);
+    try std.testing.expectEqualStrings("\"EQ...\"", result.functions[0].inputs[0].json_template);
+    try std.testing.expectEqualStrings("\"0:...\"", result.functions[0].inputs[0].decoded_template);
+    try std.testing.expectEqual(@as(usize, 1), result.functions[0].outputs.len);
+    try std.testing.expectEqualStrings("bool", result.functions[0].outputs[0].type_name);
     try std.testing.expectEqualStrings("Transfer", result.events[0].name);
     try std.testing.expectEqualStrings("Transfer(coins)", result.events[0].selector);
     try std.testing.expectEqualStrings("{\"amount\":0}", result.events[0].decoded_fields_template);
+    try std.testing.expectEqual(@as(usize, 1), result.events[0].fields.len);
+    try std.testing.expectEqualStrings("coins", result.events[0].fields[0].type_name);
 }
 
 test "agent tools describeAbiAuto discovers abi and returns templates" {
@@ -3781,6 +3824,55 @@ test "agent tools describeAbiAuto discovers abi and returns templates" {
     try std.testing.expectEqualStrings(abi_uri, result.uri.?);
     try std.testing.expectEqual(@as(usize, 1), result.functions.len);
     try std.testing.expectEqualStrings("ping()", result.functions[0].selector);
+    try std.testing.expectEqual(@as(usize, 0), result.functions[0].inputs.len);
+    try std.testing.expectEqual(@as(usize, 0), result.functions[0].outputs.len);
+}
+
+test "agent tools describeAbi preserves nested parameter schemas" {
+    const allocator = std.testing.allocator;
+
+    const FakeClient = struct {};
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    const abi_json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "set_config",
+        \\      "inputs": [
+        \\        {
+        \\          "name": "config",
+        \\          "type": "tuple",
+        \\          "components": [
+        \\            {"name": "enabled", "type": "bool"},
+        \\            {"name": "label", "type": "optional<string>"}
+        \\          ]
+        \\        }
+        \\      ],
+        \\      "outputs": []
+        \\    }
+        \\  ],
+        \\  "events": []
+        \\}
+    ;
+
+    var client = FakeClient{};
+    var tools = FakeTools.init(allocator, &client, .{ .rpc_url = "https://example.invalid" });
+
+    var result = try tools.describeAbi(abi_json);
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqual(@as(usize, 1), result.functions.len);
+    try std.testing.expectEqual(@as(usize, 1), result.functions[0].inputs.len);
+    try std.testing.expectEqualStrings("tuple", result.functions[0].inputs[0].type_name);
+    try std.testing.expectEqual(@as(usize, 2), result.functions[0].inputs[0].components.len);
+    try std.testing.expectEqualStrings("enabled", result.functions[0].inputs[0].components[0].name);
+    try std.testing.expectEqualStrings("bool", result.functions[0].inputs[0].components[0].type_name);
+    try std.testing.expectEqualStrings("label", result.functions[0].inputs[0].components[1].name);
+    try std.testing.expectEqualStrings("optional<string>", result.functions[0].inputs[0].components[1].type_name);
+    try std.testing.expectEqualStrings("null", result.functions[0].inputs[0].components[1].cli_template);
 }
 
 test "agent tools generic runGetMethod result type is exported" {
@@ -3844,6 +3936,7 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = TransactionListResult;
     _ = TransactionDetailResult;
     _ = ContractInspectResult;
+    _ = AbiParamTemplateResult;
     _ = AbiFunctionTemplateResult;
     _ = AbiEventTemplateResult;
     _ = AbiDescribeResult;
