@@ -37,12 +37,21 @@ pub const WalletInfo = struct {
 /// Generate Ed25519 keypair from seed
 pub fn generateKeypair(seed: []const u8) ![2][32]u8 {
     const seed_bytes = deriveSeed(seed);
-    const keypair = try Ed25519.KeyPair.generateDeterministic(seed_bytes);
+    return keypairFromPrivateKeySeed(seed_bytes);
+}
+
+pub fn keypairFromPrivateKeySeed(seed: [32]u8) ![2][32]u8 {
+    const keypair = try Ed25519.KeyPair.generateDeterministic(seed);
 
     return .{
         keypair.secret_key.seed(),
         keypair.public_key.toBytes(),
     };
+}
+
+pub fn derivePublicKey(private_key_seed: [32]u8) ![32]u8 {
+    const keypair = try ed25519KeyPairFromSeed(private_key_seed);
+    return keypair.public_key.toBytes();
 }
 
 fn deriveSeed(seed: []const u8) [32]u8 {

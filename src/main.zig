@@ -15,6 +15,9 @@ const signing = ton_zig_agent_kit.wallet.signing;
 const default_rpc_url = "https://toncenter.com/api/v2/jsonRPC";
 const inspect_abi_list_limit: usize = 12;
 const inspect_abi_template_limit: usize = 3;
+const wallet_private_key_hex_env = "TON_PRIVATE_KEY_HEX";
+const wallet_seed_env = "TON_SEED";
+const wallet_seed_file_env = "TON_SEED_FILE";
 
 const LoadedCliAbi = struct {
     abi: contract_mod.abi_adapter.OwnedAbiInfo,
@@ -817,15 +820,26 @@ pub fn main() !void {
         const wallet_cmd = args[2];
 
         if (std.mem.eql(u8, wallet_cmd, "genkey")) {
-            const keypair = try signing.generateKeypair("my_seed_phrase");
+            const wallet_keys = if (args.len >= 4)
+                loadCliWalletKeyMaterialFromSpec(allocator, args[3]) catch |err| {
+                    printWalletKeyLoadError(err);
+                    return;
+                }
+            else
+                loadCliWalletKeyMaterial(allocator) catch |err| {
+                    printWalletKeyLoadError(err);
+                    return;
+                };
+
             std.debug.print("Keypair generated:\n", .{});
+            std.debug.print("  Source: {s}\n", .{walletKeySourceLabel(wallet_keys.source)});
             std.debug.print("  Private key: ", .{});
-            for (keypair[0]) |byte| {
+            for (wallet_keys.private_key_seed) |byte| {
                 std.debug.print("{X:0>2}", .{byte});
             }
             std.debug.print("\n", .{});
             std.debug.print("  Public key: ", .{});
-            for (keypair[1]) |byte| {
+            for (wallet_keys.public_key) |byte| {
                 std.debug.print("{X:0>2}", .{byte});
             }
             std.debug.print("\n", .{});
@@ -863,6 +877,25 @@ pub fn main() !void {
                 std.debug.print("{X:0>2}", .{byte});
             }
             std.debug.print("\n", .{});
+
+            const maybe_local_keys = loadCliWalletKeyMaterial(allocator) catch |err| switch (err) {
+                error.MissingWalletKeyMaterial => null,
+                else => blk: {
+                    std.debug.print("  Local key: load failed ({s})\n", .{@errorName(err)});
+                    break :blk null;
+                },
+            };
+            if (maybe_local_keys) |local_keys| {
+                std.debug.print("  Local key source: {s}\n", .{walletKeySourceLabel(local_keys.source)});
+                std.debug.print("  Local public key: ", .{});
+                for (local_keys.public_key) |byte| {
+                    std.debug.print("{X:0>2}", .{byte});
+                }
+                std.debug.print("\n", .{});
+                std.debug.print("  Public key match: {s}\n", .{
+                    if (std.mem.eql(u8, &local_keys.public_key, &info.public_key)) "yes" else "no",
+                });
+            }
             return;
         }
 
@@ -877,9 +910,11 @@ pub fn main() !void {
 
             var provider = try initDefaultProvider(allocator);
 
-            // Generate keypair (in real usage, load from secure storage)
-            const keypair = try signing.generateKeypair("my_seed_phrase");
-            const private_key = keypair[0];
+            const wallet_keys = loadCliWalletKeyMaterial(allocator) catch |err| {
+                printWalletKeyLoadError(err);
+                return;
+            };
+            const private_key = wallet_keys.private_key_seed;
 
             var result = try signing.sendTransfer(&provider, .v4, private_key, wallet_addr, dest, amount, null);
             defer provider.freeSendBocResponse(&result);
@@ -903,8 +938,11 @@ pub fn main() !void {
 
             var provider = try initDefaultProvider(allocator);
 
-            const keypair = try signing.generateKeypair("my_seed_phrase");
-            const private_key = keypair[0];
+            const wallet_keys = loadCliWalletKeyMaterial(allocator) catch |err| {
+                printWalletKeyLoadError(err);
+                return;
+            };
+            const private_key = wallet_keys.private_key_seed;
 
             var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
             defer provider.freeSendBocResponse(&result);
@@ -928,8 +966,11 @@ pub fn main() !void {
 
             var provider = try initDefaultProvider(allocator);
 
-            const keypair = try signing.generateKeypair("my_seed_phrase");
-            const private_key = keypair[0];
+            const wallet_keys = loadCliWalletKeyMaterial(allocator) catch |err| {
+                printWalletKeyLoadError(err);
+                return;
+            };
+            const private_key = wallet_keys.private_key_seed;
 
             var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
             defer provider.freeSendBocResponse(&result);
@@ -957,8 +998,11 @@ pub fn main() !void {
 
             var provider = try initDefaultProvider(allocator);
 
-            const keypair = try signing.generateKeypair("my_seed_phrase");
-            const private_key = keypair[0];
+            const wallet_keys = loadCliWalletKeyMaterial(allocator) catch |err| {
+                printWalletKeyLoadError(err);
+                return;
+            };
+            const private_key = wallet_keys.private_key_seed;
 
             var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
             defer provider.freeSendBocResponse(&result);
@@ -996,8 +1040,11 @@ pub fn main() !void {
 
             var provider = try initDefaultProvider(allocator);
 
-            const keypair = try signing.generateKeypair("my_seed_phrase");
-            const private_key = keypair[0];
+            const wallet_keys = loadCliWalletKeyMaterial(allocator) catch |err| {
+                printWalletKeyLoadError(err);
+                return;
+            };
+            const private_key = wallet_keys.private_key_seed;
 
             var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
             defer provider.freeSendBocResponse(&result);
@@ -1037,8 +1084,11 @@ pub fn main() !void {
 
             var provider = try initDefaultProvider(allocator);
 
-            const keypair = try signing.generateKeypair("my_seed_phrase");
-            const private_key = keypair[0];
+            const wallet_keys = loadCliWalletKeyMaterial(allocator) catch |err| {
+                printWalletKeyLoadError(err);
+                return;
+            };
+            const private_key = wallet_keys.private_key_seed;
 
             var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
             defer provider.freeSendBocResponse(&result);
@@ -1082,8 +1132,11 @@ pub fn main() !void {
             );
             defer allocator.free(body);
 
-            const keypair = try signing.generateKeypair("my_seed_phrase");
-            const private_key = keypair[0];
+            const wallet_keys = loadCliWalletKeyMaterial(allocator) catch |err| {
+                printWalletKeyLoadError(err);
+                return;
+            };
+            const private_key = wallet_keys.private_key_seed;
 
             var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
             defer provider.freeSendBocResponse(&result);
@@ -1115,8 +1168,11 @@ pub fn main() !void {
 
             var provider = try initDefaultProvider(allocator);
 
-            const keypair = try signing.generateKeypair("my_seed_phrase");
-            const private_key = keypair[0];
+            const wallet_keys = loadCliWalletKeyMaterial(allocator) catch |err| {
+                printWalletKeyLoadError(err);
+                return;
+            };
+            const private_key = wallet_keys.private_key_seed;
 
             var result = try signing.sendDeploy(&provider, .v4, private_key, wallet_addr, dest, amount, state_init_boc, body_boc);
             defer provider.freeSendBocResponse(&result);
@@ -1151,8 +1207,11 @@ pub fn main() !void {
 
             var provider = try initDefaultProvider(allocator);
 
-            const keypair = try signing.generateKeypair("my_seed_phrase");
-            const private_key = keypair[0];
+            const wallet_keys = loadCliWalletKeyMaterial(allocator) catch |err| {
+                printWalletKeyLoadError(err);
+                return;
+            };
+            const private_key = wallet_keys.private_key_seed;
 
             var result = try signing.sendDeploy(&provider, .v4, private_key, wallet_addr, dest_raw, amount, state_init_boc, body_boc);
             defer provider.freeSendBocResponse(&result);
@@ -1394,6 +1453,20 @@ const ParsedCliAbiValue = struct {
 const CliNamedAbiSpec = struct {
     name: []const u8,
     value_spec: []const u8,
+};
+
+const CliWalletKeySource = enum {
+    private_key_hex,
+    seed_text,
+    seed_file,
+    explicit_seed_arg,
+    explicit_private_key_hex_arg,
+};
+
+const CliWalletKeyMaterial = struct {
+    private_key_seed: [32]u8,
+    public_key: [32]u8,
+    source: CliWalletKeySource,
 };
 
 fn parseCliBodyOps(allocator: std.mem.Allocator, specs: []const []const u8) !ParsedCliBodyOps {
@@ -1742,6 +1815,110 @@ fn loadCliTextAlloc(allocator: std.mem.Allocator, spec: []const u8) ![]u8 {
         return std.fs.cwd().readFileAlloc(allocator, spec[1..], 1 << 20);
     }
     return allocator.dupe(u8, spec);
+}
+
+fn loadCliWalletKeyMaterial(allocator: std.mem.Allocator) !CliWalletKeyMaterial {
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+    return loadCliWalletKeyMaterialFromEnvMap(allocator, &env_map);
+}
+
+fn loadCliWalletKeyMaterialFromEnvMap(
+    allocator: std.mem.Allocator,
+    env_map: *const std.process.EnvMap,
+) !CliWalletKeyMaterial {
+    if (env_map.get(wallet_private_key_hex_env)) |value| {
+        return cliWalletKeyMaterialFromPrivateKeyHexAlloc(allocator, value, .private_key_hex);
+    }
+
+    if (env_map.get(wallet_seed_file_env)) |value| {
+        const seed_text = try std.fs.cwd().readFileAlloc(allocator, value, 1 << 20);
+        defer allocator.free(seed_text);
+        return cliWalletKeyMaterialFromSeedText(seed_text, .seed_file);
+    }
+
+    if (env_map.get(wallet_seed_env)) |value| {
+        return cliWalletKeyMaterialFromSeedText(value, .seed_text);
+    }
+
+    return error.MissingWalletKeyMaterial;
+}
+
+fn loadCliWalletKeyMaterialFromSpec(allocator: std.mem.Allocator, spec: []const u8) !CliWalletKeyMaterial {
+    if (std.mem.startsWith(u8, spec, "hex:")) {
+        return cliWalletKeyMaterialFromPrivateKeyHexAlloc(allocator, spec["hex:".len..], .explicit_private_key_hex_arg);
+    }
+
+    const seed_text = try loadCliTextAlloc(allocator, spec);
+    defer allocator.free(seed_text);
+    return cliWalletKeyMaterialFromSeedText(seed_text, .explicit_seed_arg);
+}
+
+fn cliWalletKeyMaterialFromSeedText(
+    seed_text: []const u8,
+    source: CliWalletKeySource,
+) !CliWalletKeyMaterial {
+    const trimmed = std.mem.trim(u8, seed_text, " \t\r\n");
+    if (trimmed.len == 0) return error.InvalidWalletSeed;
+
+    const keypair = try signing.generateKeypair(trimmed);
+    return .{
+        .private_key_seed = keypair[0],
+        .public_key = keypair[1],
+        .source = source,
+    };
+}
+
+fn cliWalletKeyMaterialFromPrivateKeyHexAlloc(
+    allocator: std.mem.Allocator,
+    private_key_hex: []const u8,
+    source: CliWalletKeySource,
+) !CliWalletKeyMaterial {
+    const private_key_seed = try parseCliWalletPrivateKeyHexAlloc(allocator, private_key_hex);
+    return .{
+        .private_key_seed = private_key_seed,
+        .public_key = try signing.derivePublicKey(private_key_seed),
+        .source = source,
+    };
+}
+
+fn parseCliWalletPrivateKeyHexAlloc(
+    allocator: std.mem.Allocator,
+    private_key_hex: []const u8,
+) ![32]u8 {
+    const trimmed = std.mem.trim(u8, private_key_hex, " \t\r\n");
+    const body = if (std.mem.startsWith(u8, trimmed, "0x") or std.mem.startsWith(u8, trimmed, "0X"))
+        trimmed[2..]
+    else
+        trimmed;
+
+    const decoded = try hexToBytes(allocator, body);
+    defer allocator.free(decoded);
+
+    if (decoded.len != 32) return error.InvalidWalletPrivateKey;
+
+    var out: [32]u8 = undefined;
+    @memcpy(&out, decoded[0..32]);
+    return out;
+}
+
+fn printWalletKeyLoadError(err: anyerror) void {
+    std.debug.print("Wallet key load failed: {s}\n", .{@errorName(err)});
+    std.debug.print("Set {s}=<64 hex>, or {s}=<seed text>, or {s}=<path-to-seed-file>\n", .{
+        wallet_private_key_hex_env,
+        wallet_seed_env,
+        wallet_seed_file_env,
+    });
+}
+
+fn walletKeySourceLabel(source: CliWalletKeySource) []const u8 {
+    return switch (source) {
+        .private_key_hex => wallet_private_key_hex_env,
+        .seed_text => wallet_seed_env,
+        .seed_file => wallet_seed_file_env,
+        .explicit_seed_arg => "cli-seed",
+        .explicit_private_key_hex_arg => "cli-private-key-hex",
+    };
 }
 
 fn parseCliStackArgs(allocator: std.mem.Allocator, specs: []const []const u8) !ParsedCliStackArgs {
@@ -2633,9 +2810,9 @@ fn printUsage() !void {
     std.debug.print("    body ops: u<bits>:<v>, i<bits>:<v>, coins:<v>, addr:<addr>, bytes:<utf8>, hex:<hex>, ref:<b64 boc>, refhex:<hex boc>\n", .{});
     std.debug.print("    function values: null, u:<v>, i:<v>, num:<dec|0xhex>, str:<utf8>, addr:<addr>, json:<json|@file>, hex:<hex>, boc:<b64 boc>, bochex:<hex boc>\n", .{});
     std.debug.print("\nWallet operations:\n", .{});
-    std.debug.print("  ton-zig-agent-kit wallet genkey                Generate keypair\n", .{});
+    std.debug.print("  ton-zig-agent-kit wallet genkey [seed|@file|hex:<private_key_hex>]  Generate or inspect keypair\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet seqno <addr>          Get wallet seqno\n", .{});
-    std.debug.print("  ton-zig-agent-kit wallet info <addr>           Get wallet seqno, subwallet ID, public key\n", .{});
+    std.debug.print("  ton-zig-agent-kit wallet info <addr>           Get wallet seqno, subwallet ID, public key, and local key match if configured\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send <src> <dst> <amount>  Send TON\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-body <src> <dst> <amount> <body_b64>  Send raw contract body\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-body-hex <src> <dst> <amount> <body_hex>  Send raw contract body hex\n", .{});
@@ -2645,6 +2822,11 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit wallet send-auto-abi <src> <dst> <amount> <function> <values...>  Discover ABI and send function body\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-deploy <src> <dst> <amount> <state_init_b64> [body_b64]  Deploy contract with StateInit\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-deploy-auto <src> <workchain> <amount> <state_init_b64> [body_b64]  Derive destination from StateInit and deploy\n", .{});
+    std.debug.print("    wallet key env: {s}, {s}, {s}\n", .{
+        wallet_private_key_hex_env,
+        wallet_seed_env,
+        wallet_seed_file_env,
+    });
     std.debug.print("\nPayment watch operations:\n", .{});
     std.debug.print("  ton-zig-agent-kit paywatch invoice <dest> <amount>  Create invoice\n", .{});
     std.debug.print("  ton-zig-agent-kit paywatch verify <addr> <comment>  Verify payment\n", .{});
@@ -2870,6 +3052,61 @@ test "load cli text alloc supports inline and file specs" {
     const file_text = try loadCliTextAlloc(allocator, path_spec);
     defer allocator.free(file_text);
     try std.testing.expectEqualStrings("{\"version\":\"1.0\"}", file_text);
+}
+
+test "parse cli wallet private key hex supports 0x prefix" {
+    const allocator = std.testing.allocator;
+    const private_key = try parseCliWalletPrivateKeyHexAlloc(
+        allocator,
+        "  0x00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF  ",
+    );
+
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF },
+        &private_key,
+    );
+}
+
+test "wallet key material env prefers private key hex" {
+    const allocator = std.testing.allocator;
+
+    var env_map = std.process.EnvMap.init(allocator);
+    defer env_map.deinit();
+    try env_map.put(wallet_seed_env, "ignored-seed");
+    try env_map.put(wallet_private_key_hex_env, "00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF");
+
+    const wallet_keys = try loadCliWalletKeyMaterialFromEnvMap(allocator, &env_map);
+    try std.testing.expectEqual(CliWalletKeySource.private_key_hex, wallet_keys.source);
+    try std.testing.expectEqualSlices(
+        u8,
+        &.{ 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF },
+        &wallet_keys.private_key_seed,
+    );
+    const derived_public_key = try signing.derivePublicKey(wallet_keys.private_key_seed);
+    try std.testing.expectEqualSlices(u8, &derived_public_key, &wallet_keys.public_key);
+}
+
+test "wallet key material env reads seed file" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(.{ .sub_path = "seed.txt", .data = "  file-seed-value\n" });
+
+    const abs_path = try tmp.dir.realpathAlloc(allocator, "seed.txt");
+    defer allocator.free(abs_path);
+
+    var env_map = std.process.EnvMap.init(allocator);
+    defer env_map.deinit();
+    try env_map.put(wallet_seed_file_env, abs_path);
+
+    const wallet_keys = try loadCliWalletKeyMaterialFromEnvMap(allocator, &env_map);
+    const expected = try signing.generateKeypair("file-seed-value");
+
+    try std.testing.expectEqual(CliWalletKeySource.seed_file, wallet_keys.source);
+    try std.testing.expectEqualSlices(u8, &expected[0], &wallet_keys.private_key_seed);
+    try std.testing.expectEqualSlices(u8, &expected[1], &wallet_keys.public_key);
 }
 
 test "inspect cli template builds composite json args" {
