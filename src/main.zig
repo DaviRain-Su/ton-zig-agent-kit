@@ -1013,6 +1013,13 @@ fn parseCliAbiValues(allocator: std.mem.Allocator, specs: []const []const u8) !P
             continue;
         }
 
+        if (std.mem.startsWith(u8, spec, "json:")) {
+            const json_text = try loadCliTextAlloc(allocator, spec["json:".len..]);
+            owned_buffers[i] = json_text;
+            values[i] = .{ .json = json_text };
+            continue;
+        }
+
         if (std.mem.startsWith(u8, spec, "hex:")) {
             const decoded = try hexToBytes(allocator, spec["hex:".len..]);
             owned_buffers[i] = decoded;
@@ -1268,7 +1275,7 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit cell build-function <function_json> <values...>  Build body from function schema\n", .{});
     std.debug.print("  ton-zig-agent-kit cell build-abi <abi_json|@file> <function> <values...>  Build body from ABI doc\n", .{});
     std.debug.print("    body ops: u<bits>:<v>, i<bits>:<v>, coins:<v>, addr:<addr>, bytes:<utf8>, hex:<hex>, ref:<b64 boc>, refhex:<hex boc>\n", .{});
-    std.debug.print("    function values: null, u:<v>, i:<v>, str:<utf8>, addr:<addr>, hex:<hex>, boc:<b64 boc>, bochex:<hex boc>\n", .{});
+    std.debug.print("    function values: null, u:<v>, i:<v>, str:<utf8>, addr:<addr>, json:<json|@file>, hex:<hex>, boc:<b64 boc>, bochex:<hex boc>\n", .{});
     std.debug.print("\nWallet operations:\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet genkey                Generate keypair\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet seqno <addr>          Get wallet seqno\n", .{});
@@ -1426,18 +1433,20 @@ test "parse cli abi values" {
         "i:-1",
         "str:hello",
         "addr:0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+        "json:{\"enabled\":true}",
         "hex:CAFE",
         "bochex:b5ee9c72410101010003000001ab8958a94a",
     });
     defer parsed.deinit(allocator);
 
-    try std.testing.expectEqual(@as(usize, 7), parsed.values.len);
+    try std.testing.expectEqual(@as(usize, 8), parsed.values.len);
     try std.testing.expect(std.meta.activeTag(parsed.values[0]) == .null);
     try std.testing.expectEqual(@as(u64, 0x12345678), parsed.values[1].uint);
     try std.testing.expectEqual(@as(i64, -1), parsed.values[2].int);
     try std.testing.expectEqualStrings("hello", parsed.values[3].text);
-    try std.testing.expectEqualSlices(u8, &.{ 0xCA, 0xFE }, parsed.values[5].bytes);
-    try std.testing.expectEqualSlices(u8, &.{ 0xB5, 0xEE, 0x9C, 0x72 }, parsed.values[6].boc[0..4]);
+    try std.testing.expectEqualStrings("{\"enabled\":true}", parsed.values[5].json);
+    try std.testing.expectEqualSlices(u8, &.{ 0xCA, 0xFE }, parsed.values[6].bytes);
+    try std.testing.expectEqualSlices(u8, &.{ 0xB5, 0xEE, 0x9C, 0x72 }, parsed.values[7].boc[0..4]);
 }
 
 test "load cli text alloc supports inline and file specs" {
