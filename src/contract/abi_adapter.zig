@@ -71,6 +71,7 @@ pub const AbiValue = union(enum) {
     null: void,
     uint: u64,
     int: i64,
+    numeric_text: []const u8,
     text: []const u8,
     bytes: []const u8,
     boc: []const u8,
@@ -635,6 +636,13 @@ fn storeAbiValue(
     }
 
     if (std.mem.eql(u8, param.type_name, "coins")) {
+        if (std.meta.activeTag(value) == .numeric_text) {
+            const parsed = try parseUnsignedTextBytesAlloc(allocator, value.numeric_text);
+            defer allocator.free(parsed);
+            try builder.storeCoinsBytes(parsed);
+            return;
+        }
+
         try builder.storeCoins(try abiValueAsUint(value));
         return;
     }
@@ -656,17 +664,38 @@ fn storeAbiValue(
         return;
     }
     if (std.mem.eql(u8, param.type_name, "bool")) {
+        if (std.meta.activeTag(value) == .numeric_text) {
+            const parsed = try parseUnsignedTextBytesAlloc(allocator, value.numeric_text);
+            defer allocator.free(parsed);
+            try builder.storeUintBytes(parsed, 1);
+            return;
+        }
         try builder.storeUint(if (try abiValueAsUint(value) == 0) 0 else 1, 1);
         return;
     }
     if (std.mem.startsWith(u8, param.type_name, "uint")) {
         const bits = try parseSizedTypeBits(param.type_name, "uint", 64);
+        if (std.meta.activeTag(value) == .numeric_text) {
+            const parsed = try parseUnsignedTextBytesAlloc(allocator, value.numeric_text);
+            defer allocator.free(parsed);
+            try builder.storeUintBytes(parsed, bits);
+            return;
+        }
         if (bits > 64) return error.UnsupportedAbiType;
         try builder.storeUint(try abiValueAsUint(value), bits);
         return;
     }
     if (std.mem.startsWith(u8, param.type_name, "int")) {
         const bits = try parseSizedTypeBits(param.type_name, "int", 64);
+        if (std.meta.activeTag(value) == .numeric_text) {
+            const parsed = try parseNumericTextAlloc(allocator, value.numeric_text);
+            defer parsed.deinit(allocator);
+
+            if (parsed.negative) return error.UnsupportedAbiType;
+            if (bits == 0 or parsed.significant_bits > bits - 1) return error.InvalidAbiArguments;
+            try builder.storeUintBytes(parsed.bytes, bits);
+            return;
+        }
         if (bits > 64) return error.UnsupportedAbiType;
         try builder.storeInt(try abiValueAsInt(value), bits);
         return;
@@ -717,6 +746,14 @@ fn abiValueToStackArgAlloc(
         std.mem.startsWith(u8, param.type_name, "int") or
         std.mem.eql(u8, param.type_name, "bool"))
     {
+        if (std.meta.activeTag(value) == .numeric_text) {
+            const raw_json = try buildNumericStackArgJsonAlloc(allocator, param.type_name, value.numeric_text);
+            return .{
+                .arg = .{ .raw_json = raw_json },
+                .owned_buffer = raw_json,
+            };
+        }
+
         return switch (value) {
             .uint => |v| .{ .arg = .{ .int = try checkedAbiUintToI64(v) } },
             .int => |v| .{ .arg = .{ .int = v } },
@@ -814,6 +851,176 @@ fn abiValueAsBoc(value: AbiValue) ![]const u8 {
         .boc => |v| v,
         else => error.InvalidAbiArguments,
     };
+}
+
+const ParsedNumericText = struct {
+    bytes: []u8,
+    negative: bool,
+    significant_bits: u16,
+
+    fn deinit(self: ParsedNumericText, allocator: std.mem.Allocator) void {
+        allocator.free(self.bytes);
+    }
+};
+
+fn parseNumericTextAlloc(allocator: std.mem.Allocator, text: []const u8) !ParsedNumericText {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (trimmed.len == 0) return error.InvalidAbiArguments;
+
+    const negative = trimmed[0] == '-';
+    const unsigned_text = if (negative) trimmed[1..] else trimmed;
+    const bytes = try parseUnsignedTextBytesAlloc(allocator, unsigned_text);
+    errdefer allocator.free(bytes);
+
+    return .{
+        .bytes = bytes,
+        .negative = negative and countByteSignificantBits(bytes) != 0,
+        .significant_bits = countByteSignificantBits(bytes),
+    };
+}
+
+fn parseUnsignedTextBytesAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    if (trimmed.len == 0) return error.InvalidAbiArguments;
+
+    if (std.mem.startsWith(u8, trimmed, "0x") or std.mem.startsWith(u8, trimmed, "0X")) {
+        return parseUnsignedHexBytesAlloc(allocator, trimmed[2..]);
+    }
+
+    return parseUnsignedDecimalBytesAlloc(allocator, trimmed);
+}
+
+fn parseUnsignedHexBytesAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    if (text.len == 0) return allocator.alloc(u8, 0);
+
+    const out = try allocator.alloc(u8, @divTrunc(text.len + 1, 2));
+    defer allocator.free(out);
+
+    var src_idx: usize = 0;
+    var dst_idx: usize = 0;
+    if (text.len % 2 != 0) {
+        out[0] = try hexCharValue(text[0]);
+        src_idx = 1;
+        dst_idx = 1;
+    }
+
+    while (src_idx < text.len) : (src_idx += 2) {
+        const hi = try hexCharValue(text[src_idx]);
+        const lo = try hexCharValue(text[src_idx + 1]);
+        out[dst_idx] = (hi << 4) | lo;
+        dst_idx += 1;
+    }
+
+    return dupeTrimmedBytes(allocator, out);
+}
+
+fn parseUnsignedDecimalBytesAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    var bytes_le = std.array_list.Managed(u8).init(allocator);
+    defer bytes_le.deinit();
+
+    try bytes_le.append(0);
+    for (text) |char| {
+        if (char < '0' or char > '9') return error.InvalidAbiArguments;
+
+        var carry: u16 = char - '0';
+        for (bytes_le.items) |*byte| {
+            const next: u16 = @as(u16, byte.*) * 10 + carry;
+            byte.* = @intCast(next & 0xFF);
+            carry = next >> 8;
+        }
+
+        while (carry > 0) {
+            try bytes_le.append(@intCast(carry & 0xFF));
+            carry >>= 8;
+        }
+    }
+
+    var significant_len = bytes_le.items.len;
+    while (significant_len > 0 and bytes_le.items[significant_len - 1] == 0) : (significant_len -= 1) {}
+
+    const out = try allocator.alloc(u8, significant_len);
+    errdefer allocator.free(out);
+    for (0..significant_len) |idx| {
+        out[idx] = bytes_le.items[significant_len - 1 - idx];
+    }
+    return out;
+}
+
+fn dupeTrimmedBytes(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    var start: usize = 0;
+    while (start < bytes.len and bytes[start] == 0) : (start += 1) {}
+    return allocator.dupe(u8, bytes[start..]);
+}
+
+fn countByteSignificantBits(bytes: []const u8) u16 {
+    for (bytes, 0..) |byte, idx| {
+        if (byte == 0) continue;
+
+        var bit_idx: u16 = 0;
+        while (bit_idx < 8) : (bit_idx += 1) {
+            if (((byte >> @as(u3, @intCast(7 - bit_idx))) & 1) != 0) {
+                return @intCast((bytes.len - idx) * 8 - bit_idx);
+            }
+        }
+    }
+    return 0;
+}
+
+fn buildNumericStackArgJsonAlloc(allocator: std.mem.Allocator, type_name: []const u8, text: []const u8) ![]u8 {
+    const parsed = try parseNumericTextAlloc(allocator, text);
+    defer parsed.deinit(allocator);
+
+    try validateNumericTextBits(type_name, parsed.negative, parsed.significant_bits);
+
+    const encoded = try formatTonNumTextAlloc(allocator, parsed.bytes, parsed.negative);
+    defer allocator.free(encoded);
+
+    return std.fmt.allocPrint(allocator, "[\"num\",\"{s}\"]", .{encoded});
+}
+
+fn validateNumericTextBits(type_name: []const u8, negative: bool, significant_bits: u16) !void {
+    if (std.mem.eql(u8, type_name, "bool")) {
+        if (negative or significant_bits > 1) return error.InvalidAbiArguments;
+        return;
+    }
+
+    if (std.mem.eql(u8, type_name, "coins")) {
+        if (negative or significant_bits > 120) return error.InvalidAbiArguments;
+        return;
+    }
+
+    if (std.mem.startsWith(u8, type_name, "uint")) {
+        const bits = try parseSizedTypeBits(type_name, "uint", 64);
+        if (negative or significant_bits > bits) return error.InvalidAbiArguments;
+        return;
+    }
+
+    if (std.mem.startsWith(u8, type_name, "int")) {
+        const bits = try parseSizedTypeBits(type_name, "int", 64);
+        if (negative) {
+            if (bits == 0 or significant_bits > bits) return error.InvalidAbiArguments;
+        } else if (bits == 0 or significant_bits > bits - 1) {
+            return error.InvalidAbiArguments;
+        }
+        return;
+    }
+}
+
+fn formatTonNumTextAlloc(allocator: std.mem.Allocator, bytes: []const u8, negative: bool) ![]u8 {
+    if (bytes.len == 0) {
+        return allocator.dupe(u8, "0x0");
+    }
+
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    if (negative) try writer.writer.writeByte('-');
+    try writer.writer.writeAll("0x");
+    for (bytes) |byte| {
+        try writer.writer.print("{X:0>2}", .{byte});
+    }
+
+    return try writer.toOwnedSlice();
 }
 
 fn paramWithType(param: ParamDef, type_name: []const u8) ParamDef {
@@ -2046,6 +2253,37 @@ test "abi adapter supports optional inputs in body encoding" {
     try std.testing.expectEqual(@as(u64, 0xCAFE), try payload_slice.loadUint(16));
 }
 
+test "abi adapter supports large numeric text in body encoding" {
+    const allocator = std.testing.allocator;
+
+    const function = FunctionDef{
+        .name = "set_big",
+        .opcode = 0x99AABBCC,
+        .inputs = &.{
+            .{ .name = "nonce", .type_name = "uint128" },
+            .{ .name = "amount", .type_name = "coins" },
+        },
+        .outputs = &.{},
+    };
+
+    const built = try buildFunctionBodyBocAlloc(allocator, function, &.{
+        .{ .numeric_text = "0x1234567890abcdef1234567890abcdef" },
+        .{ .numeric_text = "0x0102030405060708090A0B0C0D0E0F" },
+    });
+    defer allocator.free(built);
+
+    const root = try boc.deserializeBoc(allocator, built);
+    defer root.deinit(allocator);
+
+    var slice = root.toSlice();
+    try std.testing.expectEqual(@as(u64, 0x99AABBCC), try slice.loadUint(32));
+    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x34, 0x56, 0x78, 0x90, 0xAB, 0xCD, 0xEF, 0x12, 0x34, 0x56, 0x78, 0x90, 0xAB, 0xCD, 0xEF }, try slice.loadBits(128));
+    try std.testing.expectEqual(@as(u64, 15), try slice.loadUint(4));
+    for ([_]u8{ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F }) |byte| {
+        try std.testing.expectEqual(byte, try slice.loadUint8());
+    }
+}
+
 test "abi adapter supports optional and string stack args" {
     const allocator = std.testing.allocator;
     const abi_json =
@@ -2089,6 +2327,38 @@ test "abi adapter supports optional and string stack args" {
     defer third.deinit(allocator);
     var third_slice = third.toSlice();
     try std.testing.expectEqualSlices(u8, &.{ 0xCA, 0xFE }, try third_slice.loadBits(16));
+}
+
+test "abi adapter supports large numeric text stack args" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "lookup_big",
+        \\      "inputs": [
+        \\        {"name": "nonce", "type": "uint128"},
+        \\        {"name": "amount", "type": "coins"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var abi = try parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer abi.deinit(allocator);
+
+    var args = try buildStackArgsFromAbiAlloc(allocator, &abi.abi, "lookup_big", &.{
+        .{ .numeric_text = "0x1234567890abcdef1234567890abcdef" },
+        .{ .numeric_text = "0x0102030405060708090A0B0C0D0E0F" },
+    });
+    defer args.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), args.args.len);
+    try std.testing.expect(args.args[0] == .raw_json);
+    try std.testing.expect(args.args[1] == .raw_json);
+    try std.testing.expectEqualStrings("[\"num\",\"0x1234567890ABCDEF1234567890ABCDEF\"]", args.args[0].raw_json);
+    try std.testing.expectEqualStrings("[\"num\",\"0x0102030405060708090A0B0C0D0E0F\"]", args.args[1].raw_json);
 }
 
 test "abi adapter builds tuple and list get-method stack args from json" {

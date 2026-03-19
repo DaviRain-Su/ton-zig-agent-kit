@@ -90,6 +90,30 @@ pub const Builder = struct {
         }
     }
 
+    pub fn storeUintBytes(self: *Builder, bytes: []const u8, bits: u16) !void {
+        if (self.bit_len + bits > MAX_BITS) return error.CellOverflow;
+        if (bits == 0) return;
+
+        const significant_bits = countSignificantBits(bytes);
+        if (significant_bits == 0) {
+            try self.storeUint(0, bits);
+            return;
+        }
+        if (significant_bits > bits) return error.IntegerOverflow;
+
+        try self.storeUint(0, bits - significant_bits);
+
+        const start_bit = firstSetBit(bytes).?;
+        const total_bits: u16 = @intCast(bytes.len * 8);
+        var bit_index = start_bit;
+        while (bit_index < total_bits) : (bit_index += 1) {
+            const src_byte = bytes[bit_index / 8];
+            const src_bit_idx = 7 - @as(u3, @intCast(bit_index % 8));
+            const bit_val = @as(u1, @intCast((src_byte >> src_bit_idx) & 1));
+            try self.storeBit(bit_val);
+        }
+    }
+
     pub fn storeBits(self: *Builder, data: []const u8, len: u16) !void {
         if (self.bit_len + len > MAX_BITS) return error.CellOverflow;
         if (len == 0) return;
@@ -149,6 +173,18 @@ pub const Builder = struct {
         while (i >= 0) : (i -= 1) {
             try self.storeUint8(@intCast((coins >> @intCast(@as(u6, @intCast(i)) * 8)) & 0xFF));
         }
+    }
+
+    pub fn storeCoinsBytes(self: *Builder, bytes: []const u8) !void {
+        const trimmed = trimLeadingZeroBytes(bytes);
+        if (trimmed.len == 0) {
+            try self.storeUint(0, 4);
+            return;
+        }
+        if (trimmed.len > 15) return error.IntegerOverflow;
+
+        try self.storeUint(@intCast(trimmed.len), 4);
+        try self.storeBits(trimmed, @intCast(trimmed.len * 8));
     }
 
     pub fn storeAddress(self: *Builder, addr: anytype) !void {
@@ -317,6 +353,31 @@ pub const Slice = struct {
     }
 };
 
+fn trimLeadingZeroBytes(bytes: []const u8) []const u8 {
+    var start: usize = 0;
+    while (start < bytes.len and bytes[start] == 0) : (start += 1) {}
+    return bytes[start..];
+}
+
+fn firstSetBit(bytes: []const u8) ?u16 {
+    for (bytes, 0..) |byte, byte_idx| {
+        if (byte == 0) continue;
+
+        var bit_idx: u16 = 0;
+        while (bit_idx < 8) : (bit_idx += 1) {
+            if (((byte >> @as(u3, @intCast(7 - bit_idx))) & 1) != 0) {
+                return @intCast(byte_idx * 8 + bit_idx);
+            }
+        }
+    }
+    return null;
+}
+
+fn countSignificantBits(bytes: []const u8) u16 {
+    const first = firstSetBit(bytes) orelse return 0;
+    return @intCast(bytes.len * 8 - first);
+}
+
 test "builder store uint" {
     var builder = Builder.init();
     try builder.storeUint(42, 8);
@@ -340,6 +401,31 @@ test "builder store coins" {
     var builder = Builder.init();
     try builder.storeCoins(1000000000);
     try std.testing.expectEqual(@as(u16, 4 + 4 * 8), builder.bit_len);
+}
+
+test "builder store uint bytes" {
+    var builder = Builder.init();
+    try builder.storeUintBytes(&.{ 0x01, 0x23, 0x45, 0x67 }, 32);
+
+    var cell = try builder.toCell(std.testing.allocator);
+    defer std.testing.allocator.destroy(cell);
+
+    var slice = cell.toSlice();
+    try std.testing.expectEqualSlices(u8, &.{ 0x01, 0x23, 0x45, 0x67 }, try slice.loadBits(32));
+}
+
+test "builder store coins bytes" {
+    var builder = Builder.init();
+    try builder.storeCoinsBytes(&.{ 0x01, 0x23, 0x45, 0x67, 0x89 });
+
+    var cell = try builder.toCell(std.testing.allocator);
+    defer std.testing.allocator.destroy(cell);
+
+    var slice = cell.toSlice();
+    try std.testing.expectEqual(@as(u64, 5), try slice.loadUint(4));
+    for ([_]u8{ 0x01, 0x23, 0x45, 0x67, 0x89 }) |byte| {
+        try std.testing.expectEqual(byte, try slice.loadUint8());
+    }
 }
 
 test "slice load uint" {
