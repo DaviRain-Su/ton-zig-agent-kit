@@ -7,6 +7,8 @@ const Cell = ton_zig_agent_kit.core.Cell;
 const Builder = ton_zig_agent_kit.core.Builder;
 const Slice = ton_zig_agent_kit.core.Slice;
 const StackEntry = ton_zig_agent_kit.core.types.StackEntry;
+const Transaction = ton_zig_agent_kit.core.types.Transaction;
+const Message = ton_zig_agent_kit.core.types.Message;
 const BodyOp = ton_zig_agent_kit.core.body_builder.BodyOp;
 const contract_mod = ton_zig_agent_kit.contract;
 const AbiValue = contract_mod.abi_adapter.AbiValue;
@@ -29,6 +31,23 @@ const LoadedCliAbi = struct {
 
     fn deinit(self: *LoadedCliAbi, allocator: std.mem.Allocator) void {
         self.abi.deinit(allocator);
+    }
+};
+
+const CliDecodedMessageBody = struct {
+    kind: enum {
+        function,
+        event,
+    },
+    contract_address: []u8,
+    selector: []u8,
+    opcode: ?u32,
+    decoded_json: []u8,
+
+    fn deinit(self: *CliDecodedMessageBody, allocator: std.mem.Allocator) void {
+        allocator.free(self.contract_address);
+        allocator.free(self.selector);
+        allocator.free(self.decoded_json);
     }
 };
 
@@ -75,6 +94,66 @@ pub fn main() !void {
             result.balance / 1_000_000_000,
             result.balance % 1_000_000_000,
         });
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "tx")) {
+        if (args.len < 3) {
+            std.debug.print("Usage: ton-zig-agent-kit tx <list|show>\n", .{});
+            return;
+        }
+
+        const tx_cmd = args[2];
+        if (std.mem.eql(u8, tx_cmd, "list")) {
+            if (args.len < 4) {
+                std.debug.print("Usage: ton-zig-agent-kit tx list <address> [limit]\n", .{});
+                return;
+            }
+
+            const addr = args[3];
+            const limit: u32 = if (args.len >= 5)
+                try std.fmt.parseInt(u32, args[4], 10)
+            else
+                10;
+
+            var provider = try initDefaultProvider(allocator);
+            const txs = try provider.getTransactions(addr, limit);
+            defer provider.freeTransactions(txs);
+
+            std.debug.print("Transactions for {s} ({d}):\n", .{ addr, txs.len });
+            for (txs, 0..) |*tx, idx| {
+                std.debug.print("[{d}] hash={s} lt={d} ts={d}\n", .{ idx, tx.hash, tx.lt, tx.timestamp });
+                if (tx.in_msg) |msg| {
+                    std.debug.print("  in value={d}\n", .{msg.value});
+                    printMessageAddressLine(allocator, "from", msg.source);
+                    printMessageAddressLine(allocator, "to", msg.destination);
+                }
+                std.debug.print("  out messages={d}\n", .{tx.out_msgs.len});
+            }
+            return;
+        }
+
+        if (std.mem.eql(u8, tx_cmd, "show")) {
+            if (args.len < 5) {
+                std.debug.print("Usage: ton-zig-agent-kit tx show <lt> <hash>\n", .{});
+                return;
+            }
+
+            const lt = try std.fmt.parseInt(i64, args[3], 10);
+            const hash = args[4];
+
+            var provider = try initDefaultProvider(allocator);
+            var tx = (try provider.lookupTx(lt, hash)) orelse {
+                std.debug.print("Transaction not found: lt={d} hash={s}\n", .{ lt, hash });
+                return;
+            };
+            defer provider.freeTransaction(&tx);
+
+            printTransactionDetails(allocator, &provider, &tx);
+            return;
+        }
+
+        std.debug.print("Unknown tx command: {s}\n", .{tx_cmd});
         return;
     }
 
@@ -2612,6 +2691,201 @@ fn decodeBase64WithDecoder(allocator: std.mem.Allocator, input: []const u8, comp
     return output;
 }
 
+fn printMessageAddressLine(
+    allocator: std.mem.Allocator,
+    label: []const u8,
+    maybe_addr: ?ton_zig_agent_kit.core.types.Address,
+) void {
+    if (maybe_addr) |addr| {
+        const raw = addr.toRawAlloc(allocator) catch {
+            std.debug.print("  {s}: (format failed)\n", .{label});
+            return;
+        };
+        defer allocator.free(raw);
+        std.debug.print("  {s}: {s}\n", .{ label, raw });
+        return;
+    }
+
+    std.debug.print("  {s}: (none)\n", .{label});
+}
+
+fn tryDecodeMessageFunctionAtAlloc(
+    allocator: std.mem.Allocator,
+    provider: anytype,
+    owned_contract_address: []u8,
+    body_boc: []const u8,
+) ?CliDecodedMessageBody {
+    var abi = contract_mod.abi_adapter.queryAbiDocumentAlloc(provider, owned_contract_address) catch {
+        allocator.free(owned_contract_address);
+        return null;
+    } orelse {
+        allocator.free(owned_contract_address);
+        return null;
+    };
+    defer abi.deinit(allocator);
+
+    const function = contract_mod.abi_adapter.resolveFunctionByBodyBoc(&abi.abi, null, body_boc) catch {
+        allocator.free(owned_contract_address);
+        return null;
+    };
+
+    const selector = contract_mod.abi_adapter.buildFunctionSelectorAlloc(allocator, function.*) catch {
+        allocator.free(owned_contract_address);
+        return null;
+    };
+
+    const decoded_json = contract_mod.abi_adapter.decodeFunctionBodyJsonAlloc(allocator, function.*, body_boc) catch {
+        allocator.free(selector);
+        allocator.free(owned_contract_address);
+        return null;
+    };
+
+    return .{
+        .kind = .function,
+        .contract_address = owned_contract_address,
+        .selector = selector,
+        .opcode = function.opcode,
+        .decoded_json = decoded_json,
+    };
+}
+
+fn tryDecodeMessageEventAtAlloc(
+    allocator: std.mem.Allocator,
+    provider: anytype,
+    owned_contract_address: []u8,
+    body_boc: []const u8,
+) ?CliDecodedMessageBody {
+    var abi = contract_mod.abi_adapter.queryAbiDocumentAlloc(provider, owned_contract_address) catch {
+        allocator.free(owned_contract_address);
+        return null;
+    } orelse {
+        allocator.free(owned_contract_address);
+        return null;
+    };
+    defer abi.deinit(allocator);
+
+    const event = contract_mod.abi_adapter.resolveEventByBodyBoc(&abi.abi, null, body_boc) catch {
+        allocator.free(owned_contract_address);
+        return null;
+    };
+
+    const selector = contract_mod.abi_adapter.buildEventSelectorAlloc(allocator, event.*) catch {
+        allocator.free(owned_contract_address);
+        return null;
+    };
+
+    const decoded_json = contract_mod.abi_adapter.decodeEventBodyJsonAlloc(allocator, event.*, body_boc) catch {
+        allocator.free(selector);
+        allocator.free(owned_contract_address);
+        return null;
+    };
+
+    return .{
+        .kind = .event,
+        .contract_address = owned_contract_address,
+        .selector = selector,
+        .opcode = event.opcode,
+        .decoded_json = decoded_json,
+    };
+}
+
+fn tryDecodeMessageBodyAutoAlloc(
+    allocator: std.mem.Allocator,
+    provider: anytype,
+    msg: *const Message,
+) ?CliDecodedMessageBody {
+    const body = msg.body orelse return null;
+    const body_boc = boc.serializeBoc(allocator, body) catch return null;
+    defer allocator.free(body_boc);
+
+    if (msg.destination) |addr| {
+        const raw = addr.toRawAlloc(allocator) catch return null;
+        if (tryDecodeMessageFunctionAtAlloc(allocator, provider, raw, body_boc)) |decoded| {
+            return decoded;
+        }
+    }
+
+    if (msg.source) |addr| {
+        const raw = addr.toRawAlloc(allocator) catch return null;
+        if (tryDecodeMessageEventAtAlloc(allocator, provider, raw, body_boc)) |decoded| {
+            return decoded;
+        }
+    }
+
+    return null;
+}
+
+fn printMessageDetails(
+    allocator: std.mem.Allocator,
+    provider: anytype,
+    label: []const u8,
+    msg_opt: ?*const Message,
+) void {
+    std.debug.print("{s}:\n", .{label});
+
+    const msg = msg_opt orelse {
+        std.debug.print("  (none)\n", .{});
+        return;
+    };
+
+    if (msg.hash.len > 0) {
+        std.debug.print("  Hash: {s}\n", .{msg.hash});
+    }
+    printMessageAddressLine(allocator, "Source", msg.source);
+    printMessageAddressLine(allocator, "Destination", msg.destination);
+    std.debug.print("  Value: {d}\n", .{msg.value});
+    if (msg.body) |body| {
+        std.debug.print("  Body: {d} bits, {d} refs\n", .{ body.bit_len, body.ref_cnt });
+    } else {
+        std.debug.print("  Body: (none)\n", .{});
+    }
+    if (msg.raw_body.len > 0) {
+        std.debug.print("  Raw body bytes: {d}\n", .{msg.raw_body.len});
+        if (std.unicode.utf8ValidateSlice(msg.raw_body)) {
+            std.debug.print("  Raw body text: {s}\n", .{msg.raw_body});
+        }
+    }
+
+    if (tryDecodeMessageBodyAutoAlloc(allocator, provider, msg)) |decoded| {
+        defer {
+            var owned = decoded;
+            owned.deinit(allocator);
+        }
+        std.debug.print("  ABI decoded as {s} on {s}\n", .{
+            switch (decoded.kind) {
+                .function => "function",
+                .event => "event",
+            },
+            decoded.contract_address,
+        });
+        std.debug.print("  ABI selector: {s}\n", .{decoded.selector});
+        if (decoded.opcode) |opcode| {
+            std.debug.print("  ABI opcode: 0x{X}\n", .{opcode});
+        }
+        std.debug.print("  ABI json:\n{s}\n", .{decoded.decoded_json});
+    }
+}
+
+fn printTransactionDetails(
+    allocator: std.mem.Allocator,
+    provider: anytype,
+    tx: *const Transaction,
+) void {
+    std.debug.print("Transaction:\n", .{});
+    std.debug.print("  Hash: {s}\n", .{tx.hash});
+    std.debug.print("  LT: {d}\n", .{tx.lt});
+    std.debug.print("  Timestamp: {d}\n", .{tx.timestamp});
+
+    printMessageDetails(allocator, provider, "In message", tx.in_msg);
+
+    std.debug.print("Out messages: {d}\n", .{tx.out_msgs.len});
+    for (tx.out_msgs, 0..) |msg, idx| {
+        var label_buf: [32]u8 = undefined;
+        const label = std.fmt.bufPrint(&label_buf, "Out message #{d}", .{idx}) catch "Out message";
+        printMessageDetails(allocator, provider, label, msg);
+    }
+}
+
 fn printRunGetMethodResult(result: ton_zig_agent_kit.core.types.RunGetMethodResponse) void {
     std.debug.print("Exit code: {d}\n", .{result.exit_code});
 
@@ -3488,6 +3762,8 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit abi decode-function <source|auto:addr> <body_b64> [function]  Decode an ABI function body\n", .{});
     std.debug.print("  ton-zig-agent-kit abi decode-event <source|auto:addr> <body_b64> [event]  Decode an ABI event body\n", .{});
     std.debug.print("  ton-zig-agent-kit getBalance <address>          Get TON balance\n", .{});
+    std.debug.print("  ton-zig-agent-kit tx list <address> [limit]     List recent transactions\n", .{});
+    std.debug.print("  ton-zig-agent-kit tx show <lt> <hash>           Show one transaction and best-effort ABI decode its messages\n", .{});
     std.debug.print("  ton-zig-agent-kit runGetMethod <addr> <method> [stack_json]  Call any get method\n", .{});
     std.debug.print("  ton-zig-agent-kit inspectContract <addr>        Detect standard interfaces and ABI URI\n", .{});
     std.debug.print("  ton-zig-agent-kit runGetMethodTyped <addr> <method> [typed_args...]  Call get method with typed args\n", .{});
@@ -4009,4 +4285,190 @@ test "inspect decoded outputs template builds nested json" {
 test "display abi source collapses inline json" {
     try std.testing.expectEqualStrings("(inline json)", displayAbiSource("{\"version\":\"1.0\"}"));
     try std.testing.expectEqualStrings("auto:EQABC", displayAbiSource(" auto:EQABC "));
+}
+
+test "message auto decode resolves destination abi as function" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const abi_json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "transfer",
+        \\      "opcode": "0x11223344",
+        \\      "inputs": [
+        \\        {"name": "amount", "type": "coins"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "abi.json", .data = abi_json });
+    const abi_path = try tmp.dir.realpathAlloc(allocator, "abi.json");
+    defer allocator.free(abi_path);
+    const abi_uri = try std.fmt.allocPrint(allocator, "file://{s}", .{abi_path});
+    defer allocator.free(abi_uri);
+
+    const FakeProvider = struct {
+        allocator: std.mem.Allocator,
+        abi_uri: []const u8,
+
+        pub fn runGetMethod(self: *@This(), addr: []const u8, method_name: []const u8, stack: []const []const u8) anyerror!ton_zig_agent_kit.core.types.RunGetMethodResponse {
+            _ = addr;
+            _ = method_name;
+            _ = stack;
+
+            var builder = Builder.init();
+            try builder.storeUint(0x01, 8);
+            try builder.storeBits(self.abi_uri, @intCast(self.abi_uri.len * 8));
+            const uri_cell = try builder.toCell(self.allocator);
+
+            const entries = try self.allocator.alloc(StackEntry, 1);
+            entries[0] = .{ .cell = uri_cell };
+            return .{
+                .exit_code = 0,
+                .stack = entries,
+                .logs = "",
+            };
+        }
+
+        pub fn freeRunGetMethodResponse(self: *@This(), response: *ton_zig_agent_kit.core.types.RunGetMethodResponse) void {
+            for (response.stack) |*entry| {
+                switch (entry.*) {
+                    .cell => |value| value.deinit(self.allocator),
+                    .slice => |value| value.deinit(self.allocator),
+                    .builder => |value| value.deinit(self.allocator),
+                    else => {},
+                }
+            }
+            if (response.stack.len > 0) self.allocator.free(response.stack);
+        }
+    };
+
+    var parsed_abi = try contract_mod.abi_adapter.parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer parsed_abi.deinit(allocator);
+
+    const body_boc = try contract_mod.abi_adapter.buildFunctionBodyFromAbiAlloc(
+        allocator,
+        &parsed_abi.abi,
+        "transfer",
+        &.{.{ .uint = 77 }},
+    );
+    defer allocator.free(body_boc);
+
+    const body_cell = try boc.deserializeBoc(allocator, body_boc);
+    defer body_cell.deinit(allocator);
+
+    const msg = Message{
+        .hash = "",
+        .source = null,
+        .destination = .{
+            .raw = [_]u8{0x11} ** 32,
+            .workchain = 0,
+        },
+        .value = 0,
+        .body = body_cell,
+        .raw_body = &.{},
+    };
+
+    var provider = FakeProvider{ .allocator = allocator, .abi_uri = abi_uri };
+    var decoded = (tryDecodeMessageBodyAutoAlloc(allocator, &provider, &msg)).?;
+    defer decoded.deinit(allocator);
+
+    try std.testing.expectEqualStrings("transfer(coins)", decoded.selector);
+    try std.testing.expectEqualStrings("{\"amount\":77}", decoded.decoded_json);
+    try std.testing.expect(decoded.kind == .function);
+}
+
+test "message auto decode resolves source abi as event" {
+    const allocator = std.testing.allocator;
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const abi_json =
+        \\{
+        \\  "version": "1.0",
+        \\  "events": [
+        \\    {
+        \\      "name": "Transfer",
+        \\      "opcode": "0x01020304",
+        \\      "inputs": [
+        \\        {"name": "amount", "type": "coins"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+    try tmp.dir.writeFile(.{ .sub_path = "abi.json", .data = abi_json });
+    const abi_path = try tmp.dir.realpathAlloc(allocator, "abi.json");
+    defer allocator.free(abi_path);
+    const abi_uri = try std.fmt.allocPrint(allocator, "file://{s}", .{abi_path});
+    defer allocator.free(abi_uri);
+
+    const FakeProvider = struct {
+        allocator: std.mem.Allocator,
+        abi_uri: []const u8,
+
+        pub fn runGetMethod(self: *@This(), addr: []const u8, method_name: []const u8, stack: []const []const u8) anyerror!ton_zig_agent_kit.core.types.RunGetMethodResponse {
+            _ = addr;
+            _ = method_name;
+            _ = stack;
+
+            var builder = Builder.init();
+            try builder.storeUint(0x01, 8);
+            try builder.storeBits(self.abi_uri, @intCast(self.abi_uri.len * 8));
+            const uri_cell = try builder.toCell(self.allocator);
+
+            const entries = try self.allocator.alloc(StackEntry, 1);
+            entries[0] = .{ .cell = uri_cell };
+            return .{
+                .exit_code = 0,
+                .stack = entries,
+                .logs = "",
+            };
+        }
+
+        pub fn freeRunGetMethodResponse(self: *@This(), response: *ton_zig_agent_kit.core.types.RunGetMethodResponse) void {
+            for (response.stack) |*entry| {
+                switch (entry.*) {
+                    .cell => |value| value.deinit(self.allocator),
+                    .slice => |value| value.deinit(self.allocator),
+                    .builder => |value| value.deinit(self.allocator),
+                    else => {},
+                }
+            }
+            if (response.stack.len > 0) self.allocator.free(response.stack);
+        }
+    };
+
+    var builder = Builder.init();
+    try builder.storeUint(0x01020304, 32);
+    try builder.storeCoins(88);
+    const body_cell = try builder.toCell(allocator);
+    defer body_cell.deinit(allocator);
+
+    const msg = Message{
+        .hash = "",
+        .source = .{
+            .raw = [_]u8{0x22} ** 32,
+            .workchain = 0,
+        },
+        .destination = null,
+        .value = 0,
+        .body = body_cell,
+        .raw_body = &.{},
+    };
+
+    var provider = FakeProvider{ .allocator = allocator, .abi_uri = abi_uri };
+    var decoded = (tryDecodeMessageBodyAutoAlloc(allocator, &provider, &msg)).?;
+    defer decoded.deinit(allocator);
+
+    try std.testing.expectEqualStrings("Transfer(coins)", decoded.selector);
+    try std.testing.expectEqualStrings("{\"amount\":88}", decoded.decoded_json);
+    try std.testing.expect(decoded.kind == .event);
 }
