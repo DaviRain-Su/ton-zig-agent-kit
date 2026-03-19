@@ -4,6 +4,7 @@
 const std = @import("std");
 const types = @import("../core/types.zig");
 const cell = @import("../core/cell.zig");
+const body_builder = @import("../core/body_builder.zig");
 const address_mod = @import("../core/address.zig");
 const http_client = @import("../core/http_client.zig");
 const generic_contract = @import("contract.zig");
@@ -164,24 +165,24 @@ pub fn createTransferMessage(
     // response_destination
     try builder.storeAddress(response_destination);
     // custom_payload (either 0 or ref)
-    if (custom_payload) |_| {
+    if (custom_payload) |payload| {
         try builder.storeUint(1, 1); // has custom payload
-        // Would store as ref in real implementation
+        try body_builder.storeRefBoc(&builder, allocator, payload);
     } else {
         try builder.storeUint(0, 1); // no custom payload
     }
     // forward_ton_amount
     try builder.storeCoins(forward_ton_amount);
     // forward_payload
-    if (forward_payload) |_| {
+    if (forward_payload) |payload| {
         try builder.storeUint(1, 1); // has forward payload
-        // Would store as ref in real implementation
+        try body_builder.storeRefBoc(&builder, allocator, payload);
     } else {
         try builder.storeUint(0, 1); // no forward payload
     }
 
     const c = try builder.toCell(allocator);
-    defer allocator.destroy(c);
+    defer c.deinit(allocator);
 
     return try @import("../core/boc.zig").serializeBoc(allocator, c);
 }
@@ -205,14 +206,15 @@ pub fn createBurnMessage(
     // response_destination
     try builder.storeAddress(response_destination);
     // custom_payload
-    if (custom_payload) |_| {
+    if (custom_payload) |payload| {
         try builder.storeUint(1, 1);
+        try body_builder.storeRefBoc(&builder, allocator, payload);
     } else {
         try builder.storeUint(0, 1);
     }
 
     const c = try builder.toCell(allocator);
-    defer allocator.destroy(c);
+    defer c.deinit(allocator);
 
     return try @import("../core/boc.zig").serializeBoc(allocator, c);
 }
@@ -296,4 +298,93 @@ test "parse jetton wallet data stack" {
     try std.testing.expectEqual(@as(u64, 777), data.balance);
     try std.testing.expectEqualStrings("0:1111111111111111111111111111111111111111111111111111111111111111", data.owner);
     try std.testing.expectEqualStrings("0:2222222222222222222222222222222222222222222222222222222222222222", data.master);
+}
+
+test "jetton transfer message stores custom and forward payload refs" {
+    const allocator = std.testing.allocator;
+
+    var custom_builder = cell.Builder.init();
+    try custom_builder.storeUint(0xAA, 8);
+    const custom_cell = try custom_builder.toCell(allocator);
+    defer custom_cell.deinit(allocator);
+    const custom_boc = try @import("../core/boc.zig").serializeBoc(allocator, custom_cell);
+    defer allocator.free(custom_boc);
+
+    var forward_builder = cell.Builder.init();
+    try forward_builder.storeUint(0xBB, 8);
+    const forward_cell = try forward_builder.toCell(allocator);
+    defer forward_cell.deinit(allocator);
+    const forward_boc = try @import("../core/boc.zig").serializeBoc(allocator, forward_cell);
+    defer allocator.free(forward_boc);
+
+    const body_boc = try createTransferMessage(
+        allocator,
+        7,
+        10,
+        "0:1111111111111111111111111111111111111111111111111111111111111111",
+        "0:2222222222222222222222222222222222222222222222222222222222222222",
+        custom_boc,
+        1,
+        forward_boc,
+    );
+    defer allocator.free(body_boc);
+
+    const body = try @import("../core/boc.zig").deserializeBoc(allocator, body_boc);
+    defer body.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u2, 2), body.ref_cnt);
+
+    var slice = body.toSlice();
+    try std.testing.expectEqual(@as(u64, 0x0f8a7ea5), try slice.loadUint(32));
+    try std.testing.expectEqual(@as(u64, 7), try slice.loadUint(64));
+    try std.testing.expectEqual(@as(u64, 10), try slice.loadCoins());
+    _ = try slice.loadAddress();
+    _ = try slice.loadAddress();
+    try std.testing.expectEqual(@as(u64, 1), try slice.loadUint(1));
+    const custom_ref = try slice.loadRef();
+    try std.testing.expectEqual(@as(u64, 1), try slice.loadCoins());
+    try std.testing.expectEqual(@as(u64, 1), try slice.loadUint(1));
+    const forward_ref = try slice.loadRef();
+
+    var custom_slice = custom_ref.toSlice();
+    try std.testing.expectEqual(@as(u64, 0xAA), try custom_slice.loadUint(8));
+
+    var forward_slice = forward_ref.toSlice();
+    try std.testing.expectEqual(@as(u64, 0xBB), try forward_slice.loadUint(8));
+}
+
+test "jetton burn message stores custom payload ref" {
+    const allocator = std.testing.allocator;
+
+    var custom_builder = cell.Builder.init();
+    try custom_builder.storeUint(0xCC, 8);
+    const custom_cell = try custom_builder.toCell(allocator);
+    defer custom_cell.deinit(allocator);
+    const custom_boc = try @import("../core/boc.zig").serializeBoc(allocator, custom_cell);
+    defer allocator.free(custom_boc);
+
+    const body_boc = try createBurnMessage(
+        allocator,
+        5,
+        11,
+        "0:3333333333333333333333333333333333333333333333333333333333333333",
+        custom_boc,
+    );
+    defer allocator.free(body_boc);
+
+    const body = try @import("../core/boc.zig").deserializeBoc(allocator, body_boc);
+    defer body.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u2, 1), body.ref_cnt);
+
+    var slice = body.toSlice();
+    try std.testing.expectEqual(@as(u64, 0x595f07bc), try slice.loadUint(32));
+    try std.testing.expectEqual(@as(u64, 5), try slice.loadUint(64));
+    try std.testing.expectEqual(@as(u64, 11), try slice.loadCoins());
+    _ = try slice.loadAddress();
+    try std.testing.expectEqual(@as(u64, 1), try slice.loadUint(1));
+
+    const custom_ref = try slice.loadRef();
+    var custom_slice = custom_ref.toSlice();
+    try std.testing.expectEqual(@as(u64, 0xCC), try custom_slice.loadUint(8));
 }

@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const address_mod = @import("../core/address.zig");
+const body_builder = @import("../core/body_builder.zig");
 const http_client = @import("../core/http_client.zig");
 const paywatch = @import("../paywatch/paywatch.zig");
 const wallet = @import("../wallet/wallet.zig");
@@ -302,6 +303,23 @@ pub const AgentTools = struct {
         return self.sendWalletMessages(destination, amount, msgs);
     }
 
+    /// Build and send an arbitrary contract body from typed operations
+    pub fn sendContractMessageOps(self: *AgentTools, destination: []const u8, amount: u64, ops: []const body_builder.BodyOp) !tools_types.SendResult {
+        const body_boc = body_builder.buildBodyBocAlloc(self.allocator, ops) catch |err| {
+            return tools_types.SendResult{
+                .hash = "",
+                .lt = 0,
+                .destination = destination,
+                .amount = amount,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        defer self.allocator.free(body_boc);
+
+        return self.sendContractMessage(destination, amount, body_boc);
+    }
+
     fn sendWalletMessages(self: *AgentTools, destination: []const u8, amount: u64, msgs: []const wallet.signing.WalletMessage) !tools_types.SendResult {
         const private_key = self.config.wallet_private_key orelse {
             return tools_types.SendResult{
@@ -383,5 +401,6 @@ test "agent tools getBalance" {
 test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.runGetMethod;
     _ = AgentTools.sendContractMessage;
+    _ = AgentTools.sendContractMessageOps;
     _ = RunMethodResult;
 }
