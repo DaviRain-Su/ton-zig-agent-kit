@@ -52,6 +52,7 @@ pub const StackArg = union(enum) {
     slice: []const u8,
     builder: []const u8,
     address: []const u8,
+    raw_json: []const u8,
 };
 
 const offchain_content_prefix: u8 = 0x01;
@@ -165,6 +166,7 @@ fn writeStackArgJson(writer: anytype, allocator: std.mem.Allocator, arg: StackAr
 
             try writeBocStackArgJson(writer, allocator, "slice", address_boc);
         },
+        .raw_json => |value| try writer.writeAll(value),
     }
 }
 
@@ -312,6 +314,7 @@ test "build stack args json" {
         .{ .address = "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8" },
         .{ .cell = content_boc },
         .{ .builder = content_boc },
+        .{ .raw_json = "[\"tuple\",[[\"num\",7],[\"null\"]]]" },
     });
     defer allocator.free(stack_json);
 
@@ -320,7 +323,9 @@ test "build stack args json" {
     try std.testing.expect(std.mem.indexOf(u8, stack_json, "[\"slice\",\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, stack_json, "[\"cell\",\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, stack_json, "[\"builder\",\"") != null);
-    try std.testing.expect(std.mem.endsWith(u8, stack_json, "\"]]"));
+    try std.testing.expect(std.mem.indexOf(u8, stack_json, "[\"tuple\",[[\"num\",7],[\"null\"]]]") != null);
+    try std.testing.expect(std.mem.startsWith(u8, stack_json, "["));
+    try std.testing.expect(std.mem.endsWith(u8, stack_json, "]"));
 }
 
 test "decode offchain content uri from snake cell" {

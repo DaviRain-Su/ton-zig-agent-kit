@@ -686,7 +686,17 @@ fn abiValueToStackArgAlloc(
         return abiValueToStackArgAlloc(allocator, paramWithType(param, inner_type), value);
     }
 
-    if (isCompositeParam(param)) return error.UnsupportedAbiType;
+    if (isCompositeParam(param)) {
+        const json_text = switch (value) {
+            .json => |text| text,
+            else => return error.InvalidAbiArguments,
+        };
+        const encoded = try buildCompositeStackArgJsonAlloc(allocator, param, json_text);
+        return .{
+            .arg = .{ .raw_json = encoded },
+            .owned_buffer = encoded,
+        };
+    }
 
     if (std.mem.eql(u8, param.type_name, "coins") or
         std.mem.startsWith(u8, param.type_name, "uint") or
@@ -818,6 +828,21 @@ fn storeCompositeJsonText(
     try storeAbiJsonValue(builder, allocator, param, parsed.value);
 }
 
+fn buildCompositeStackArgJsonAlloc(
+    allocator: std.mem.Allocator,
+    param: ParamDef,
+    json_text: []const u8,
+) ![]u8 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_text, .{});
+    defer parsed.deinit();
+
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    try writeAbiStackArgJson(&writer.writer, allocator, param, parsed.value);
+    return try writer.toOwnedSlice();
+}
+
 fn storeAbiJsonValue(
     builder: *cell.Builder,
     allocator: std.mem.Allocator,
@@ -914,6 +939,163 @@ fn storeCompositeFieldsJsonValue(
         },
         else => return error.InvalidAbiArguments,
     }
+}
+
+fn writeAbiStackArgJson(
+    writer: anytype,
+    allocator: std.mem.Allocator,
+    param: ParamDef,
+    json_value: std.json.Value,
+) anyerror!void {
+    if (optionalInnerType(param.type_name)) |inner_type| {
+        if (json_value == .null) {
+            try writer.writeAll("[\"null\"]");
+            return;
+        }
+
+        return writeAbiStackArgJson(writer, allocator, paramWithType(param, inner_type), json_value);
+    }
+
+    if (isCompositeParam(param)) {
+        return writeAbiCompositeStackArgJson(writer, allocator, param, json_value);
+    }
+
+    if (std.mem.eql(u8, param.type_name, "bool")) {
+        return switch (json_value) {
+            .bool => |value| writer.print("[\"num\",{d}]", .{if (value) @as(i64, 1) else 0}),
+            .integer => |value| writer.print("[\"num\",{d}]", .{if (value == 0) @as(i64, 0) else 1}),
+            else => error.InvalidAbiArguments,
+        };
+    }
+
+    if (std.mem.eql(u8, param.type_name, "coins") or
+        std.mem.startsWith(u8, param.type_name, "uint") or
+        std.mem.startsWith(u8, param.type_name, "int"))
+    {
+        return switch (json_value) {
+            .integer => |value| writer.print("[\"num\",{d}]", .{value}),
+            else => error.InvalidAbiArguments,
+        };
+    }
+
+    if (std.mem.eql(u8, param.type_name, "address")) {
+        return switch (json_value) {
+            .string => |value| {
+                const address_boc = try buildAddressStackSliceBocAlloc(allocator, value);
+                defer allocator.free(address_boc);
+                try writeStackBocArgJson(writer, allocator, "slice", address_boc);
+            },
+            else => error.InvalidAbiArguments,
+        };
+    }
+
+    if (std.mem.eql(u8, param.type_name, "bytes") or std.mem.eql(u8, param.type_name, "string")) {
+        return switch (json_value) {
+            .string => |value| {
+                const body_boc = try buildBytesSliceBocAlloc(allocator, value);
+                defer allocator.free(body_boc);
+                try writeStackBocArgJson(writer, allocator, "slice", body_boc);
+            },
+            else => error.InvalidAbiArguments,
+        };
+    }
+
+    if (std.mem.eql(u8, param.type_name, "cell") or
+        std.mem.eql(u8, param.type_name, "ref") or
+        std.mem.eql(u8, param.type_name, "boc") or
+        std.mem.eql(u8, param.type_name, "cell_ref"))
+    {
+        return switch (json_value) {
+            .string => |value| writer.print("[\"cell\",\"{s}\"]", .{value}),
+            else => error.InvalidAbiArguments,
+        };
+    }
+
+    if (std.mem.eql(u8, param.type_name, "slice")) {
+        return switch (json_value) {
+            .string => |value| writer.print("[\"slice\",\"{s}\"]", .{value}),
+            else => error.InvalidAbiArguments,
+        };
+    }
+
+    if (std.mem.eql(u8, param.type_name, "builder")) {
+        return switch (json_value) {
+            .string => |value| writer.print("[\"builder\",\"{s}\"]", .{value}),
+            else => error.InvalidAbiArguments,
+        };
+    }
+
+    return error.UnsupportedAbiType;
+}
+
+fn writeAbiCompositeStackArgJson(
+    writer: anytype,
+    allocator: std.mem.Allocator,
+    param: ParamDef,
+    json_value: std.json.Value,
+) anyerror!void {
+    try writer.print("[\"{s}\",", .{compositeStackTag(param.type_name)});
+    try writeCompositeItemsJson(writer, allocator, param.components, json_value);
+    try writer.writeByte(']');
+}
+
+fn writeCompositeItemsJson(
+    writer: anytype,
+    allocator: std.mem.Allocator,
+    components: []const ParamDef,
+    json_value: std.json.Value,
+) anyerror!void {
+    try writer.writeByte('[');
+
+    switch (json_value) {
+        .object => |object| {
+            for (components, 0..) |component, idx| {
+                if (idx != 0) try writer.writeByte(',');
+                const child = object.get(component.name) orelse return error.InvalidAbiArguments;
+                try writeAbiStackArgJson(writer, allocator, component, child);
+            }
+        },
+        .array => |array| {
+            if (array.items.len != components.len) return error.InvalidAbiArguments;
+            for (components, array.items, 0..) |component, child, idx| {
+                if (idx != 0) try writer.writeByte(',');
+                try writeAbiStackArgJson(writer, allocator, component, child);
+            }
+        },
+        else => return error.InvalidAbiArguments,
+    }
+
+    try writer.writeByte(']');
+}
+
+fn compositeStackTag(type_name: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, type_name, " \t\r\n");
+    if (std.mem.eql(u8, trimmed, "list") or
+        std.mem.startsWith(u8, trimmed, "list<") or
+        std.mem.startsWith(u8, trimmed, "list "))
+    {
+        return "list";
+    }
+    return "tuple";
+}
+
+fn writeStackBocArgJson(writer: anytype, allocator: std.mem.Allocator, tag: []const u8, boc_bytes: []const u8) !void {
+    const encoded_len = std.base64.standard.Encoder.calcSize(boc_bytes.len);
+    const encoded = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded);
+    _ = std.base64.standard.Encoder.encode(encoded, boc_bytes);
+
+    try writer.print("[\"{s}\",\"{s}\"]", .{ tag, encoded });
+}
+
+fn buildAddressStackSliceBocAlloc(allocator: std.mem.Allocator, address_text: []const u8) ![]u8 {
+    var builder = cell.Builder.init();
+    try builder.storeAddress(address_text);
+
+    const value = try builder.toCell(allocator);
+    defer value.deinit(allocator);
+
+    return boc.serializeBoc(allocator, value);
 }
 
 fn checkedAbiUintToI64(value: u64) !i64 {
@@ -1559,6 +1741,66 @@ test "abi adapter supports optional and string stack args" {
     defer third.deinit(allocator);
     var third_slice = third.toSlice();
     try std.testing.expectEqualSlices(u8, &.{ 0xCA, 0xFE }, try third_slice.loadBits(16));
+}
+
+test "abi adapter builds tuple and list get-method stack args from json" {
+    const allocator = std.testing.allocator;
+    const abi_json =
+        \\{
+        \\  "functions": [
+        \\    {
+        \\      "name": "lookup_tuple",
+        \\      "inputs": [
+        \\        {
+        \\          "name": "config",
+        \\          "type": "tuple",
+        \\          "components": [
+        \\            {"name": "enabled", "type": "bool"},
+        \\            {"name": "owner", "type": "address"},
+        \\            {"name": "label", "type": "optional<string>"}
+        \\          ]
+        \\        }
+        \\      ]
+        \\    },
+        \\    {
+        \\      "name": "lookup_list",
+        \\      "inputs": [
+        \\        {
+        \\          "name": "items",
+        \\          "type": "list",
+        \\          "components": [
+        \\            {"name": "enabled", "type": "bool"},
+        \\            {"name": "index", "type": "uint32"}
+        \\          ]
+        \\        }
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var abi = try parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer abi.deinit(allocator);
+
+    var tuple_args = try buildStackArgsFromAbiAlloc(allocator, &abi.abi, "lookup_tuple", &.{
+        .{ .json = "{\"enabled\":true,\"owner\":\"0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8\",\"label\":\"demo\"}" },
+    });
+    defer tuple_args.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), tuple_args.args.len);
+    try std.testing.expect(tuple_args.args[0] == .raw_json);
+    try std.testing.expect(std.mem.startsWith(u8, tuple_args.args[0].raw_json, "[\"tuple\",["));
+    try std.testing.expect(std.mem.indexOf(u8, tuple_args.args[0].raw_json, "[\"num\",1]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, tuple_args.args[0].raw_json, "[\"slice\",\"") != null);
+
+    var list_args = try buildStackArgsFromAbiAlloc(allocator, &abi.abi, "lookup_list", &.{
+        .{ .json = "[true,7]" },
+    });
+    defer list_args.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), list_args.args.len);
+    try std.testing.expect(list_args.args[0] == .raw_json);
+    try std.testing.expectEqualStrings("[\"list\",[[\"num\",1],[\"num\",7]]]", list_args.args[0].raw_json);
 }
 
 test "abi adapter decodes optional outputs" {
