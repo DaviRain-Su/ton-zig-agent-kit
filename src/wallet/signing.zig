@@ -50,6 +50,20 @@ pub const WalletV4Init = struct {
     }
 };
 
+pub const BuiltWalletExternalMessage = struct {
+    wallet_address: []u8,
+    boc: []u8,
+    state_init_attached: bool,
+    wallet_id: u32,
+    seqno: u32,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.wallet_address.len > 0) allocator.free(self.wallet_address);
+        if (self.boc.len > 0) allocator.free(self.boc);
+        self.* = undefined;
+    }
+};
+
 /// Generate Ed25519 keypair from seed
 pub fn generateKeypair(seed: []const u8) ![2][32]u8 {
     const seed_bytes = deriveSeed(seed);
@@ -663,6 +677,89 @@ pub fn sendMessagesAuto(
 
     try verifyWalletPublicKey(private_key, wallet_info.public_key);
     return sendPreparedMessages(client, version, private_key, raw_address, wallet_info.wallet_id, wallet_info.seqno, msgs);
+}
+
+pub fn buildSignedMessagesAutoAlloc(
+    client: anytype,
+    allocator: std.mem.Allocator,
+    version: WalletVersion,
+    private_key: [32]u8,
+    wallet_address: ?[]const u8,
+    workchain: i8,
+    wallet_id: u32,
+    msgs: []const WalletMessage,
+) !BuiltWalletExternalMessage {
+    if (version != .v4) return error.UnsupportedWalletVersion;
+
+    const valid_until = @as(u32, @intCast(std.time.timestamp())) + 60;
+
+    if (wallet_address) |addr| {
+        const wallet_info = try getWalletInfo(client, addr);
+        try verifyWalletPublicKey(private_key, wallet_info.public_key);
+
+        return .{
+            .wallet_address = try allocator.dupe(u8, addr),
+            .boc = try createSignedTransferWithWalletId(
+                allocator,
+                version,
+                private_key,
+                addr,
+                wallet_info.wallet_id,
+                wallet_info.seqno,
+                msgs,
+                valid_until,
+            ),
+            .state_init_attached = false,
+            .wallet_id = wallet_info.wallet_id,
+            .seqno = wallet_info.seqno,
+        };
+    }
+
+    var init = try deriveWalletV4InitFromPrivateKeyAlloc(allocator, workchain, wallet_id, private_key);
+    defer init.deinit(allocator);
+
+    const raw_address = try init.address.toRawAlloc(allocator);
+    errdefer allocator.free(raw_address);
+
+    const wallet_info = getWalletInfo(client, raw_address) catch |err| {
+        if (err == error.InvalidResponse) {
+            return .{
+                .wallet_address = raw_address,
+                .boc = try createWalletV4ExternalMessageWithId(
+                    allocator,
+                    private_key,
+                    raw_address,
+                    wallet_id,
+                    0,
+                    valid_until,
+                    msgs,
+                    init.state_init_boc,
+                ),
+                .state_init_attached = true,
+                .wallet_id = wallet_id,
+                .seqno = 0,
+            };
+        }
+        return err;
+    };
+
+    try verifyWalletPublicKey(private_key, wallet_info.public_key);
+    return .{
+        .wallet_address = raw_address,
+        .boc = try createSignedTransferWithWalletId(
+            allocator,
+            version,
+            private_key,
+            raw_address,
+            wallet_info.wallet_id,
+            wallet_info.seqno,
+            msgs,
+            valid_until,
+        ),
+        .state_init_attached = false,
+        .wallet_id = wallet_info.wallet_id,
+        .seqno = wallet_info.seqno,
+    };
 }
 
 test "wallet keypair generation" {

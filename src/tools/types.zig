@@ -306,6 +306,27 @@ pub const BuiltExternalMessageResult = struct {
     }
 };
 
+pub const BuiltWalletMessageResult = struct {
+    wallet_address: []const u8,
+    destination: []const u8,
+    amount: u64,
+    wallet_id: u32,
+    seqno: u32,
+    external_boc: []const u8,
+    external_hex: []const u8,
+    state_init_attached: bool,
+    success: bool,
+    error_message: ?[]const u8 = null,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.wallet_address.len > 0) allocator.free(self.wallet_address);
+        if (self.destination.len > 0) allocator.free(self.destination);
+        if (self.external_boc.len > 0) allocator.free(self.external_boc);
+        if (self.external_hex.len > 0) allocator.free(self.external_hex);
+        self.* = undefined;
+    }
+};
+
 pub const TxStatus = enum {
     pending,
     confirmed,
@@ -392,6 +413,7 @@ pub const ToolResponse = union(enum) {
     decoded_body: DecodedBodyResult,
     built_body: BuiltBodyResult,
     built_external: BuiltExternalMessageResult,
+    built_wallet: BuiltWalletMessageResult,
     invoice: InvoiceResult,
     verify: VerifyResult,
     transaction: TxResult,
