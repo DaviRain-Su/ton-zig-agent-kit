@@ -12,7 +12,7 @@ pub const Cell = struct {
     data: [MAX_BYTES]u8,
     bit_len: u16,
     refs: [MAX_REFS]?*Cell,
-    ref_cnt: u2,
+    ref_cnt: u3,
 
     pub fn create(allocator: std.mem.Allocator) !*Cell {
         const cell = try allocator.create(Cell);
@@ -111,7 +111,7 @@ pub const Builder = struct {
     data: [MAX_BYTES]u8,
     bit_len: u16,
     refs: [MAX_REFS]?*Cell,
-    ref_cnt: u2,
+    ref_cnt: u3,
 
     pub fn init() Builder {
         return Builder{
@@ -302,13 +302,13 @@ pub const Builder = struct {
 pub const Slice = struct {
     cell: *Cell,
     pos_bits: u16,
-    pos_refs: u2,
+    pos_refs: u3,
 
     pub fn remainingBits(self: *const Slice) u16 {
         return self.cell.bit_len - self.pos_bits;
     }
 
-    pub fn remainingRefs(self: *const Slice) u2 {
+    pub fn remainingRefs(self: *const Slice) u3 {
         return self.cell.ref_cnt - self.pos_refs;
     }
 

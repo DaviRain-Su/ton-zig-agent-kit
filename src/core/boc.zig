@@ -216,7 +216,7 @@ pub fn deserializeBoc(allocator: std.mem.Allocator, data: []const u8) !*Cell {
 
         if ((d1 & 0xF8) != 0) return error.InvalidBoc;
 
-        const ref_count: u2 = @intCast(d1 & 0x07);
+        const ref_count: u3 = @intCast(d1 & 0x07);
         const data_byte_len = @as(usize, @intCast(@divTrunc(d2 + 1, 2)));
         const has_partial_byte = (d2 & 1) == 1;
 
