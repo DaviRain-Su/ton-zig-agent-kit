@@ -2,7 +2,6 @@
 
 const std = @import("std");
 const types = @import("../core/types.zig");
-const http_client = @import("../core/http_client.zig");
 const cell = @import("../core/cell.zig");
 const boc = @import("../core/boc.zig");
 const body_builder = @import("../core/body_builder.zig");
@@ -102,7 +101,7 @@ const max_abi_source_bytes: usize = 1 << 20;
 const default_ipfs_gateway = "https://ipfs.io";
 const abi_array_length_bits: u16 = 32;
 
-pub fn querySupportedInterfaces(client: *http_client.TonHttpClient, addr: []const u8) !?SupportedInterfaces {
+pub fn querySupportedInterfaces(client: anytype, addr: []const u8) !?SupportedInterfaces {
     const supported = supportedInterfacesFromMethodSupport(
         try probeMethodSupport(client, addr, "seqno"),
         try probeMethodSupport(client, addr, "get_jetton_data"),
@@ -115,7 +114,7 @@ pub fn querySupportedInterfaces(client: *http_client.TonHttpClient, addr: []cons
     return supported;
 }
 
-pub fn queryAbiIpfs(client: *http_client.TonHttpClient, addr: []const u8) !?AbiInfo {
+pub fn queryAbiIpfs(client: anytype, addr: []const u8) !?AbiInfo {
     for (abi_method_candidates) |method_name| {
         var result = client.runGetMethod(addr, method_name, &.{}) catch |err| switch (err) {
             types.TonError.RpcError,
@@ -133,7 +132,7 @@ pub fn queryAbiIpfs(client: *http_client.TonHttpClient, addr: []const u8) !?AbiI
     return null;
 }
 
-pub fn queryAbiDocumentAlloc(client: *http_client.TonHttpClient, addr: []const u8) !?OwnedAbiInfo {
+pub fn queryAbiDocumentAlloc(client: anytype, addr: []const u8) !?OwnedAbiInfo {
     var abi_ref = try queryAbiIpfs(client, addr) orelse return null;
     defer abi_ref.deinit(client.allocator);
 
@@ -366,7 +365,7 @@ const abi_method_candidates = [_][]const u8{
     "abi",
 };
 
-fn probeMethodSupport(client: *http_client.TonHttpClient, addr: []const u8, method_name: []const u8) !bool {
+fn probeMethodSupport(client: anytype, addr: []const u8, method_name: []const u8) !bool {
     var result = client.runGetMethod(addr, method_name, &.{}) catch |err| switch (err) {
         types.TonError.RpcError,
         error.InvalidResponse,
@@ -379,7 +378,7 @@ fn probeMethodSupport(client: *http_client.TonHttpClient, addr: []const u8, meth
     return result.exit_code == 0;
 }
 
-fn probeAbiSupport(client: *http_client.TonHttpClient, addr: []const u8) !bool {
+fn probeAbiSupport(client: anytype, addr: []const u8) !bool {
     if (try queryAbiIpfs(client, addr)) |*abi| {
         abi.deinit(client.allocator);
         return true;

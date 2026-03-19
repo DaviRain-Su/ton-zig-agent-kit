@@ -14,6 +14,12 @@ const boc = ton_zig_agent_kit.core.boc;
 const signing = ton_zig_agent_kit.wallet.signing;
 const default_rpc_url = "https://toncenter.com/api/v2/jsonRPC";
 
+fn initDefaultProvider(allocator: std.mem.Allocator) !ton_zig_agent_kit.core.MultiProvider {
+    return ton_zig_agent_kit.core.MultiProvider.init(allocator, &.{
+        .{ .url = default_rpc_url },
+    });
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -45,10 +51,8 @@ pub fn main() !void {
             return;
         }
         const addr = args[2];
-        var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-        defer client.deinit();
-
-        const result = try client.getBalance(addr);
+        var provider = try initDefaultProvider(allocator);
+        const result = try provider.getBalance(addr);
         std.debug.print("Address: {s}\n", .{addr});
         std.debug.print("Balance: {d} nanotons ({d}.{d:09} TON)\n", .{
             result.balance,
@@ -66,11 +70,10 @@ pub fn main() !void {
         const addr = args[2];
         const method = args[3];
         const stack_json = if (args.len >= 5) args[4] else "[]";
-        var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-        defer client.deinit();
+        var provider = try initDefaultProvider(allocator);
 
-        var result = try client.runGetMethodJson(addr, method, stack_json);
-        defer client.freeRunGetMethodResponse(&result);
+        var result = try provider.runGetMethodJson(addr, method, stack_json);
+        defer provider.freeRunGetMethodResponse(&result);
 
         std.debug.print("Address: {s}\n", .{addr});
         std.debug.print("Method: {s}\n", .{method});
@@ -86,13 +89,12 @@ pub fn main() !void {
         }
 
         const addr = args[2];
-        var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-        defer client.deinit();
+        var provider = try initDefaultProvider(allocator);
 
-        const supported = try contract_mod.abi_adapter.querySupportedInterfaces(&client, addr);
-        var abi = try contract_mod.abi_adapter.queryAbiIpfs(&client, addr);
+        const supported = try contract_mod.abi_adapter.querySupportedInterfaces(&provider, addr);
+        var abi = try contract_mod.abi_adapter.queryAbiIpfs(&provider, addr);
         defer if (abi) |*info| info.deinit(allocator);
-        var abi_doc = contract_mod.abi_adapter.queryAbiDocumentAlloc(&client, addr) catch null;
+        var abi_doc = contract_mod.abi_adapter.queryAbiDocumentAlloc(&provider, addr) catch null;
         defer if (abi_doc) |*info| info.deinit(allocator);
 
         std.debug.print("Address: {s}\n", .{addr});
@@ -134,12 +136,12 @@ pub fn main() !void {
         var parsed_args = try parseCliStackArgs(allocator, args[4..]);
         defer parsed_args.deinit(allocator);
 
-        var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-        defer client.deinit();
+        var provider = try initDefaultProvider(allocator);
+        const stack_json = try contract_mod.buildStackArgsJsonAlloc(allocator, parsed_args.args);
+        defer allocator.free(stack_json);
 
-        var contract = contract_mod.GenericContract.init(&client, addr);
-        var result = try contract.callGetMethodArgs(method, parsed_args.args);
-        defer client.freeRunGetMethodResponse(&result);
+        var result = try provider.runGetMethodJson(addr, method, stack_json);
+        defer provider.freeRunGetMethodResponse(&result);
 
         std.debug.print("Address: {s}\n", .{addr});
         std.debug.print("Method: {s}\n", .{method});
@@ -170,12 +172,12 @@ pub fn main() !void {
         );
         defer stack_args.deinit(allocator);
 
-        var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-        defer client.deinit();
+        var provider = try initDefaultProvider(allocator);
+        const stack_json = try contract_mod.buildStackArgsJsonAlloc(allocator, stack_args.args);
+        defer allocator.free(stack_json);
 
-        var generic = contract_mod.GenericContract.init(&client, addr);
-        var result = try generic.callGetMethodArgs(function_name, stack_args.args);
-        defer client.freeRunGetMethodResponse(&result);
+        var result = try provider.runGetMethodJson(addr, function_name, stack_json);
+        defer provider.freeRunGetMethodResponse(&result);
 
         std.debug.print("Address: {s}\n", .{addr});
         std.debug.print("ABI version: {s}\n", .{abi.abi.version});
@@ -205,10 +207,9 @@ pub fn main() !void {
         var parsed_values = try parseCliAbiValues(allocator, args[4..]);
         defer parsed_values.deinit(allocator);
 
-        var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-        defer client.deinit();
+        var provider = try initDefaultProvider(allocator);
 
-        var abi = (try contract_mod.abi_adapter.queryAbiDocumentAlloc(&client, addr)) orelse {
+        var abi = (try contract_mod.abi_adapter.queryAbiDocumentAlloc(&provider, addr)) orelse {
             std.debug.print("ABI document not found for {s}\n", .{addr});
             return;
         };
@@ -222,9 +223,11 @@ pub fn main() !void {
         );
         defer stack_args.deinit(allocator);
 
-        var generic = contract_mod.GenericContract.init(&client, addr);
-        var result = try generic.callGetMethodArgs(function_name, stack_args.args);
-        defer client.freeRunGetMethodResponse(&result);
+        const stack_json = try contract_mod.buildStackArgsJsonAlloc(allocator, stack_args.args);
+        defer allocator.free(stack_json);
+
+        var result = try provider.runGetMethodJson(addr, function_name, stack_json);
+        defer provider.freeRunGetMethodResponse(&result);
 
         std.debug.print("Address: {s}\n", .{addr});
         std.debug.print("ABI source: {s}\n", .{abi.abi.uri orelse "(embedded)"});
@@ -249,11 +252,10 @@ pub fn main() !void {
             return;
         }
 
-        var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-        defer client.deinit();
+        var provider = try initDefaultProvider(allocator);
 
-        var result = try client.sendBocBase64(args[2]);
-        defer client.freeSendBocResponse(&result);
+        var result = try provider.sendBocBase64(args[2]);
+        defer provider.freeSendBocResponse(&result);
 
         std.debug.print("Submitted BoC:\n", .{});
         std.debug.print("  Hash: {s}\n", .{result.hash});
@@ -267,11 +269,10 @@ pub fn main() !void {
             return;
         }
 
-        var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-        defer client.deinit();
+        var provider = try initDefaultProvider(allocator);
 
-        var result = try client.sendBocHex(args[2]);
-        defer client.freeSendBocResponse(&result);
+        var result = try provider.sendBocHex(args[2]);
+        defer provider.freeSendBocResponse(&result);
 
         std.debug.print("Submitted BoC:\n", .{});
         std.debug.print("  Hash: {s}\n", .{result.hash});
@@ -593,10 +594,9 @@ pub fn main() !void {
                 return;
             }
             const wallet_addr = args[3];
-            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-            defer client.deinit();
+            var provider = try initDefaultProvider(allocator);
 
-            const seqno = try signing.getSeqno(&client, wallet_addr);
+            const seqno = try signing.getSeqno(&provider, wallet_addr);
             std.debug.print("Wallet seqno: {d}\n", .{seqno});
             return;
         }
@@ -607,10 +607,9 @@ pub fn main() !void {
                 return;
             }
             const wallet_addr = args[3];
-            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-            defer client.deinit();
+            var provider = try initDefaultProvider(allocator);
 
-            const info = try signing.getWalletInfo(&client, wallet_addr);
+            const info = try signing.getWalletInfo(&provider, wallet_addr);
             std.debug.print("Wallet info:\n", .{});
             std.debug.print("  Address: {s}\n", .{wallet_addr});
             std.debug.print("  Seqno: {d}\n", .{info.seqno});
@@ -632,15 +631,14 @@ pub fn main() !void {
             const dest = args[4];
             const amount = try std.fmt.parseInt(u64, args[5], 10);
 
-            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-            defer client.deinit();
+            var provider = try initDefaultProvider(allocator);
 
             // Generate keypair (in real usage, load from secure storage)
             const keypair = try signing.generateKeypair("my_seed_phrase");
             const private_key = keypair[0];
 
-            var result = try signing.sendTransfer(&client, .v4, private_key, wallet_addr, dest, amount, null);
-            defer client.freeSendBocResponse(&result);
+            var result = try signing.sendTransfer(&provider, .v4, private_key, wallet_addr, dest, amount, null);
+            defer provider.freeSendBocResponse(&result);
 
             std.debug.print("Transfer submitted:\n", .{});
             std.debug.print("  Hash: {s}\n", .{result.hash});
@@ -659,14 +657,13 @@ pub fn main() !void {
             const body = try decodeBase64FlexibleAlloc(allocator, args[6]);
             defer allocator.free(body);
 
-            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-            defer client.deinit();
+            var provider = try initDefaultProvider(allocator);
 
             const keypair = try signing.generateKeypair("my_seed_phrase");
             const private_key = keypair[0];
 
-            var result = try signing.sendBody(&client, .v4, private_key, wallet_addr, dest, amount, body);
-            defer client.freeSendBocResponse(&result);
+            var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
+            defer provider.freeSendBocResponse(&result);
 
             std.debug.print("Contract message submitted:\n", .{});
             std.debug.print("  Hash: {s}\n", .{result.hash});
@@ -685,14 +682,13 @@ pub fn main() !void {
             const body = try hexToBytes(allocator, args[6]);
             defer allocator.free(body);
 
-            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-            defer client.deinit();
+            var provider = try initDefaultProvider(allocator);
 
             const keypair = try signing.generateKeypair("my_seed_phrase");
             const private_key = keypair[0];
 
-            var result = try signing.sendBody(&client, .v4, private_key, wallet_addr, dest, amount, body);
-            defer client.freeSendBocResponse(&result);
+            var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
+            defer provider.freeSendBocResponse(&result);
 
             std.debug.print("Contract message submitted:\n", .{});
             std.debug.print("  Hash: {s}\n", .{result.hash});
@@ -715,14 +711,13 @@ pub fn main() !void {
             const body = try ton_zig_agent_kit.core.body_builder.buildBodyBocAlloc(allocator, parsed_ops.ops);
             defer allocator.free(body);
 
-            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-            defer client.deinit();
+            var provider = try initDefaultProvider(allocator);
 
             const keypair = try signing.generateKeypair("my_seed_phrase");
             const private_key = keypair[0];
 
-            var result = try signing.sendBody(&client, .v4, private_key, wallet_addr, dest, amount, body);
-            defer client.freeSendBocResponse(&result);
+            var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
+            defer provider.freeSendBocResponse(&result);
 
             std.debug.print("Typed contract message submitted:\n", .{});
             std.debug.print("  Hash: {s}\n", .{result.hash});
@@ -755,14 +750,13 @@ pub fn main() !void {
             );
             defer allocator.free(body);
 
-            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-            defer client.deinit();
+            var provider = try initDefaultProvider(allocator);
 
             const keypair = try signing.generateKeypair("my_seed_phrase");
             const private_key = keypair[0];
 
-            var result = try signing.sendBody(&client, .v4, private_key, wallet_addr, dest, amount, body);
-            defer client.freeSendBocResponse(&result);
+            var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
+            defer provider.freeSendBocResponse(&result);
 
             std.debug.print("Function contract message submitted:\n", .{});
             std.debug.print("  Function: {s}\n", .{function_def.function.name});
@@ -795,14 +789,13 @@ pub fn main() !void {
             );
             defer allocator.free(body);
 
-            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-            defer client.deinit();
+            var provider = try initDefaultProvider(allocator);
 
             const keypair = try signing.generateKeypair("my_seed_phrase");
             const private_key = keypair[0];
 
-            var result = try signing.sendBody(&client, .v4, private_key, wallet_addr, dest, amount, body);
-            defer client.freeSendBocResponse(&result);
+            var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
+            defer provider.freeSendBocResponse(&result);
 
             std.debug.print("ABI contract message submitted:\n", .{});
             std.debug.print("  ABI version: {s}\n", .{abi.abi.version});
@@ -825,10 +818,9 @@ pub fn main() !void {
             var parsed_values = try parseCliAbiValues(allocator, args[7..]);
             defer parsed_values.deinit(allocator);
 
-            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-            defer client.deinit();
+            var provider = try initDefaultProvider(allocator);
 
-            var abi = (try contract_mod.abi_adapter.queryAbiDocumentAlloc(&client, dest)) orelse {
+            var abi = (try contract_mod.abi_adapter.queryAbiDocumentAlloc(&provider, dest)) orelse {
                 std.debug.print("ABI document not found for {s}\n", .{dest});
                 return;
             };
@@ -845,8 +837,8 @@ pub fn main() !void {
             const keypair = try signing.generateKeypair("my_seed_phrase");
             const private_key = keypair[0];
 
-            var result = try signing.sendBody(&client, .v4, private_key, wallet_addr, dest, amount, body);
-            defer client.freeSendBocResponse(&result);
+            var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
+            defer provider.freeSendBocResponse(&result);
 
             std.debug.print("Auto ABI contract message submitted:\n", .{});
             std.debug.print("  ABI source: {s}\n", .{abi.abi.uri orelse "(embedded)"});
@@ -873,14 +865,13 @@ pub fn main() !void {
                 null;
             defer if (body_boc) |value| allocator.free(value);
 
-            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-            defer client.deinit();
+            var provider = try initDefaultProvider(allocator);
 
             const keypair = try signing.generateKeypair("my_seed_phrase");
             const private_key = keypair[0];
 
-            var result = try signing.sendDeploy(&client, .v4, private_key, wallet_addr, dest, amount, state_init_boc, body_boc);
-            defer client.freeSendBocResponse(&result);
+            var result = try signing.sendDeploy(&provider, .v4, private_key, wallet_addr, dest, amount, state_init_boc, body_boc);
+            defer provider.freeSendBocResponse(&result);
 
             std.debug.print("Deploy message submitted:\n", .{});
             std.debug.print("  Hash: {s}\n", .{result.hash});
@@ -910,14 +901,13 @@ pub fn main() !void {
             const dest_user_friendly = try ton_zig_agent_kit.core.address.addressToUserFriendlyAlloc(allocator, &dest_addr, true, false);
             defer allocator.free(dest_user_friendly);
 
-            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
-            defer client.deinit();
+            var provider = try initDefaultProvider(allocator);
 
             const keypair = try signing.generateKeypair("my_seed_phrase");
             const private_key = keypair[0];
 
-            var result = try signing.sendDeploy(&client, .v4, private_key, wallet_addr, dest_raw, amount, state_init_boc, body_boc);
-            defer client.freeSendBocResponse(&result);
+            var result = try signing.sendDeploy(&provider, .v4, private_key, wallet_addr, dest_raw, amount, state_init_boc, body_boc);
+            defer provider.freeSendBocResponse(&result);
 
             std.debug.print("Deploy message submitted:\n", .{});
             std.debug.print("  Destination: {s}\n", .{dest_raw});

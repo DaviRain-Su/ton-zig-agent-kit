@@ -6,7 +6,6 @@ const types = @import("../core/types.zig");
 const cell = @import("../core/cell.zig");
 const boc = @import("../core/boc.zig");
 const state_init = @import("../core/state_init.zig");
-const http_client = @import("../core/http_client.zig");
 const generic_contract = @import("../contract/contract.zig");
 
 const Ed25519 = std.crypto.sign.Ed25519;
@@ -281,7 +280,7 @@ pub fn createSignedTransferWithWalletId(
 }
 
 /// Get seqno from wallet
-pub fn getSeqno(client: *http_client.TonHttpClient, wallet_address: []const u8) !u32 {
+pub fn getSeqno(client: anytype, wallet_address: []const u8) !u32 {
     var result = try client.runGetMethod(wallet_address, "seqno", &.{});
     defer client.freeRunGetMethodResponse(&result);
 
@@ -298,7 +297,7 @@ pub fn getSeqno(client: *http_client.TonHttpClient, wallet_address: []const u8) 
     return 0;
 }
 
-pub fn getSubwalletId(client: *http_client.TonHttpClient, wallet_address: []const u8) !u32 {
+pub fn getSubwalletId(client: anytype, wallet_address: []const u8) !u32 {
     var result = try client.runGetMethod(wallet_address, "get_subwallet_id", &.{});
     defer client.freeRunGetMethodResponse(&result);
 
@@ -306,7 +305,7 @@ pub fn getSubwalletId(client: *http_client.TonHttpClient, wallet_address: []cons
     return generic_contract.stackEntryAsUnsigned(u32, &result.stack[0]);
 }
 
-pub fn getPublicKey(client: *http_client.TonHttpClient, wallet_address: []const u8) ![32]u8 {
+pub fn getPublicKey(client: anytype, wallet_address: []const u8) ![32]u8 {
     var result = try client.runGetMethod(wallet_address, "get_public_key", &.{});
     defer client.freeRunGetMethodResponse(&result);
 
@@ -314,7 +313,7 @@ pub fn getPublicKey(client: *http_client.TonHttpClient, wallet_address: []const 
     return stackEntryAsPublicKeyBytes(&result.stack[0]);
 }
 
-pub fn getWalletInfo(client: *http_client.TonHttpClient, wallet_address: []const u8) !WalletInfo {
+pub fn getWalletInfo(client: anytype, wallet_address: []const u8) !WalletInfo {
     return .{
         .seqno = try getSeqno(client, wallet_address),
         .wallet_id = try getSubwalletId(client, wallet_address),
@@ -341,7 +340,7 @@ fn u256ToBytes(value: u256) [32]u8 {
 
 /// Send transfer
 pub fn sendTransfer(
-    client: *http_client.TonHttpClient,
+    client: anytype,
     version: WalletVersion,
     private_key: [32]u8,
     wallet_address: []const u8,
@@ -361,7 +360,7 @@ pub fn sendTransfer(
 }
 
 pub fn sendBody(
-    client: *http_client.TonHttpClient,
+    client: anytype,
     version: WalletVersion,
     private_key: [32]u8,
     wallet_address: []const u8,
@@ -381,7 +380,7 @@ pub fn sendBody(
 }
 
 pub fn sendDeploy(
-    client: *http_client.TonHttpClient,
+    client: anytype,
     version: WalletVersion,
     private_key: [32]u8,
     wallet_address: []const u8,
@@ -404,7 +403,7 @@ pub fn sendDeploy(
 }
 
 pub fn sendMessages(
-    client: *http_client.TonHttpClient,
+    client: anytype,
     version: WalletVersion,
     private_key: [32]u8,
     wallet_address: []const u8,
