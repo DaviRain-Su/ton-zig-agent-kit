@@ -7,6 +7,7 @@ const Cell = ton_zig_agent_kit.core.Cell;
 const Builder = ton_zig_agent_kit.core.Builder;
 const Slice = ton_zig_agent_kit.core.Slice;
 const StackEntry = ton_zig_agent_kit.core.types.StackEntry;
+const contract_mod = ton_zig_agent_kit.contract;
 const boc = ton_zig_agent_kit.core.boc;
 const signing = ton_zig_agent_kit.wallet.signing;
 const default_rpc_url = "https://toncenter.com/api/v2/jsonRPC";
@@ -72,6 +73,31 @@ pub fn main() !void {
         std.debug.print("Address: {s}\n", .{addr});
         std.debug.print("Method: {s}\n", .{method});
         std.debug.print("Stack JSON: {s}\n", .{stack_json});
+        printRunGetMethodResult(result);
+        return;
+    }
+
+    if (std.mem.eql(u8, command, "runGetMethodTyped") or std.mem.eql(u8, command, "get-method-typed")) {
+        if (args.len < 4) {
+            std.debug.print("Usage: ton-zig-agent-kit runGetMethodTyped <address> <method> [int:<n>|addr:<addr>|cell:<b64>|slice:<b64>|cellhex:<hex>|slicehex:<hex> ...]\n", .{});
+            return;
+        }
+
+        const addr = args[2];
+        const method = args[3];
+        var parsed_args = try parseCliStackArgs(allocator, args[4..]);
+        defer parsed_args.deinit(allocator);
+
+        var client = try TonHttpClient.init(allocator, default_rpc_url, null);
+        defer client.deinit();
+
+        var contract = contract_mod.GenericContract.init(&client, addr);
+        var result = try contract.callGetMethodArgs(method, parsed_args.args);
+        defer client.freeRunGetMethodResponse(&result);
+
+        std.debug.print("Address: {s}\n", .{addr});
+        std.debug.print("Method: {s}\n", .{method});
+        std.debug.print("Typed args: {d}\n", .{parsed_args.args.len});
         printRunGetMethodResult(result);
         return;
     }
@@ -478,6 +504,107 @@ fn hexCharValue(c: u8) !u8 {
     };
 }
 
+const ParsedCliStackArgs = struct {
+    args: []contract_mod.StackArg,
+    owned_buffers: []?[]u8,
+
+    fn deinit(self: *ParsedCliStackArgs, allocator: std.mem.Allocator) void {
+        for (self.owned_buffers) |buffer| {
+            if (buffer) |value| allocator.free(value);
+        }
+        allocator.free(self.owned_buffers);
+        allocator.free(self.args);
+        self.args = &.{};
+        self.owned_buffers = &.{};
+    }
+};
+
+fn parseCliStackArgs(allocator: std.mem.Allocator, specs: []const []const u8) !ParsedCliStackArgs {
+    const parsed_args = try allocator.alloc(contract_mod.StackArg, specs.len);
+    errdefer allocator.free(parsed_args);
+
+    const owned_buffers = try allocator.alloc(?[]u8, specs.len);
+    for (owned_buffers) |*buffer| buffer.* = null;
+    errdefer {
+        for (owned_buffers) |buffer| {
+            if (buffer) |value| allocator.free(value);
+        }
+        allocator.free(owned_buffers);
+    }
+
+    for (specs, 0..) |spec, i| {
+        if (std.mem.startsWith(u8, spec, "int:")) {
+            parsed_args[i] = .{ .int = try parseStackInt(spec["int:".len..]) };
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, spec, "addr:")) {
+            parsed_args[i] = .{ .address = spec["addr:".len..] };
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, spec, "cell:")) {
+            const decoded = try decodeBase64FlexibleAlloc(allocator, spec["cell:".len..]);
+            owned_buffers[i] = decoded;
+            parsed_args[i] = .{ .cell = decoded };
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, spec, "slice:")) {
+            const decoded = try decodeBase64FlexibleAlloc(allocator, spec["slice:".len..]);
+            owned_buffers[i] = decoded;
+            parsed_args[i] = .{ .slice = decoded };
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, spec, "cellhex:")) {
+            const decoded = try hexToBytes(allocator, spec["cellhex:".len..]);
+            owned_buffers[i] = decoded;
+            parsed_args[i] = .{ .cell = decoded };
+            continue;
+        }
+
+        if (std.mem.startsWith(u8, spec, "slicehex:")) {
+            const decoded = try hexToBytes(allocator, spec["slicehex:".len..]);
+            owned_buffers[i] = decoded;
+            parsed_args[i] = .{ .slice = decoded };
+            continue;
+        }
+
+        return error.InvalidStackArgSpec;
+    }
+
+    return .{
+        .args = parsed_args,
+        .owned_buffers = owned_buffers,
+    };
+}
+
+fn parseStackInt(text: []const u8) !i64 {
+    if (std.mem.startsWith(u8, text, "-0x")) {
+        const magnitude = try std.fmt.parseInt(u64, text[3..], 16);
+        if (magnitude > @as(u64, @intCast(std.math.maxInt(i64))) + 1) return error.Overflow;
+        return -@as(i64, @intCast(magnitude));
+    }
+    if (std.mem.startsWith(u8, text, "0x")) {
+        return @intCast(try std.fmt.parseInt(u64, text[2..], 16));
+    }
+    return std.fmt.parseInt(i64, text, 10);
+}
+
+fn decodeBase64FlexibleAlloc(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    return decodeBase64WithDecoder(allocator, input, std.base64.standard.Decoder) catch
+        decodeBase64WithDecoder(allocator, input, std.base64.url_safe.Decoder);
+}
+
+fn decodeBase64WithDecoder(allocator: std.mem.Allocator, input: []const u8, comptime decoder: anytype) ![]u8 {
+    const decoded_len = try decoder.calcSizeForSlice(input);
+    const output = try allocator.alloc(u8, decoded_len);
+    errdefer allocator.free(output);
+    try decoder.decode(output, input);
+    return output;
+}
+
 fn printRunGetMethodResult(result: ton_zig_agent_kit.core.types.RunGetMethodResponse) void {
     std.debug.print("Exit code: {d}\n", .{result.exit_code});
 
@@ -530,6 +657,7 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit version                       Show version\n", .{});
     std.debug.print("  ton-zig-agent-kit getBalance <address>          Get TON balance\n", .{});
     std.debug.print("  ton-zig-agent-kit runGetMethod <addr> <method> [stack_json]  Call any get method\n", .{});
+    std.debug.print("  ton-zig-agent-kit runGetMethodTyped <addr> <method> [typed_args...]  Call get method with typed args\n", .{});
     std.debug.print("  ton-zig-agent-kit sendBoc <boc_base64>          Submit raw BoC to the network\n", .{});
     std.debug.print("  ton-zig-agent-kit sendBocHex <boc_hex>          Submit raw BoC hex to the network\n", .{});
     std.debug.print("  ton-zig-agent-kit parseAddress <address>        Parse TON address\n", .{});
@@ -638,4 +766,19 @@ test "hexToBytes parses mixed case input" {
     defer allocator.free(bytes);
 
     try std.testing.expectEqualSlices(u8, &.{ 0x00, 0xA1, 0xff }, bytes);
+}
+
+test "parse cli stack args" {
+    const allocator = std.testing.allocator;
+    var parsed = try parseCliStackArgs(allocator, &.{
+        "int:-1",
+        "addr:0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+        "cellhex:b5ee9c72410101010005000002cafe6c44e11d",
+    });
+    defer parsed.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 3), parsed.args.len);
+    try std.testing.expectEqual(@as(i64, -1), parsed.args[0].int);
+    try std.testing.expectEqualStrings("0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8", parsed.args[1].address);
+    try std.testing.expectEqualSlices(u8, &.{ 0xB5, 0xEE, 0x9C, 0x72 }, parsed.args[2].cell[0..4]);
 }

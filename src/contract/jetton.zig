@@ -33,7 +33,9 @@ pub const JettonMaster = struct {
 
     /// Get wallet address for owner
     pub fn getWalletAddress(self: *JettonMaster, owner_address: []const u8) ![]const u8 {
-        const stack_json = try generic_contract.buildAddressSliceStackArgJson(self.client.allocator, owner_address);
+        const stack_json = try generic_contract.buildStackArgsJsonAlloc(self.client.allocator, &.{
+            .{ .address = owner_address },
+        });
         defer self.client.allocator.free(stack_json);
 
         var result = try self.client.runGetMethodJson(self.address, "get_wallet_address", stack_json);

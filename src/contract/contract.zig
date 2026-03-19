@@ -25,6 +25,13 @@ pub const GenericContract = struct {
         return self.client.runGetMethodJson(self.address, method, stack_json);
     }
 
+    pub fn callGetMethodArgs(self: *GenericContract, method: []const u8, args: []const StackArg) !types.RunGetMethodResponse {
+        const stack_json = try buildStackArgsJsonAlloc(self.client.allocator, args);
+        defer self.client.allocator.free(stack_json);
+
+        return self.callGetMethodJson(method, stack_json);
+    }
+
     pub fn sendMessage(self: *GenericContract, body: []const u8) !types.SendBocResponse {
         return self.client.sendBoc(body);
     }
@@ -36,6 +43,13 @@ pub const GenericContract = struct {
     pub fn sendMessageHex(self: *GenericContract, body_hex: []const u8) !types.SendBocResponse {
         return self.client.sendBocHex(body_hex);
     }
+};
+
+pub const StackArg = union(enum) {
+    int: i64,
+    cell: []const u8,
+    slice: []const u8,
+    address: []const u8,
 };
 
 pub fn stackEntryAsInt(entry: *const types.StackEntry) !i64 {
@@ -85,26 +99,59 @@ pub fn stackEntryToBocAlloc(allocator: std.mem.Allocator, entry: *const types.St
     };
 }
 
-pub fn buildSliceStackArgJson(allocator: std.mem.Allocator, body_boc: []const u8) ![]u8 {
-    const encoded_len = std.base64.standard.Encoder.calcSize(body_boc.len);
-    const encoded = try allocator.alloc(u8, encoded_len);
-    defer allocator.free(encoded);
-    _ = std.base64.standard.Encoder.encode(encoded, body_boc);
+pub fn buildStackArgsJsonAlloc(allocator: std.mem.Allocator, args: []const StackArg) ![]u8 {
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
 
-    return std.fmt.allocPrint(allocator, "[[\"slice\",\"{s}\"]]", .{encoded});
+    try writer.writer.writeByte('[');
+    for (args, 0..) |arg, i| {
+        if (i != 0) try writer.writer.writeByte(',');
+        try writeStackArgJson(&writer.writer, allocator, arg);
+    }
+    try writer.writer.writeByte(']');
+
+    return try writer.toOwnedSlice();
 }
 
-pub fn buildAddressSliceStackArgJson(allocator: std.mem.Allocator, address_text: []const u8) ![]u8 {
+fn writeStackArgJson(writer: anytype, allocator: std.mem.Allocator, arg: StackArg) !void {
+    switch (arg) {
+        .int => |value| try writer.print("[\"num\",{d}]", .{value}),
+        .cell => |boc_bytes| try writeBocStackArgJson(writer, allocator, "cell", boc_bytes),
+        .slice => |boc_bytes| try writeBocStackArgJson(writer, allocator, "slice", boc_bytes),
+        .address => |address_text| {
+            const address_boc = try buildAddressSliceBocAlloc(allocator, address_text);
+            defer allocator.free(address_boc);
+
+            try writeBocStackArgJson(writer, allocator, "slice", address_boc);
+        },
+    }
+}
+
+fn writeBocStackArgJson(writer: anytype, allocator: std.mem.Allocator, tag: []const u8, boc_bytes: []const u8) !void {
+    const encoded_len = std.base64.standard.Encoder.calcSize(boc_bytes.len);
+    const encoded = try allocator.alloc(u8, encoded_len);
+    defer allocator.free(encoded);
+    _ = std.base64.standard.Encoder.encode(encoded, boc_bytes);
+
+    try writer.print("[\"{s}\",\"{s}\"]", .{ tag, encoded });
+}
+
+fn buildAddressSliceBocAlloc(allocator: std.mem.Allocator, address_text: []const u8) ![]u8 {
     var builder = cell.Builder.init();
     try builder.storeAddress(address_text);
 
     const address_cell = try builder.toCell(allocator);
     defer address_cell.deinit(allocator);
 
-    const body_boc = try boc.serializeBoc(allocator, address_cell);
-    defer allocator.free(body_boc);
+    return boc.serializeBoc(allocator, address_cell);
+}
 
-    return buildSliceStackArgJson(allocator, body_boc);
+pub fn buildSliceStackArgJson(allocator: std.mem.Allocator, body_boc: []const u8) ![]u8 {
+    return buildStackArgsJsonAlloc(allocator, &.{.{ .slice = body_boc }});
+}
+
+pub fn buildAddressSliceStackArgJson(allocator: std.mem.Allocator, address_text: []const u8) ![]u8 {
+    return buildStackArgsJsonAlloc(allocator, &.{.{ .address = address_text }});
 }
 
 pub const jetton = @import("jetton.zig");
@@ -133,6 +180,30 @@ test "stack entry address helper" {
 
     try std.testing.expectEqual(@as(i8, 0), parsed.workchain);
     try std.testing.expectEqual(@as(u8, 0x83), parsed.raw[0]);
+}
+
+test "build stack args json" {
+    const allocator = std.testing.allocator;
+
+    var builder = cell.Builder.init();
+    try builder.storeUint(0xCAFE, 16);
+    const content_cell = try builder.toCell(allocator);
+    defer content_cell.deinit(allocator);
+
+    const content_boc = try boc.serializeBoc(allocator, content_cell);
+    defer allocator.free(content_boc);
+
+    const stack_json = try buildStackArgsJsonAlloc(allocator, &.{
+        .{ .int = 42 },
+        .{ .address = "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8" },
+        .{ .cell = content_boc },
+    });
+    defer allocator.free(stack_json);
+
+    try std.testing.expect(std.mem.indexOf(u8, stack_json, "[\"num\",42]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stack_json, "[\"slice\",\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, stack_json, "[\"cell\",\"") != null);
+    try std.testing.expect(std.mem.endsWith(u8, stack_json, "\"]]"));
 }
 
 test {
