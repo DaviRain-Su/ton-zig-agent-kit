@@ -742,6 +742,19 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             analysis.* = undefined;
         }
 
+        fn dupOptionalStringAlloc(self: *@This(), value: ?[]const u8) !?[]const u8 {
+            if (value) |text| {
+                return try self.allocator.dupe(u8, text);
+            }
+            return null;
+        }
+
+        fn optionalStringsEqual(lhs: ?[]const u8, rhs: ?[]const u8) bool {
+            if (lhs == null and rhs == null) return true;
+            if (lhs == null or rhs == null) return false;
+            return std.mem.eql(u8, lhs.?, rhs.?);
+        }
+
         fn buildBodyAnalysisResultAlloc(
             self: *@This(),
             body: *const cell.Cell,
@@ -802,6 +815,60 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             try writeJsonFieldPrefix(writer, &wrote_any, "error");
             try writeJsonString(writer, error_message);
             try writer.writeByte('}');
+        }
+
+        fn writeObservedMessagesJson(
+            writer: anytype,
+            items: []const tools_types.ObservedMessageSummaryResult,
+        ) !void {
+            try writer.writeByte('[');
+            for (items, 0..) |item, idx| {
+                if (idx != 0) try writer.writeByte(',');
+                try writer.writeByte('{');
+                var wrote_any = false;
+                try writeJsonFieldPrefix(writer, &wrote_any, "direction");
+                try writeJsonString(writer, switch (item.direction) {
+                    .incoming => "incoming",
+                    .outgoing => "outgoing",
+                });
+                try writeJsonFieldPrefix(writer, &wrote_any, "count");
+                try writer.print("{d}", .{item.count});
+                try writeJsonFieldPrefix(writer, &wrote_any, "opcode");
+                if (item.opcode) |opcode| {
+                    try writer.print("\"0x{X}\"", .{opcode});
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writeJsonFieldPrefix(writer, &wrote_any, "comment");
+                if (item.comment) |value| {
+                    try writeJsonString(writer, value);
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writeJsonFieldPrefix(writer, &wrote_any, "utf8_tail");
+                if (item.utf8_tail) |value| {
+                    try writeJsonString(writer, value);
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writeJsonFieldPrefix(writer, &wrote_any, "abi_kind");
+                if (item.abi_kind) |kind| {
+                    try writeJsonString(writer, switch (kind) {
+                        .function => "function",
+                        .event => "event",
+                    });
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writeJsonFieldPrefix(writer, &wrote_any, "abi_selector");
+                if (item.abi_selector) |value| {
+                    try writeJsonString(writer, value);
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writer.writeByte('}');
+            }
+            try writer.writeByte(']');
         }
 
         fn formatU256Alloc(self: *@This(), value: anytype) ![]u8 {
@@ -1250,6 +1317,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             self: *@This(),
             contract_address: []const u8,
             supported: abi_adapter.SupportedInterfaces,
+            observed_messages: []const tools_types.ObservedMessageSummaryResult,
         ) !?[]u8 {
             var writer = std.io.Writer.Allocating.init(self.allocator);
             errdefer writer.deinit();
@@ -1280,6 +1348,11 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             if (supported.has_nft_collection) {
                 try writeJsonFieldPrefix(&writer.writer, &wrote_any, "nft_collection");
                 try self.writeNFTCollectionInspectJson(&writer.writer, contract_address);
+            }
+
+            if (observed_messages.len > 0) {
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "observed_messages");
+                try writeObservedMessagesJson(&writer.writer, observed_messages);
             }
 
             try writer.writer.writeByte('}');
@@ -1533,6 +1606,88 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             };
         }
 
+        fn appendObservedMessageSummaryAlloc(
+            self: *@This(),
+            items: *std.array_list.Managed(tools_types.ObservedMessageSummaryResult),
+            direction: tools_types.ObservedMessageDirection,
+            analysis: ?tools_types.BodyAnalysisResult,
+            decoded_body: ?tools_types.DecodedBodyResult,
+        ) !void {
+            const opcode = if (analysis) |value| value.opcode else null;
+            const comment = if (analysis) |value| value.comment else null;
+            const utf8_tail = if (analysis) |value| value.tail_utf8 else null;
+            const abi_kind = if (decoded_body) |value| value.kind else null;
+            const abi_selector = if (decoded_body) |value| value.selector else null;
+
+            for (items.items) |*item| {
+                if (item.direction != direction) continue;
+                if (item.opcode != opcode) continue;
+                if (!optionalStringsEqual(item.comment, comment)) continue;
+                if (!optionalStringsEqual(item.utf8_tail, utf8_tail)) continue;
+                if (item.abi_kind != abi_kind) continue;
+                if (!optionalStringsEqual(item.abi_selector, abi_selector)) continue;
+                item.count += 1;
+                return;
+            }
+
+            try items.append(.{
+                .direction = direction,
+                .count = 1,
+                .opcode = opcode,
+                .comment = try self.dupOptionalStringAlloc(comment),
+                .utf8_tail = try self.dupOptionalStringAlloc(utf8_tail),
+                .abi_kind = abi_kind,
+                .abi_selector = try self.dupOptionalStringAlloc(abi_selector),
+            });
+        }
+
+        fn observeMessageAlloc(
+            self: *@This(),
+            msg: *const core_types.Message,
+            direction: tools_types.ObservedMessageDirection,
+            items: *std.array_list.Managed(tools_types.ObservedMessageSummaryResult),
+        ) !void {
+            var body_analysis = if (msg.body) |body|
+                try self.buildBodyAnalysisResultAlloc(body)
+            else
+                null;
+            defer if (body_analysis) |*value| freeBodyAnalysisAlloc(self.allocator, value);
+
+            var decoded_body = self.tryDecodeMessageBodyAutoAlloc(msg);
+            defer if (decoded_body) |*value| freeDecodedBodyAlloc(self.allocator, value);
+
+            if (body_analysis == null and decoded_body == null) return;
+            try self.appendObservedMessageSummaryAlloc(items, direction, body_analysis, decoded_body);
+        }
+
+        fn buildObservedMessagesAlloc(
+            self: *@This(),
+            contract_address: []const u8,
+            limit: u32,
+        ) ![]tools_types.ObservedMessageSummaryResult {
+            const txs = self.client.getTransactions(contract_address, limit) catch {
+                return &.{};
+            };
+            defer self.client.freeTransactions(txs);
+
+            var items = std.array_list.Managed(tools_types.ObservedMessageSummaryResult).init(self.allocator);
+            errdefer {
+                for (items.items) |*item| item.deinit(self.allocator);
+                items.deinit();
+            }
+
+            for (txs) |*tx| {
+                if (tx.in_msg) |msg| {
+                    try self.observeMessageAlloc(msg, .incoming, &items);
+                }
+                for (tx.out_msgs) |msg| {
+                    try self.observeMessageAlloc(msg, .outgoing, &items);
+                }
+            }
+
+            return try items.toOwnedSlice();
+        }
+
         fn transactionListError(address: []const u8, error_message: []const u8) tools_types.TransactionListResult {
             return .{
                 .address = address,
@@ -1573,6 +1728,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 .abi_json = null,
                 .functions = &.{},
                 .events = &.{},
+                .observed_messages = &.{},
                 .details_json = null,
                 .success = false,
                 .error_message = error_message,
@@ -1828,8 +1984,15 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             };
             errdefer abi_summary.deinit(self.allocator);
 
-            const details_json = self.buildContractDetailsJsonAlloc(contract_address, supported) catch |err| {
-                abi_summary.deinit(self.allocator);
+            const observed_messages = self.buildObservedMessagesAlloc(contract_address, 10) catch |err| {
+                return contractInspectError(contract_address, @errorName(err));
+            };
+            errdefer {
+                for (observed_messages) |*item| item.deinit(self.allocator);
+                if (observed_messages.len > 0) self.allocator.free(observed_messages);
+            }
+
+            const details_json = self.buildContractDetailsJsonAlloc(contract_address, supported, observed_messages) catch |err| {
                 return contractInspectError(contract_address, @errorName(err));
             };
             errdefer if (details_json) |value| self.allocator.free(value);
@@ -1849,6 +2012,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 .abi_json = abi_summary.json,
                 .functions = abi_summary.functions,
                 .events = abi_summary.events,
+                .observed_messages = observed_messages,
                 .details_json = details_json,
                 .success = true,
                 .error_message = null,
@@ -3530,6 +3694,8 @@ pub const RunMethodResult = tools_types.RunMethodResult;
 pub const DecodedBodyKind = tools_types.DecodedBodyKind;
 pub const DecodedBodyResult = tools_types.DecodedBodyResult;
 pub const BodyAnalysisResult = tools_types.BodyAnalysisResult;
+pub const ObservedMessageDirection = tools_types.ObservedMessageDirection;
+pub const ObservedMessageSummaryResult = tools_types.ObservedMessageSummaryResult;
 pub const BuiltBodyResult = tools_types.BuiltBodyResult;
 pub const BuiltExternalMessageResult = tools_types.BuiltExternalMessageResult;
 pub const BuiltWalletMessageResult = tools_types.BuiltWalletMessageResult;
@@ -4989,9 +5155,30 @@ test "agent tools inspectContract summarizes wallet and abi metadata" {
     const abi_uri = try std.fmt.allocPrint(allocator, "file://{s}", .{abi_path});
     defer allocator.free(abi_uri);
 
+    var parsed_abi = try abi_adapter.parseAbiInfoJsonAlloc(allocator, abi_json);
+    defer parsed_abi.deinit(allocator);
+    const function_body_boc = try abi_adapter.buildFunctionBodyFromAbiAlloc(
+        allocator,
+        &parsed_abi.abi,
+        "transfer",
+        &.{
+            .{ .text = "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8" },
+            .{ .uint = 55 },
+        },
+    );
+    defer allocator.free(function_body_boc);
+
     const FakeClient = struct {
         allocator: std.mem.Allocator,
         abi_uri: []const u8,
+        function_body_boc: []const u8,
+
+        fn freeMessage(self: *@This(), msg: *core_types.Message) void {
+            if (msg.hash.len > 0) self.allocator.free(msg.hash);
+            if (msg.raw_body.len > 0) self.allocator.free(msg.raw_body);
+            if (msg.body) |body| body.deinit(self.allocator);
+            self.allocator.destroy(msg);
+        }
 
         pub fn runGetMethod(self: *@This(), addr: []const u8, method: []const u8, stack: []const []const u8) anyerror!core_types.RunGetMethodResponse {
             _ = addr;
@@ -5033,10 +5220,76 @@ test "agent tools inspectContract summarizes wallet and abi metadata" {
             }
             if (response.stack.len > 0) self.allocator.free(response.stack);
         }
+
+        pub fn getTransactions(self: *@This(), addr: []const u8, limit: u32) ![]core_types.Transaction {
+            _ = limit;
+
+            const txs = try self.allocator.alloc(core_types.Transaction, 1);
+            errdefer self.allocator.free(txs);
+
+            const in_msg = try self.allocator.create(core_types.Message);
+            errdefer self.allocator.destroy(in_msg);
+            const in_body = try boc.deserializeBoc(self.allocator, self.function_body_boc);
+            errdefer in_body.deinit(self.allocator);
+            in_msg.* = .{
+                .hash = try self.allocator.dupe(u8, "inspect-in"),
+                .source = try address_mod.parseAddress("0:9999999999999999999999999999999999999999999999999999999999999999"),
+                .destination = try address_mod.parseAddress(addr),
+                .value = 111,
+                .body = in_body,
+                .raw_body = &.{},
+            };
+
+            const out_msg = try self.allocator.create(core_types.Message);
+            errdefer self.allocator.destroy(out_msg);
+            var out_builder = core_types.Builder.init();
+            try out_builder.storeUint(0, 32);
+            try out_builder.storeBits("refund", 48);
+            const out_body = try out_builder.toCell(self.allocator);
+            errdefer out_body.deinit(self.allocator);
+            out_msg.* = .{
+                .hash = try self.allocator.dupe(u8, "inspect-out"),
+                .source = try address_mod.parseAddress(addr),
+                .destination = try address_mod.parseAddress("0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+                .value = 22,
+                .body = out_body,
+                .raw_body = &.{},
+            };
+
+            const out_msgs = try self.allocator.alloc(*core_types.Message, 1);
+            errdefer self.allocator.free(out_msgs);
+            out_msgs[0] = out_msg;
+
+            txs[0] = .{
+                .hash = try self.allocator.dupe(u8, "inspect-tx"),
+                .lt = 88,
+                .timestamp = 99,
+                .in_msg = in_msg,
+                .out_msgs = out_msgs,
+            };
+            return txs;
+        }
+
+        pub fn freeTransactions(self: *@This(), txs: []core_types.Transaction) void {
+            for (txs) |*tx| self.freeTransaction(tx);
+            if (txs.len > 0) self.allocator.free(txs);
+        }
+
+        pub fn freeTransaction(self: *@This(), tx: *core_types.Transaction) void {
+            if (tx.hash.len > 0) self.allocator.free(tx.hash);
+            if (tx.in_msg) |msg| self.freeMessage(msg);
+            for (tx.out_msgs) |msg| self.freeMessage(msg);
+            if (tx.out_msgs.len > 0) self.allocator.free(tx.out_msgs);
+            tx.* = undefined;
+        }
     };
     const FakeTools = AgentToolsImpl(*FakeClient);
 
-    var client = FakeClient{ .allocator = allocator, .abi_uri = abi_uri };
+    var client = FakeClient{
+        .allocator = allocator,
+        .abi_uri = abi_uri,
+        .function_body_boc = function_body_boc,
+    };
     var tools = FakeTools.init(allocator, &client, .{ .rpc_url = "https://example.invalid" });
 
     var result = try tools.inspectContract("0:2222222222222222222222222222222222222222222222222222222222222222");
@@ -5063,10 +5316,21 @@ test "agent tools inspectContract summarizes wallet and abi metadata" {
     try std.testing.expectEqualStrings("address", result.functions[0].inputs[0].type_name);
     try std.testing.expectEqualStrings("addr:EQ...", result.functions[0].inputs[0].cli_template);
     try std.testing.expectEqual(@as(usize, 0), result.events.len);
+    try std.testing.expectEqual(@as(usize, 2), result.observed_messages.len);
+    try std.testing.expectEqual(tools_types.ObservedMessageDirection.incoming, result.observed_messages[0].direction);
+    try std.testing.expectEqual(@as(?u32, 0x11223344), result.observed_messages[0].opcode);
+    try std.testing.expectEqual(tools_types.DecodedBodyKind.function, result.observed_messages[0].abi_kind.?);
+    try std.testing.expectEqualStrings("transfer(address,coins)", result.observed_messages[0].abi_selector.?);
+    try std.testing.expectEqual(tools_types.ObservedMessageDirection.outgoing, result.observed_messages[1].direction);
+    try std.testing.expectEqual(@as(?u32, 0), result.observed_messages[1].opcode);
+    try std.testing.expectEqualStrings("refund", result.observed_messages[1].comment.?);
     try std.testing.expect(result.details_json != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"seqno\":7") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"wallet_id\":2864434397") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"public_key\":\"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"observed_messages\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"abi_selector\":\"transfer(address,coins)\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"comment\":\"refund\"") != null);
 }
 
 test "agent tools describeAbi returns structured templates for direct source" {
@@ -5346,6 +5610,8 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = ProviderAgentTools.sendInitialTransfer;
     _ = AddressResult;
     _ = BodyAnalysisResult;
+    _ = ObservedMessageDirection;
+    _ = ObservedMessageSummaryResult;
     _ = DecodedBodyResult;
     _ = BuiltBodyResult;
     _ = BuiltExternalMessageResult;

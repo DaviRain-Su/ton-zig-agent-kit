@@ -89,6 +89,28 @@ pub const MessageResult = struct {
     }
 };
 
+pub const ObservedMessageDirection = enum {
+    incoming,
+    outgoing,
+};
+
+pub const ObservedMessageSummaryResult = struct {
+    direction: ObservedMessageDirection,
+    count: u32,
+    opcode: ?u32,
+    comment: ?[]const u8,
+    utf8_tail: ?[]const u8,
+    abi_kind: ?DecodedBodyKind,
+    abi_selector: ?[]const u8,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.comment) |value| allocator.free(value);
+        if (self.utf8_tail) |value| allocator.free(value);
+        if (self.abi_selector) |value| allocator.free(value);
+        self.* = undefined;
+    }
+};
+
 pub const AddressResult = struct {
     raw_address: []const u8,
     user_friendly_address: []const u8,
@@ -184,6 +206,7 @@ pub const ContractInspectResult = struct {
     abi_json: ?[]const u8,
     functions: []AbiFunctionTemplateResult,
     events: []AbiEventTemplateResult,
+    observed_messages: []ObservedMessageSummaryResult,
     details_json: ?[]const u8,
     success: bool,
     error_message: ?[]const u8 = null,
@@ -196,6 +219,8 @@ pub const ContractInspectResult = struct {
         if (self.functions.len > 0) allocator.free(self.functions);
         for (self.events) |*item| item.deinit(allocator);
         if (self.events.len > 0) allocator.free(self.events);
+        for (self.observed_messages) |*item| item.deinit(allocator);
+        if (self.observed_messages.len > 0) allocator.free(self.observed_messages);
         if (self.details_json) |value| allocator.free(value);
         self.* = undefined;
     }

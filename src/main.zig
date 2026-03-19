@@ -242,6 +242,17 @@ pub fn main() !void {
             }
         }
 
+        var inspect_tools = ton_zig_agent_kit.tools.tools_mod.ProviderAgentTools.init(
+            allocator,
+            &provider,
+            .{ .rpc_url = "" },
+        );
+        var inspect_summary = inspect_tools.inspectContract(addr) catch null;
+        defer if (inspect_summary) |*value| value.deinit(allocator);
+        if (inspect_summary) |*value| {
+            printInspectObservedMessages(value.observed_messages);
+        }
+
         printInspectCommandHints(allocator, addr, if (abi_doc) |*loaded| &loaded.abi else null);
         return;
     }
@@ -3520,6 +3531,39 @@ fn printInspectNFTCollectionDetails(allocator: std.mem.Allocator, provider: *ton
     std.debug.print("  Owner: {s}\n", .{owner orelse "(none)"});
     std.debug.print("  Next item index: {d}\n", .{data.next_item_index});
     std.debug.print("  Content URI: {s}\n", .{data.content_uri orelse "(none)"});
+}
+
+fn printInspectObservedMessages(items: []const ton_zig_agent_kit.tools.tools_mod.ObservedMessageSummaryResult) void {
+    if (items.len == 0) return;
+
+    std.debug.print("Observed messages:\n", .{});
+    for (items) |item| {
+        std.debug.print("  - {s}", .{switch (item.direction) {
+            .incoming => "incoming",
+            .outgoing => "outgoing",
+        }});
+        if (item.count > 1) {
+            std.debug.print(" x{d}", .{item.count});
+        }
+        if (item.opcode) |opcode| {
+            std.debug.print(" op=0x{X}", .{opcode});
+        }
+        if (item.abi_kind) |kind| {
+            std.debug.print(" {s}", .{switch (kind) {
+                .function => "function",
+                .event => "event",
+            }});
+        }
+        if (item.abi_selector) |value| {
+            std.debug.print(" {s}", .{value});
+        }
+        if (item.comment) |value| {
+            std.debug.print(" comment={s}", .{value});
+        } else if (item.utf8_tail) |value| {
+            std.debug.print(" text={s}", .{value});
+        }
+        std.debug.print("\n", .{});
+    }
 }
 
 fn printInspectAbiDocument(abi: *const contract_mod.abi_adapter.AbiInfo) void {
