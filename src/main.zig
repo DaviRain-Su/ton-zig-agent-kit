@@ -320,7 +320,7 @@ pub fn main() !void {
 
     if (std.mem.eql(u8, command, "cell")) {
         if (args.len < 3) {
-            std.debug.print("Usage: ton-zig-agent-kit cell <create|encode|decode|hash|build-typed|build-function>\n", .{});
+            std.debug.print("Usage: ton-zig-agent-kit cell <create|encode|decode|hash|build-typed|build-function|build-abi|build-state-init|state-init-address>\n", .{});
             return;
         }
         const cell_cmd = args[2];
@@ -537,13 +537,36 @@ pub fn main() !void {
             return;
         }
 
+        if (std.mem.eql(u8, cell_cmd, "state-init-address")) {
+            if (args.len < 5) {
+                std.debug.print("Usage: ton-zig-agent-kit cell state-init-address <workchain> <state_init_b64>\n", .{});
+                return;
+            }
+
+            const workchain = try std.fmt.parseInt(i8, args[3], 10);
+            const state_init_boc = try decodeBase64FlexibleAlloc(allocator, args[4]);
+            defer allocator.free(state_init_boc);
+
+            const addr = try ton_zig_agent_kit.core.state_init.computeStateInitAddressFromBoc(allocator, workchain, state_init_boc);
+            const raw = try ton_zig_agent_kit.core.address.formatRaw(allocator, &addr);
+            defer allocator.free(raw);
+            const user_friendly = try ton_zig_agent_kit.core.address.addressToUserFriendlyAlloc(allocator, &addr, true, false);
+            defer allocator.free(user_friendly);
+
+            std.debug.print("Computed StateInit address:\n", .{});
+            std.debug.print("  Workchain: {d}\n", .{workchain});
+            std.debug.print("  Raw: {s}\n", .{raw});
+            std.debug.print("  User-friendly: {s}\n", .{user_friendly});
+            return;
+        }
+
         std.debug.print("Unknown cell command: {s}\n", .{cell_cmd});
         return;
     }
 
     if (std.mem.eql(u8, command, "wallet")) {
         if (args.len < 3) {
-            std.debug.print("Usage: ton-zig-agent-kit wallet <genkey|seqno|info|send|send-body|send-body-hex|send-ops|send-function|send-abi|send-auto-abi|send-deploy>\n", .{});
+            std.debug.print("Usage: ton-zig-agent-kit wallet <genkey|seqno|info|send|send-body|send-body-hex|send-ops|send-function|send-abi|send-auto-abi|send-deploy|send-deploy-auto>\n", .{});
             return;
         }
         const wallet_cmd = args[2];
@@ -860,6 +883,45 @@ pub fn main() !void {
             defer client.freeSendBocResponse(&result);
 
             std.debug.print("Deploy message submitted:\n", .{});
+            std.debug.print("  Hash: {s}\n", .{result.hash});
+            std.debug.print("  LT: {d}\n", .{result.lt});
+            return;
+        }
+
+        if (std.mem.eql(u8, wallet_cmd, "send-deploy-auto")) {
+            if (args.len < 7) {
+                std.debug.print("Usage: ton-zig-agent-kit wallet send-deploy-auto <wallet_addr> <workchain> <amount_nanoton> <state_init_b64> [body_b64]\n", .{});
+                return;
+            }
+            const wallet_addr = args[3];
+            const workchain = try std.fmt.parseInt(i8, args[4], 10);
+            const amount = try std.fmt.parseInt(u64, args[5], 10);
+            const state_init_boc = try decodeBase64FlexibleAlloc(allocator, args[6]);
+            defer allocator.free(state_init_boc);
+            const body_boc = if (args.len >= 8)
+                try decodeBase64FlexibleAlloc(allocator, args[7])
+            else
+                null;
+            defer if (body_boc) |value| allocator.free(value);
+
+            const dest_addr = try ton_zig_agent_kit.core.state_init.computeStateInitAddressFromBoc(allocator, workchain, state_init_boc);
+            const dest_raw = try ton_zig_agent_kit.core.address.formatRaw(allocator, &dest_addr);
+            defer allocator.free(dest_raw);
+            const dest_user_friendly = try ton_zig_agent_kit.core.address.addressToUserFriendlyAlloc(allocator, &dest_addr, true, false);
+            defer allocator.free(dest_user_friendly);
+
+            var client = try TonHttpClient.init(allocator, default_rpc_url, null);
+            defer client.deinit();
+
+            const keypair = try signing.generateKeypair("my_seed_phrase");
+            const private_key = keypair[0];
+
+            var result = try signing.sendDeploy(&client, .v4, private_key, wallet_addr, dest_raw, amount, state_init_boc, body_boc);
+            defer client.freeSendBocResponse(&result);
+
+            std.debug.print("Deploy message submitted:\n", .{});
+            std.debug.print("  Destination: {s}\n", .{dest_raw});
+            std.debug.print("  User-friendly: {s}\n", .{dest_user_friendly});
             std.debug.print("  Hash: {s}\n", .{result.hash});
             std.debug.print("  LT: {d}\n", .{result.lt});
             return;
@@ -1467,6 +1529,7 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit cell build-function <function_json> <values...>  Build body from function schema\n", .{});
     std.debug.print("  ton-zig-agent-kit cell build-abi <abi_json|@file|file://|http(s)://|ipfs://> <function> <values...>  Build body from ABI doc\n", .{});
     std.debug.print("  ton-zig-agent-kit cell build-state-init <code_b64|none> [data_b64|none]  Build StateInit BoC\n", .{});
+    std.debug.print("  ton-zig-agent-kit cell state-init-address <workchain> <state_init_b64>  Compute contract address from StateInit\n", .{});
     std.debug.print("    body ops: u<bits>:<v>, i<bits>:<v>, coins:<v>, addr:<addr>, bytes:<utf8>, hex:<hex>, ref:<b64 boc>, refhex:<hex boc>\n", .{});
     std.debug.print("    function values: null, u:<v>, i:<v>, num:<dec|0xhex>, str:<utf8>, addr:<addr>, json:<json|@file>, hex:<hex>, boc:<b64 boc>, bochex:<hex boc>\n", .{});
     std.debug.print("\nWallet operations:\n", .{});
@@ -1481,6 +1544,7 @@ fn printUsage() !void {
     std.debug.print("  ton-zig-agent-kit wallet send-abi <src> <dst> <amount> <abi_json|@file|file://|http(s)://|ipfs://> <function> <values...>  Build and send ABI function body\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-auto-abi <src> <dst> <amount> <function> <values...>  Discover ABI and send function body\n", .{});
     std.debug.print("  ton-zig-agent-kit wallet send-deploy <src> <dst> <amount> <state_init_b64> [body_b64]  Deploy contract with StateInit\n", .{});
+    std.debug.print("  ton-zig-agent-kit wallet send-deploy-auto <src> <workchain> <amount> <state_init_b64> [body_b64]  Derive destination from StateInit and deploy\n", .{});
     std.debug.print("\nPayment watch operations:\n", .{});
     std.debug.print("  ton-zig-agent-kit paywatch invoice <dest> <amount>  Create invoice\n", .{});
     std.debug.print("  ton-zig-agent-kit paywatch verify <addr> <comment>  Verify payment\n", .{});

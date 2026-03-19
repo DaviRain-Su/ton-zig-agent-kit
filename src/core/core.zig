@@ -16,6 +16,8 @@ pub const Builder = cell.Builder;
 pub const Slice = cell.Slice;
 pub const BodyOp = body_builder.BodyOp;
 pub const buildStateInitBocAlloc = state_init.buildStateInitBocAlloc;
+pub const computeStateInitAddress = state_init.computeStateInitAddress;
+pub const computeStateInitAddressFromBoc = state_init.computeStateInitAddressFromBoc;
 pub const Address = types.Address;
 pub const TonError = types.TonError;
 

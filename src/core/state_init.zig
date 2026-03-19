@@ -1,8 +1,10 @@
 //! Generic StateInit builders for contract deployment.
 
 const std = @import("std");
+const address = @import("address.zig");
 const cell = @import("cell.zig");
 const boc = @import("boc.zig");
+const types = @import("types.zig");
 
 pub fn buildStateInitCellAlloc(
     allocator: std.mem.Allocator,
@@ -48,6 +50,23 @@ pub fn buildStateInitBocAlloc(
     defer state_init.deinit(allocator);
 
     return boc.serializeBoc(allocator, state_init);
+}
+
+pub fn computeStateInitAddress(workchain: i8, state_init: *const cell.Cell) types.Address {
+    return .{
+        .raw = state_init.hash(),
+        .workchain = workchain,
+    };
+}
+
+pub fn computeStateInitAddressFromBoc(
+    allocator: std.mem.Allocator,
+    workchain: i8,
+    state_init_boc: []const u8,
+) !types.Address {
+    const state_init = try boc.deserializeBoc(allocator, state_init_boc);
+    defer state_init.deinit(allocator);
+    return computeStateInitAddress(workchain, state_init);
 }
 
 fn deinitBuilderRefs(allocator: std.mem.Allocator, builder: *cell.Builder) void {
@@ -108,4 +127,44 @@ test "state init builder supports empty data and code" {
     try std.testing.expectEqual(@as(u64, 0), try slice.loadUint(1));
     try std.testing.expectEqual(@as(u64, 0), try slice.loadUint(1));
     try std.testing.expect(slice.empty());
+}
+
+test "state init address uses representation hash" {
+    const allocator = std.testing.allocator;
+
+    const built = try buildStateInitBocAlloc(allocator, null, null);
+    defer allocator.free(built);
+
+    const addr = try computeStateInitAddressFromBoc(allocator, 0, built);
+    const raw = try address.formatRaw(allocator, &addr);
+    defer allocator.free(raw);
+
+    try std.testing.expectEqualStrings("0:3f078d3b7e22c8944e5561909a236ae48b48a7ea42f28dd861c22b6f64d7e97b", raw);
+}
+
+test "state init address changes with referenced code" {
+    const allocator = std.testing.allocator;
+
+    var code_a_builder = cell.Builder.init();
+    try code_a_builder.storeUint(0xAA, 8);
+    const code_a_cell = try code_a_builder.toCell(allocator);
+    defer code_a_cell.deinit(allocator);
+    const code_a_boc = try boc.serializeBoc(allocator, code_a_cell);
+    defer allocator.free(code_a_boc);
+
+    var code_b_builder = cell.Builder.init();
+    try code_b_builder.storeUint(0xBB, 8);
+    const code_b_cell = try code_b_builder.toCell(allocator);
+    defer code_b_cell.deinit(allocator);
+    const code_b_boc = try boc.serializeBoc(allocator, code_b_cell);
+    defer allocator.free(code_b_boc);
+
+    const state_init_a = try buildStateInitBocAlloc(allocator, code_a_boc, null);
+    defer allocator.free(state_init_a);
+    const state_init_b = try buildStateInitBocAlloc(allocator, code_b_boc, null);
+    defer allocator.free(state_init_b);
+
+    const addr_a = try computeStateInitAddressFromBoc(allocator, 0, state_init_a);
+    const addr_b = try computeStateInitAddressFromBoc(allocator, 0, state_init_b);
+    try std.testing.expect(!std.mem.eql(u8, &addr_a.raw, &addr_b.raw));
 }

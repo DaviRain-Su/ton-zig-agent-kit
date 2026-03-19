@@ -31,6 +31,14 @@ pub const RunMethodResult = struct {
     error_message: ?[]const u8 = null,
 };
 
+pub const AddressResult = struct {
+    raw_address: []const u8,
+    user_friendly_address: []const u8,
+    workchain: i8,
+    success: bool,
+    error_message: ?[]const u8 = null,
+};
+
 pub const InvoiceResult = struct {
     invoice_id: []const u8,
     address: []const u8,
@@ -102,6 +110,7 @@ pub const NFTInfoResult = struct {
 
 pub const ToolResponse = union(enum) {
     balance: BalanceResult,
+    address: AddressResult,
     send: SendResult,
     run_method: RunMethodResult,
     invoice: InvoiceResult,

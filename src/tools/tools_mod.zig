@@ -5,6 +5,7 @@ const std = @import("std");
 const address_mod = @import("../core/address.zig");
 const body_builder = @import("../core/body_builder.zig");
 const http_client = @import("../core/http_client.zig");
+const state_init = @import("../core/state_init.zig");
 const paywatch = @import("../paywatch/paywatch.zig");
 const wallet = @import("../wallet/wallet.zig");
 const signing = @import("../wallet/signing.zig");
@@ -48,6 +49,53 @@ pub const AgentTools = struct {
             .address = target_address,
             .balance = resp.balance,
             .formatted = formatted,
+            .success = true,
+            .error_message = null,
+        };
+    }
+
+    /// Compute the deployed contract address for a StateInit BoC and workchain.
+    pub fn computeStateInitAddress(
+        self: *AgentTools,
+        workchain: i8,
+        state_init_boc: []const u8,
+    ) !tools_types.AddressResult {
+        const addr = state_init.computeStateInitAddressFromBoc(self.allocator, workchain, state_init_boc) catch |err| {
+            return tools_types.AddressResult{
+                .raw_address = "",
+                .user_friendly_address = "",
+                .workchain = workchain,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+
+        const raw_address = address_mod.formatRaw(self.allocator, &addr) catch |err| {
+            return tools_types.AddressResult{
+                .raw_address = "",
+                .user_friendly_address = "",
+                .workchain = workchain,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        errdefer self.allocator.free(raw_address);
+
+        const user_friendly_address = address_mod.addressToUserFriendlyAlloc(self.allocator, &addr, true, false) catch |err| {
+            return tools_types.AddressResult{
+                .raw_address = "",
+                .user_friendly_address = "",
+                .workchain = workchain,
+                .success = false,
+                .error_message = @errorName(err),
+            };
+        };
+        errdefer self.allocator.free(user_friendly_address);
+
+        return tools_types.AddressResult{
+            .raw_address = raw_address,
+            .user_friendly_address = user_friendly_address,
+            .workchain = workchain,
             .success = true,
             .error_message = null,
         };
@@ -667,6 +715,29 @@ pub const AgentTools = struct {
         return self.sendWalletMessages(destination, amount, msgs);
     }
 
+    /// Derive destination from StateInit and send a deploy message there.
+    pub fn sendContractDeployAuto(
+        self: *AgentTools,
+        workchain: i8,
+        amount: u64,
+        state_init_boc: []const u8,
+        body_boc: ?[]const u8,
+    ) !tools_types.SendResult {
+        const addr = try self.computeStateInitAddress(workchain, state_init_boc);
+        if (!addr.success) {
+            return tools_types.SendResult{
+                .hash = "",
+                .lt = 0,
+                .destination = "",
+                .amount = amount,
+                .success = false,
+                .error_message = addr.error_message,
+            };
+        }
+
+        return self.sendContractDeploy(addr.raw_address, amount, state_init_boc, body_boc);
+    }
+
     fn sendWalletMessages(self: *AgentTools, destination: []const u8, amount: u64, msgs: []const wallet.signing.WalletMessage) !tools_types.SendResult {
         const private_key = self.config.wallet_private_key orelse {
             return tools_types.SendResult{
@@ -704,6 +775,7 @@ pub const AgentTools = struct {
 
 // Re-export types
 pub const BalanceResult = tools_types.BalanceResult;
+pub const AddressResult = tools_types.AddressResult;
 pub const SendResult = tools_types.SendResult;
 pub const RunMethodResult = tools_types.RunMethodResult;
 pub const InvoiceResult = tools_types.InvoiceResult;
@@ -749,11 +821,14 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.runGetMethod;
     _ = AgentTools.runGetMethodAbi;
     _ = AgentTools.runGetMethodAuto;
+    _ = AgentTools.computeStateInitAddress;
     _ = AgentTools.sendContractMessage;
     _ = AgentTools.sendContractMessageOps;
     _ = AgentTools.sendContractMessageFunction;
     _ = AgentTools.sendContractMessageAbi;
     _ = AgentTools.sendContractMessageAuto;
     _ = AgentTools.sendContractDeploy;
+    _ = AgentTools.sendContractDeployAuto;
+    _ = AddressResult;
     _ = RunMethodResult;
 }

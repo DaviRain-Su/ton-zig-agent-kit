@@ -41,11 +41,71 @@ pub const Cell = struct {
     }
 
     pub fn hash(self: *const Cell) [32]u8 {
+        var repr = [_]u8{0} ** (2 + MAX_BYTES + (MAX_REFS * (2 + 32)));
+        const repr_len = self.writeHashRepresentation(&repr);
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        hasher.update(self.data[0..@as(usize, @divTrunc(self.bit_len + 7, 8))]);
+        hasher.update(repr[0..repr_len]);
         return hasher.finalResult();
     }
+
+    fn depth(self: *const Cell) u16 {
+        if (self.ref_cnt == 0) return 0;
+
+        var max_depth: u16 = 0;
+        for (self.refs[0..self.ref_cnt]) |ref| {
+            const child = ref orelse continue;
+            const child_depth = child.depth();
+            if (child_depth > max_depth) max_depth = child_depth;
+        }
+        return max_depth + 1;
+    }
+
+    fn writeHashRepresentation(self: *const Cell, out: []u8) usize {
+        const data_byte_len = paddedDataLen(self.bit_len);
+        out[0] = self.ref_cnt;
+        out[1] = descriptor2(self.bit_len);
+
+        if (data_byte_len > 0) {
+            @memcpy(out[2 .. 2 + data_byte_len], self.data[0..data_byte_len]);
+            applyTopUppedArray(out[2 .. 2 + data_byte_len], self.bit_len);
+        }
+
+        var pos: usize = 2 + data_byte_len;
+        for (self.refs[0..self.ref_cnt]) |ref| {
+            const child = ref orelse continue;
+            std.mem.writeInt(u16, out[pos..][0..2], child.depth(), .big);
+            pos += 2;
+        }
+        for (self.refs[0..self.ref_cnt]) |ref| {
+            const child = ref orelse continue;
+            const child_hash = child.hash();
+            @memcpy(out[pos..][0..32], &child_hash);
+            pos += 32;
+        }
+        return pos;
+    }
 };
+
+fn paddedDataLen(bit_len: u16) usize {
+    return @intCast(@divTrunc(bit_len + 7, 8));
+}
+
+fn descriptor2(bit_len: u16) u8 {
+    const data_byte_len = paddedDataLen(bit_len);
+    return @intCast((bit_len / 8) + data_byte_len);
+}
+
+fn applyTopUppedArray(bytes: []u8, bit_len: u16) void {
+    if (bytes.len == 0 or bit_len % 8 == 0) return;
+
+    const last_index = bytes.len - 1;
+    const used_bits_last: u3 = @intCast(bit_len % 8);
+    const keep_shift: u3 = @intCast(8 - @as(u4, used_bits_last));
+    const topup_shift: u3 = @intCast(7 - used_bits_last);
+    const keep_mask: u8 = @as(u8, 0xFF) << keep_shift;
+    bytes[last_index] &= keep_mask;
+    bytes[last_index] |= @as(u8, 1) << topup_shift;
+}
 
 pub const Builder = struct {
     data: [MAX_BYTES]u8,
@@ -490,4 +550,27 @@ test "cell hash" {
 
     const h = cell.hash();
     try std.testing.expectEqual(@as(usize, 32), h.len);
+
+    var expected = [_]u8{0} ** 32;
+    _ = try std.fmt.hexToBytes(&expected, "2730af090faf7a9d925c11622e4b1b6cb8a8d4c45cdb7d3b6c10f409c10c1c81");
+    try std.testing.expectEqualSlices(u8, &expected, &h);
+}
+
+test "cell hash includes child depth and hash" {
+    const allocator = std.testing.allocator;
+
+    var child_builder = Builder.init();
+    try child_builder.storeUint(42, 8);
+    const child = try child_builder.toCell(allocator);
+
+    var parent_builder = Builder.init();
+    try parent_builder.storeUint(0xCA, 8);
+    try parent_builder.storeRef(child);
+    const parent = try parent_builder.toCell(allocator);
+    defer parent.deinit(allocator);
+
+    const h = parent.hash();
+    var expected = [_]u8{0} ** 32;
+    _ = try std.fmt.hexToBytes(&expected, "942a877e956f0e4b54f0a486a9c748d7017bc65f71177a40ea8497199069a2e9");
+    try std.testing.expectEqualSlices(u8, &expected, &h);
 }
