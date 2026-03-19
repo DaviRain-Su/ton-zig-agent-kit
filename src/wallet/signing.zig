@@ -4,8 +4,8 @@
 const std = @import("std");
 const types = @import("../core/types.zig");
 const cell = @import("../core/cell.zig");
-const address = @import("../core/address.zig");
 const boc = @import("../core/boc.zig");
+const state_init = @import("../core/state_init.zig");
 const http_client = @import("../core/http_client.zig");
 const generic_contract = @import("../contract/contract.zig");
 
@@ -22,9 +22,11 @@ pub const WalletVersion = enum {
 pub const WalletMessage = struct {
     destination: []const u8,
     amount: u64,
+    state_init: ?[]const u8 = null, // Raw StateInit BoC
     body: ?[]const u8 = null, // Raw body BoC
     comment: ?[]const u8 = null,
     mode: u8 = 3, // 3 = pay separately
+    bounce: bool = true,
 };
 
 pub const WalletInfo = struct {
@@ -59,6 +61,12 @@ fn destroyCellShallow(allocator: std.mem.Allocator, value: *cell.Cell) void {
     allocator.destroy(value);
 }
 
+fn deinitBuilderRefs(allocator: std.mem.Allocator, builder: *cell.Builder) void {
+    for (builder.refs[0..builder.ref_cnt]) |ref| {
+        if (ref) |child| child.deinit(allocator);
+    }
+}
+
 fn createCommentBodyCell(allocator: std.mem.Allocator, comment: []const u8) !*cell.Cell {
     var builder = cell.Builder.init();
     try builder.storeUint(0, 32);
@@ -75,10 +83,11 @@ fn createInternalTransferMessageCell(
     msg: WalletMessage,
 ) !*cell.Cell {
     var msg_builder = cell.Builder.init();
+    errdefer deinitBuilderRefs(allocator, &msg_builder);
 
     try msg_builder.storeUint(0, 1); // int_msg_info$0
     try msg_builder.storeUint(1, 1); // ihr_disabled
-    try msg_builder.storeUint(1, 1); // bounce
+    try msg_builder.storeUint(if (msg.bounce) 1 else 0, 1); // bounce
     try msg_builder.storeUint(0, 1); // bounced
 
     try msg_builder.storeUint(0, 2); // src: addr_none
@@ -91,7 +100,14 @@ fn createInternalTransferMessageCell(
     try msg_builder.storeUint(0, 64); // created_lt
     try msg_builder.storeUint(0, 32); // created_at
 
-    try msg_builder.storeUint(0, 1); // state_init absent
+    if (msg.state_init) |state_init_boc| {
+        const state_init_cell = try boc.deserializeBoc(allocator, state_init_boc);
+        try msg_builder.storeUint(1, 1); // state_init present
+        try msg_builder.storeUint(1, 1); // state_init in ref
+        try msg_builder.storeRef(state_init_cell);
+    } else {
+        try msg_builder.storeUint(0, 1); // state_init absent
+    }
 
     if (msg.body) |body_boc| {
         const body_cell = try decodeBodyCellFromBoc(allocator, body_boc);
@@ -364,6 +380,29 @@ pub fn sendBody(
     return sendMessages(client, version, private_key, wallet_address, msgs);
 }
 
+pub fn sendDeploy(
+    client: *http_client.TonHttpClient,
+    version: WalletVersion,
+    private_key: [32]u8,
+    wallet_address: []const u8,
+    destination: []const u8,
+    amount: u64,
+    state_init_boc: []const u8,
+    body_boc: ?[]const u8,
+) !types.SendBocResponse {
+    const msgs = &[_]WalletMessage{
+        .{
+            .destination = destination,
+            .amount = amount,
+            .state_init = state_init_boc,
+            .body = body_boc,
+            .bounce = false,
+        },
+    };
+
+    return sendMessages(client, version, private_key, wallet_address, msgs);
+}
+
 pub fn sendMessages(
     client: *http_client.TonHttpClient,
     version: WalletVersion,
@@ -517,6 +556,92 @@ test "wallet signing preserves raw body boc in internal message" {
 
     const decoded_body = try out_slice.loadRef();
     try std.testing.expectEqualSlices(u8, &raw_body_cell.hash(), &decoded_body.hash());
+}
+
+test "wallet signing includes referenced state init and disables bounce for deploy" {
+    const allocator = std.testing.allocator;
+
+    var code_builder = cell.Builder.init();
+    try code_builder.storeUint(0xCAFE, 16);
+    const code_cell = try code_builder.toCell(allocator);
+    defer code_cell.deinit(allocator);
+    const code_boc = try boc.serializeBoc(allocator, code_cell);
+    defer allocator.free(code_boc);
+
+    var data_builder = cell.Builder.init();
+    try data_builder.storeUint(0xBEEF, 16);
+    const data_cell = try data_builder.toCell(allocator);
+    defer data_cell.deinit(allocator);
+    const data_boc = try boc.serializeBoc(allocator, data_cell);
+    defer allocator.free(data_boc);
+
+    const state_init_boc = try state_init.buildStateInitBocAlloc(allocator, code_boc, data_boc);
+    defer allocator.free(state_init_boc);
+    const expected_state_init = try boc.deserializeBoc(allocator, state_init_boc);
+    defer expected_state_init.deinit(allocator);
+
+    const keypair = try generateKeypair("test_seed");
+    var msgs = [_]WalletMessage{
+        .{
+            .destination = "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+            .amount = 1_000_000_000,
+            .state_init = state_init_boc,
+            .bounce = false,
+        },
+    };
+
+    const signed = try createSignedTransferWithWalletId(
+        allocator,
+        .v4,
+        keypair[0],
+        "0:0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+        default_wallet_id_v4,
+        0,
+        msgs[0..],
+        1234567890,
+    );
+    defer allocator.free(signed);
+
+    const ext_msg = try boc.deserializeBoc(allocator, signed);
+    defer ext_msg.deinit(allocator);
+
+    var ext_slice = ext_msg.toSlice();
+    _ = try ext_slice.loadUint(2);
+    _ = try ext_slice.loadUint(2);
+    _ = try ext_slice.loadAddress();
+    _ = try ext_slice.loadCoins();
+    _ = try ext_slice.loadUint(1);
+    _ = try ext_slice.loadUint(1);
+
+    const signed_body = try ext_slice.loadRef();
+    var signed_slice = signed_body.toSlice();
+    _ = try signed_slice.loadBits(512);
+    _ = try signed_slice.loadUint32();
+    _ = try signed_slice.loadUint32();
+    _ = try signed_slice.loadUint32();
+    _ = try signed_slice.loadUint32();
+    _ = try signed_slice.loadUint8();
+
+    const out_msg = try signed_slice.loadRef();
+    var out_slice = out_msg.toSlice();
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 1), try out_slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadUint(1));
+    _ = try out_slice.loadUint(2);
+    _ = try out_slice.loadAddress();
+    try std.testing.expectEqual(@as(u64, 1_000_000_000), try out_slice.loadCoins());
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadCoins());
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadCoins());
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadUint(64));
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadUint(32));
+    try std.testing.expectEqual(@as(u64, 1), try out_slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 1), try out_slice.loadUint(1));
+
+    const state_init_ref = try out_slice.loadRef();
+    try std.testing.expectEqualSlices(u8, &state_init_ref.hash(), &expected_state_init.hash());
+    try std.testing.expectEqual(@as(u64, 0), try out_slice.loadUint(1));
 }
 
 test "wallet signing supports custom wallet id" {

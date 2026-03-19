@@ -646,6 +646,27 @@ pub const AgentTools = struct {
         return self.sendContractMessage(destination, amount, body_boc);
     }
 
+    /// Deploy a contract by sending StateInit and an optional body.
+    pub fn sendContractDeploy(
+        self: *AgentTools,
+        destination: []const u8,
+        amount: u64,
+        state_init_boc: []const u8,
+        body_boc: ?[]const u8,
+    ) !tools_types.SendResult {
+        const msgs = &[_]wallet.signing.WalletMessage{
+            .{
+                .destination = destination,
+                .amount = amount,
+                .state_init = state_init_boc,
+                .body = body_boc,
+                .bounce = false,
+            },
+        };
+
+        return self.sendWalletMessages(destination, amount, msgs);
+    }
+
     fn sendWalletMessages(self: *AgentTools, destination: []const u8, amount: u64, msgs: []const wallet.signing.WalletMessage) !tools_types.SendResult {
         const private_key = self.config.wallet_private_key orelse {
             return tools_types.SendResult{
@@ -733,5 +754,6 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.sendContractMessageFunction;
     _ = AgentTools.sendContractMessageAbi;
     _ = AgentTools.sendContractMessageAuto;
+    _ = AgentTools.sendContractDeploy;
     _ = RunMethodResult;
 }
