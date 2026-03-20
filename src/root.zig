@@ -2,6 +2,7 @@
 //! A Zig-native TON contract toolkit for AI agents
 
 const telegram_bot = @import("demo/telegram_bot.zig");
+const testnet_integration = @import("integration/testnet_integration.zig");
 
 pub const core = @import("core/core.zig");
 pub const wallet = @import("wallet/wallet.zig");
@@ -16,4 +17,5 @@ test {
     _ = paywatch;
     _ = tools;
     _ = telegram_bot;
+    _ = testnet_integration;
 }
