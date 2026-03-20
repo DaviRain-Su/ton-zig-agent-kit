@@ -7,6 +7,7 @@ const boc = @import("../core/boc.zig");
 const external_message = @import("../core/external_message.zig");
 const http_client = @import("../core/http_client.zig");
 const provider_mod = @import("../core/provider.zig");
+pub const standard_body = @import("standard_body.zig");
 
 pub fn GenericContractType(comptime ClientType: type) type {
     return struct {

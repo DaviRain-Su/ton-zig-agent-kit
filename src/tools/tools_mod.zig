@@ -921,70 +921,61 @@ fn AgentToolsImpl(comptime ClientType: type) type {
 
             if (std.mem.eql(u8, opcode_name, "comment")) {
                 return .{
-                    .body_cli_template = try allocator.dupe(u8, "ton-zig-agent-kit cell build-typed u32:0 bytes:<comment_utf8>"),
+                    .body_cli_template = try allocator.dupe(u8, "ton-zig-agent-kit cell build-standard comment @spec.json"),
                     .send_cli_template = if (is_incoming)
                         try std.fmt.allocPrint(
                             allocator,
-                            "ton-zig-agent-kit wallet send <wallet_addr> {s} <amount_nanoton> <comment_utf8>",
+                            "ton-zig-agent-kit wallet send-standard <wallet_addr> {s} <amount_nanoton> comment @spec.json",
                             .{contract_address},
                         )
                     else
                         null,
-                    .note = try allocator.dupe(u8, if (is_incoming) "Observed as a simple comment-bearing incoming transfer." else "Observed as an outgoing comment emitted by the contract."),
+                    .note = try allocator.dupe(u8, "Spec JSON: {\"comment\":\"<comment_utf8>\"}"),
                 };
             }
 
             if (std.mem.eql(u8, opcode_name, "jetton_transfer")) {
                 return .{
-                    .body_cli_template = try allocator.dupe(
-                        u8,
-                        "ton-zig-agent-kit cell build-typed u32:0x0F8A7EA5 u64:<query_id> coins:<jetton_amount> addr:<destination> addr:<response_destination> u1:0 coins:<forward_ton_amount> u1:1 ref:<forward_payload_boc>",
-                    ),
+                    .body_cli_template = try allocator.dupe(u8, "ton-zig-agent-kit cell build-standard jetton_transfer @spec.json"),
                     .send_cli_template = if (is_incoming)
                         try std.fmt.allocPrint(
                             allocator,
-                            "ton-zig-agent-kit wallet send-ops <wallet_addr> {s} <amount_nanoton> u32:0x0F8A7EA5 u64:<query_id> coins:<jetton_amount> addr:<destination> addr:<response_destination> u1:0 coins:<forward_ton_amount> u1:1 ref:<forward_payload_boc>",
+                            "ton-zig-agent-kit wallet send-standard <wallet_addr> {s} <amount_nanoton> jetton_transfer @spec.json",
                             .{contract_address},
                         )
                     else
                         null,
-                    .note = try allocator.dupe(u8, "Typical Jetton wallet transfer body. Build the forward payload separately, for example with `cell build-typed u32:0 bytes:<comment>`."),
+                    .note = try allocator.dupe(u8, "Spec JSON: {\"query_id\":0,\"amount\":0,\"destination\":\"0:...\",\"response_destination\":\"0:...\",\"forward_ton_amount\":0,\"forward_comment\":\"<text>\"}"),
                 };
             }
 
             if (std.mem.eql(u8, opcode_name, "jetton_burn")) {
                 return .{
-                    .body_cli_template = try allocator.dupe(
-                        u8,
-                        "ton-zig-agent-kit cell build-typed u32:0x595F07BC u64:<query_id> coins:<jetton_amount> addr:<response_destination> u1:0",
-                    ),
+                    .body_cli_template = try allocator.dupe(u8, "ton-zig-agent-kit cell build-standard jetton_burn @spec.json"),
                     .send_cli_template = if (is_incoming)
                         try std.fmt.allocPrint(
                             allocator,
-                            "ton-zig-agent-kit wallet send-ops <wallet_addr> {s} <amount_nanoton> u32:0x595F07BC u64:<query_id> coins:<jetton_amount> addr:<response_destination> u1:0",
+                            "ton-zig-agent-kit wallet send-standard <wallet_addr> {s} <amount_nanoton> jetton_burn @spec.json",
                             .{contract_address},
                         )
                     else
                         null,
-                    .note = try allocator.dupe(u8, "Typical Jetton burn body."),
+                    .note = try allocator.dupe(u8, "Spec JSON: {\"query_id\":0,\"amount\":0,\"response_destination\":\"0:...\"}"),
                 };
             }
 
             if (std.mem.eql(u8, opcode_name, "nft_transfer")) {
                 return .{
-                    .body_cli_template = try allocator.dupe(
-                        u8,
-                        "ton-zig-agent-kit cell build-typed u32:0x5FCC3D14 u64:<query_id> addr:<new_owner> addr:<response_destination> u1:0 coins:<forward_amount> u1:1 ref:<forward_payload_boc>",
-                    ),
+                    .body_cli_template = try allocator.dupe(u8, "ton-zig-agent-kit cell build-standard nft_transfer @spec.json"),
                     .send_cli_template = if (is_incoming)
                         try std.fmt.allocPrint(
                             allocator,
-                            "ton-zig-agent-kit wallet send-ops <wallet_addr> {s} <amount_nanoton> u32:0x5FCC3D14 u64:<query_id> addr:<new_owner> addr:<response_destination> u1:0 coins:<forward_amount> u1:1 ref:<forward_payload_boc>",
+                            "ton-zig-agent-kit wallet send-standard <wallet_addr> {s} <amount_nanoton> nft_transfer @spec.json",
                             .{contract_address},
                         )
                     else
                         null,
-                    .note = try allocator.dupe(u8, "Typical NFT transfer body. The forward payload is often a comment cell."),
+                    .note = try allocator.dupe(u8, "Spec JSON: {\"query_id\":0,\"new_owner\":\"0:...\",\"response_destination\":\"0:...\",\"forward_amount\":0,\"forward_comment\":\"<text>\"}"),
                 };
             }
 
@@ -3224,6 +3215,31 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             };
         }
 
+        /// Build a standard non-ABI contract body from a JSON spec.
+        pub fn buildContractBodyStandard(
+            self: *@This(),
+            kind_name: []const u8,
+            spec_source: []const u8,
+        ) !tools_types.BuiltBodyResult {
+            const kind = contract.standard_body.parseKind(kind_name) catch |err| {
+                return builtBodyError(@errorName(err));
+            };
+
+            const selector = std.fmt.allocPrint(self.allocator, "standard:{s}", .{contract.standard_body.kindName(kind)}) catch |err| {
+                return builtBodyError(@errorName(err));
+            };
+            defer self.allocator.free(selector);
+
+            const body_boc = contract.standard_body.buildBodyFromSourceAlloc(self.allocator, kind_name, spec_source) catch |err| {
+                return builtBodyError(@errorName(err));
+            };
+            defer self.allocator.free(body_boc);
+
+            return self.buildBodyResultAlloc(null, selector, body_boc) catch |err| {
+                return builtBodyError(@errorName(err));
+            };
+        }
+
         /// Build a contract body BoC from a loaded ABI source and function name or signature.
         pub fn buildContractBodyAbi(
             self: *@This(),
@@ -3350,6 +3366,22 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             state_init_boc: ?[]const u8,
         ) !tools_types.BuiltExternalMessageResult {
             var body = self.buildContractBodyAuto(destination, function_name, values) catch |err| {
+                return builtExternalError(@errorName(err));
+            };
+            defer body.deinit(self.allocator);
+
+            return self.buildExternalMessageEnvelopeFromBase64(destination, body.body_boc, state_init_boc);
+        }
+
+        /// Build an external incoming message envelope from a standard non-ABI body.
+        pub fn buildExternalMessageEnvelopeStandard(
+            self: *@This(),
+            destination: []const u8,
+            kind_name: []const u8,
+            spec_source: []const u8,
+            state_init_boc: ?[]const u8,
+        ) !tools_types.BuiltExternalMessageResult {
+            var body = self.buildContractBodyStandard(kind_name, spec_source) catch |err| {
                 return builtExternalError(@errorName(err));
             };
             defer body.deinit(self.allocator);
@@ -3497,6 +3529,22 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 function_name,
                 values,
             ) catch |err| {
+                return builtWalletError(destination, amount, @errorName(err));
+            };
+            defer self.allocator.free(body_boc);
+
+            return self.buildWalletContractMessage(destination, amount, body_boc);
+        }
+
+        /// Build a wallet-wrapped signed contract message from a standard non-ABI body spec.
+        pub fn buildWalletContractMessageStandard(
+            self: *@This(),
+            destination: []const u8,
+            amount: u64,
+            kind_name: []const u8,
+            spec_source: []const u8,
+        ) !tools_types.BuiltWalletMessageResult {
+            const body_boc = contract.standard_body.buildBodyFromSourceAlloc(self.allocator, kind_name, spec_source) catch |err| {
                 return builtWalletError(destination, amount, @errorName(err));
             };
             defer self.allocator.free(body_boc);
@@ -3711,6 +3759,29 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 function_name,
                 values,
             ) catch |err| {
+                return tools_types.SendResult{
+                    .hash = "",
+                    .lt = 0,
+                    .destination = destination,
+                    .amount = amount,
+                    .success = false,
+                    .error_message = @errorName(err),
+                };
+            };
+            defer self.allocator.free(body_boc);
+
+            return self.sendContractMessage(destination, amount, body_boc);
+        }
+
+        /// Build and send a standard non-ABI contract body from a JSON spec.
+        pub fn sendContractMessageStandard(
+            self: *@This(),
+            destination: []const u8,
+            amount: u64,
+            kind_name: []const u8,
+            spec_source: []const u8,
+        ) !tools_types.SendResult {
+            const body_boc = contract.standard_body.buildBodyFromSourceAlloc(self.allocator, kind_name, spec_source) catch |err| {
                 return tools_types.SendResult{
                     .hash = "",
                     .lt = 0,
@@ -4337,6 +4408,33 @@ test "agent tools buildContractBodyAbi returns encoded body and selector" {
     try std.testing.expect(std.mem.startsWith(u8, result.body_hex, "b5ee9c72"));
 }
 
+test "agent tools buildContractBodyStandard returns encoded standard body" {
+    const allocator = std.testing.allocator;
+
+    const FakeClient = struct {};
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    var client = FakeClient{};
+    var tools = FakeTools.init(allocator, &client, .{ .rpc_url = "https://example.invalid" });
+
+    var result = try tools.buildContractBodyStandard("comment", "{\"comment\":\"hello standard\"}");
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.success);
+    try std.testing.expect(result.address == null);
+    try std.testing.expectEqualStrings("standard:comment", result.selector);
+
+    const decoded_len = try std.base64.standard.Decoder.calcSizeForSlice(result.body_boc);
+    const decoded = try allocator.alloc(u8, decoded_len);
+    defer allocator.free(decoded);
+    try std.base64.standard.Decoder.decode(decoded, result.body_boc);
+
+    var analysis = try body_inspector.inspectBodyBocAlloc(allocator, decoded);
+    defer analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("comment", analysis.opcode_name.?);
+    try std.testing.expectEqualStrings("hello standard", analysis.comment.?);
+}
+
 test "agent tools buildExternalMessageEnvelopeAuto discovers abi and wraps state init" {
     const allocator = std.testing.allocator;
 
@@ -4868,6 +4966,125 @@ test "agent tools buildWalletContractMessageAuto discovers abi before signing" {
     const contract_body = try internal_slice.loadRef();
     var body_slice = contract_body.toSlice();
     try std.testing.expectEqual(@as(u64, 0xAABBCCDD), try body_slice.loadUint(32));
+}
+
+test "agent tools buildWalletContractMessageStandard signs standard body" {
+    const allocator = std.testing.allocator;
+
+    const keypair = try signing.generateKeypair("tools-wallet-build-standard");
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+        public_key_hex: []const u8,
+
+        pub fn runGetMethod(self: *@This(), _: []const u8, method: []const u8, _: []const []const u8) anyerror!core_types.RunGetMethodResponse {
+            const entries = try self.allocator.alloc(core_types.StackEntry, 1);
+            errdefer self.allocator.free(entries);
+
+            if (std.mem.eql(u8, method, "seqno")) {
+                entries[0] = .{ .number = 3 };
+            } else if (std.mem.eql(u8, method, "get_subwallet_id")) {
+                entries[0] = .{ .number = signing.default_wallet_id_v4 };
+            } else if (std.mem.eql(u8, method, "get_public_key")) {
+                entries[0] = .{ .big_number = try self.allocator.dupe(u8, self.public_key_hex) };
+            } else {
+                return error.InvalidResponse;
+            }
+
+            return .{
+                .exit_code = 0,
+                .stack = entries,
+                .logs = "",
+            };
+        }
+
+        pub fn freeRunGetMethodResponse(self: *@This(), response: *core_types.RunGetMethodResponse) void {
+            for (response.stack) |*entry| {
+                switch (entry.*) {
+                    .big_number => |value| if (value.len > 0) self.allocator.free(value),
+                    else => {},
+                }
+            }
+            if (response.stack.len > 0) self.allocator.free(response.stack);
+        }
+    };
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    const public_key_hex = blk: {
+        const hex_chars = "0123456789abcdef";
+        const out = try allocator.alloc(u8, 2 + keypair[1].len * 2);
+        out[0] = '0';
+        out[1] = 'x';
+        for (keypair[1], 0..) |byte, idx| {
+            out[2 + idx * 2] = hex_chars[byte >> 4];
+            out[2 + idx * 2 + 1] = hex_chars[byte & 0x0f];
+        }
+        break :blk out;
+    };
+    defer allocator.free(public_key_hex);
+
+    var client = FakeClient{ .allocator = allocator, .public_key_hex = public_key_hex };
+    var tools = FakeTools.init(allocator, &client, .{
+        .rpc_url = "https://example.invalid",
+        .wallet_private_key = keypair[0],
+        .wallet_address = "0:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    });
+
+    var result = try tools.buildWalletContractMessageStandard(
+        "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+        456,
+        "comment",
+        "{\"comment\":\"wallet standard\"}",
+    );
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqual(@as(u32, 3), result.seqno);
+    try std.testing.expect(!result.state_init_attached);
+
+    const ext_len = try std.base64.standard.Decoder.calcSizeForSlice(result.external_boc);
+    const ext_bytes = try allocator.alloc(u8, ext_len);
+    defer allocator.free(ext_bytes);
+    try std.base64.standard.Decoder.decode(ext_bytes, result.external_boc);
+
+    const ext_msg = try boc.deserializeBoc(allocator, ext_bytes);
+    defer ext_msg.deinit(allocator);
+
+    var msg_slice = ext_msg.toSlice();
+    _ = try msg_slice.loadUint(2);
+    _ = try msg_slice.loadUint(2);
+    _ = try msg_slice.loadAddress();
+    _ = try msg_slice.loadCoins();
+    _ = try msg_slice.loadUint(1);
+    const body_ref = try msg_slice.loadRef();
+
+    var signed_body = body_ref.toSlice();
+    _ = try signed_body.loadBits(512);
+    _ = try signed_body.loadUint(32);
+    _ = try signed_body.loadUint(32);
+    try std.testing.expectEqual(@as(u64, 3), try signed_body.loadUint(32));
+    _ = try signed_body.loadUint(32);
+    _ = try signed_body.loadUint(8);
+    const internal_ref = try signed_body.loadRef();
+    var internal_slice = internal_ref.toSlice();
+    _ = try internal_slice.loadUint(1);
+    _ = try internal_slice.loadUint(1);
+    _ = try internal_slice.loadUint(1);
+    _ = try internal_slice.loadUint(1);
+    _ = try internal_slice.loadUint(2);
+    _ = try internal_slice.loadAddress();
+    _ = try internal_slice.loadCoins();
+    _ = try internal_slice.loadUint(1);
+    _ = try internal_slice.loadCoins();
+    _ = try internal_slice.loadCoins();
+    _ = try internal_slice.loadUint(64);
+    _ = try internal_slice.loadUint(32);
+    _ = try internal_slice.loadUint(1);
+    const body_ref2 = try internal_slice.loadRef();
+    var analysis = try body_inspector.inspectBodyCellAlloc(allocator, body_ref2);
+    defer analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("comment", analysis.opcode_name.?);
+    try std.testing.expectEqualStrings("wallet standard", analysis.comment.?);
 }
 
 test "agent tools buildContractDeploy signs deploy message with state init" {
@@ -5691,7 +5908,7 @@ test "agent tools inspectContract summarizes wallet and abi metadata" {
     try std.testing.expectEqualStrings("refund", result.observed_messages[1].comment.?);
     try std.testing.expect(result.observed_messages[1].template != null);
     try std.testing.expectEqualStrings(
-        "ton-zig-agent-kit cell build-typed u32:0 bytes:<comment_utf8>",
+        "ton-zig-agent-kit cell build-standard comment @spec.json",
         result.observed_messages[1].template.?.body_cli_template.?,
     );
     try std.testing.expect(result.details_json != null);
@@ -5702,6 +5919,7 @@ test "agent tools inspectContract summarizes wallet and abi metadata" {
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"abi_selector\":\"transfer(address,coins)\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"opcode_name\":\"comment\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"send_cli_template\":\"ton-zig-agent-kit wallet send-auto-abi <wallet_addr> 0:2222222222222222222222222222222222222222222222222222222222222222 <amount_nanoton> transfer(address,coins) [values...]\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"body_cli_template\":\"ton-zig-agent-kit cell build-standard comment @spec.json\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"comment\":\"refund\"") != null);
 }
 
@@ -5904,16 +6122,19 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.decodeEventBodyAbi;
     _ = AgentTools.decodeEventBodyAuto;
     _ = AgentTools.buildContractBodyFunction;
+    _ = AgentTools.buildContractBodyStandard;
     _ = AgentTools.buildContractBodyAbi;
     _ = AgentTools.buildContractBodyAuto;
     _ = AgentTools.buildExternalMessageEnvelope;
     _ = AgentTools.buildExternalMessageEnvelopeFunction;
+    _ = AgentTools.buildExternalMessageEnvelopeStandard;
     _ = AgentTools.buildExternalMessageEnvelopeAbi;
     _ = AgentTools.buildExternalMessageEnvelopeAuto;
     _ = AgentTools.buildWalletTransfer;
     _ = AgentTools.buildWalletSelfDeploy;
     _ = AgentTools.buildWalletContractMessage;
     _ = AgentTools.buildWalletContractMessageFunction;
+    _ = AgentTools.buildWalletContractMessageStandard;
     _ = AgentTools.buildWalletContractMessageAbi;
     _ = AgentTools.buildWalletContractMessageAuto;
     _ = AgentTools.buildContractDeploy;
@@ -5929,6 +6150,7 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = AgentTools.sendContractMessage;
     _ = AgentTools.sendContractMessageOps;
     _ = AgentTools.sendContractMessageFunction;
+    _ = AgentTools.sendContractMessageStandard;
     _ = AgentTools.sendContractMessageAbi;
     _ = AgentTools.sendContractMessageAuto;
     _ = AgentTools.sendExternalMessage;
@@ -5952,16 +6174,19 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = ProviderAgentTools.decodeEventBodyAbi;
     _ = ProviderAgentTools.decodeEventBodyAuto;
     _ = ProviderAgentTools.buildContractBodyFunction;
+    _ = ProviderAgentTools.buildContractBodyStandard;
     _ = ProviderAgentTools.buildContractBodyAbi;
     _ = ProviderAgentTools.buildContractBodyAuto;
     _ = ProviderAgentTools.buildExternalMessageEnvelope;
     _ = ProviderAgentTools.buildExternalMessageEnvelopeFunction;
+    _ = ProviderAgentTools.buildExternalMessageEnvelopeStandard;
     _ = ProviderAgentTools.buildExternalMessageEnvelopeAbi;
     _ = ProviderAgentTools.buildExternalMessageEnvelopeAuto;
     _ = ProviderAgentTools.buildWalletTransfer;
     _ = ProviderAgentTools.buildWalletSelfDeploy;
     _ = ProviderAgentTools.buildWalletContractMessage;
     _ = ProviderAgentTools.buildWalletContractMessageFunction;
+    _ = ProviderAgentTools.buildWalletContractMessageStandard;
     _ = ProviderAgentTools.buildWalletContractMessageAbi;
     _ = ProviderAgentTools.buildWalletContractMessageAuto;
     _ = ProviderAgentTools.buildContractDeploy;
@@ -5975,6 +6200,7 @@ test "agent tools generic runGetMethod result type is exported" {
     _ = ProviderAgentTools.getNFTInfo;
     _ = ProviderAgentTools.getNFTCollectionInfo;
     _ = ProviderAgentTools.sendTransfer;
+    _ = ProviderAgentTools.sendContractMessageStandard;
     _ = ProviderAgentTools.sendExternalMessage;
     _ = ProviderAgentTools.sendExternalMessageAbi;
     _ = ProviderAgentTools.sendExternalMessageAuto;
