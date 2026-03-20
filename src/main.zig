@@ -3476,7 +3476,21 @@ fn printBodyAnalysis(allocator: std.mem.Allocator, body: *const Cell) void {
     }
     if (analysis.decoded_json) |value| {
         std.debug.print("  Body decoded:\n{s}\n", .{value});
+        if (analysis.opcode_name) |opcode_name| {
+            if (standardBodyBuildTemplate(opcode_name)) |template| {
+                std.debug.print("  Body reusable spec:\n{s}\n", .{value});
+                std.debug.print("  Build standard: {s}\n", .{template});
+            }
+        }
     }
+}
+
+fn standardBodyBuildTemplate(opcode_name: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, opcode_name, "comment")) return "ton-zig-agent-kit cell build-standard comment @spec.json";
+    if (std.mem.eql(u8, opcode_name, "jetton_transfer")) return "ton-zig-agent-kit cell build-standard jetton_transfer @spec.json";
+    if (std.mem.eql(u8, opcode_name, "jetton_burn")) return "ton-zig-agent-kit cell build-standard jetton_burn @spec.json";
+    if (std.mem.eql(u8, opcode_name, "nft_transfer")) return "ton-zig-agent-kit cell build-standard nft_transfer @spec.json";
+    return null;
 }
 
 fn printTransactionDetails(
@@ -3718,6 +3732,9 @@ fn printInspectObservedMessages(items: []const ton_zig_agent_kit.tools.tools_mod
             }
             if (value.send_cli_template) |template| {
                 std.debug.print("      send: {s}\n", .{template});
+            }
+            if (value.example_spec_json) |spec| {
+                std.debug.print("      spec: {s}\n", .{spec});
             }
             if (value.note) |note| {
                 std.debug.print("      note: {s}\n", .{note});

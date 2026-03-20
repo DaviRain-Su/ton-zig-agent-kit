@@ -895,6 +895,12 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                     } else {
                         try writer.writeAll("null");
                     }
+                    try writeJsonFieldPrefix(writer, &wrote_template, "example_spec_json");
+                    if (value.example_spec_json) |spec| {
+                        try writeJsonString(writer, spec);
+                    } else {
+                        try writer.writeAll("null");
+                    }
                     try writeJsonFieldPrefix(writer, &wrote_template, "note");
                     if (value.note) |note| {
                         try writeJsonString(writer, note);
@@ -930,6 +936,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                         )
                     else
                         null,
+                    .example_spec_json = null,
                     .note = try allocator.dupe(u8, "Spec JSON: {\"comment\":\"<comment_utf8>\"}"),
                 };
             }
@@ -945,6 +952,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                         )
                     else
                         null,
+                    .example_spec_json = null,
                     .note = try allocator.dupe(u8, "Spec JSON: {\"query_id\":0,\"amount\":0,\"destination\":\"0:...\",\"response_destination\":\"0:...\",\"forward_ton_amount\":0,\"forward_comment\":\"<text>\"}"),
                 };
             }
@@ -960,6 +968,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                         )
                     else
                         null,
+                    .example_spec_json = null,
                     .note = try allocator.dupe(u8, "Spec JSON: {\"query_id\":0,\"amount\":0,\"response_destination\":\"0:...\"}"),
                 };
             }
@@ -975,6 +984,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                         )
                     else
                         null,
+                    .example_spec_json = null,
                     .note = try allocator.dupe(u8, "Spec JSON: {\"query_id\":0,\"new_owner\":\"0:...\",\"response_destination\":\"0:...\",\"forward_amount\":0,\"forward_comment\":\"<text>\"}"),
                 };
             }
@@ -994,6 +1004,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                         )
                     else
                         null,
+                    .example_spec_json = null,
                     .note = try allocator.dupe(u8, "Unknown standard layout; extend the body after the observed opcode."),
                 };
             }
@@ -1042,6 +1053,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 return .{
                     .body_cli_template = null,
                     .send_cli_template = send_cli,
+                    .example_spec_json = null,
                     .note = note,
                 };
             }
@@ -1049,7 +1061,11 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             if (analysis) |value| {
                 if (value.opcode_name) |name| {
                     if (try buildStandardObservedTemplatesAlloc(self.allocator, contract_address, direction, name, value.opcode)) |template| {
-                        return template;
+                        var result = template;
+                        if (value.decoded_json) |spec| {
+                            result.example_spec_json = try self.allocator.dupe(u8, spec);
+                        }
+                        return result;
                     }
                 }
                 if (value.opcode) |opcode| {
@@ -1067,6 +1083,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                             )
                         else
                             null,
+                        .example_spec_json = null,
                         .note = try std.fmt.allocPrint(
                             self.allocator,
                             "Observed raw opcode 0x{X}; fill in the remaining fields manually.",
@@ -5911,6 +5928,10 @@ test "agent tools inspectContract summarizes wallet and abi metadata" {
         "ton-zig-agent-kit cell build-standard comment @spec.json",
         result.observed_messages[1].template.?.body_cli_template.?,
     );
+    try std.testing.expectEqualStrings(
+        "{\"comment\":\"refund\"}",
+        result.observed_messages[1].template.?.example_spec_json.?,
+    );
     try std.testing.expect(result.details_json != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"seqno\":7") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"wallet_id\":2864434397") != null);
@@ -5920,6 +5941,7 @@ test "agent tools inspectContract summarizes wallet and abi metadata" {
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"opcode_name\":\"comment\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"send_cli_template\":\"ton-zig-agent-kit wallet send-auto-abi <wallet_addr> 0:2222222222222222222222222222222222222222222222222222222222222222 <amount_nanoton> transfer(address,coins) [values...]\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"body_cli_template\":\"ton-zig-agent-kit cell build-standard comment @spec.json\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"example_spec_json\":\"{\\\"comment\\\":\\\"refund\\\"}\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"comment\":\"refund\"") != null);
 }
 

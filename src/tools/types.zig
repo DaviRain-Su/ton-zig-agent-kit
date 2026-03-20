@@ -103,11 +103,13 @@ pub const ObservedMessageDirection = enum {
 pub const ObservedMessageTemplateResult = struct {
     body_cli_template: ?[]const u8,
     send_cli_template: ?[]const u8,
+    example_spec_json: ?[]const u8 = null,
     note: ?[]const u8,
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         if (self.body_cli_template) |value| allocator.free(value);
         if (self.send_cli_template) |value| allocator.free(value);
+        if (self.example_spec_json) |value| allocator.free(value);
         if (self.note) |value| allocator.free(value);
         self.* = undefined;
     }
