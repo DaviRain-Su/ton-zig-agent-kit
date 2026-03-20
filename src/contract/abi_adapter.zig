@@ -3196,7 +3196,7 @@ fn decodeBodyFieldsJsonAlloc(
 
     try writeDecodedBodyFieldsJson(&writer.writer, allocator, params, slice, .{
         .terminal = allow_tail_variable,
-        .trailing_exact = if (allow_tail_variable) zero_body_footprint else null,
+        .trailing_variants = if (allow_tail_variable) BodyFootprintVariants.initOne(zero_body_footprint) else .{},
     });
     return try writer.toOwnedSlice();
 }
@@ -3212,7 +3212,7 @@ fn decodeBodyParamJsonAlloc(
 
     try writeDecodedBodyParamJson(&writer.writer, allocator, param, slice, .{
         .terminal = is_last,
-        .trailing_exact = if (is_last) zero_body_footprint else null,
+        .trailing_variants = if (is_last) BodyFootprintVariants.initOne(zero_body_footprint) else .{},
     });
     return try writer.toOwnedSlice();
 }
@@ -3222,9 +3222,37 @@ const BodyFootprint = struct {
     refs: u8,
 };
 
+const max_body_footprint_variants: usize = 16;
+
+const BodyFootprintVariants = struct {
+    items: [max_body_footprint_variants]BodyFootprint = undefined,
+    len: u8 = 0,
+
+    fn initOne(footprint: BodyFootprint) @This() {
+        var result: @This() = .{};
+        result.items[0] = footprint;
+        result.len = 1;
+        return result;
+    }
+
+    fn slice(self: *const @This()) []const BodyFootprint {
+        return self.items[0..self.len];
+    }
+
+    fn add(self: *@This(), footprint: BodyFootprint) !void {
+        for (self.slice()) |existing| {
+            if (bodyFootprintEql(existing, footprint)) return;
+        }
+
+        if (self.len >= self.items.len) return error.UnsupportedAbiType;
+        self.items[self.len] = footprint;
+        self.len += 1;
+    }
+};
+
 const BodyDecodeContext = struct {
     terminal: bool,
-    trailing_exact: ?BodyFootprint,
+    trailing_variants: BodyFootprintVariants,
 };
 
 const zero_body_footprint = BodyFootprint{
@@ -3306,7 +3334,7 @@ fn writeDecodedBodyParamJson(
                 slice,
                 .{
                     .terminal = context.terminal and idx + 1 == length,
-                    .trailing_exact = if (idx + 1 == length) context.trailing_exact else null,
+                    .trailing_variants = if (idx + 1 == length) context.trailing_variants else .{},
                 },
             );
         }
@@ -3479,53 +3507,87 @@ fn paramIsBodySelfDelimited(param: ParamDef) bool {
 fn bodyFieldDecodeContext(params_after: []const ParamDef, inherited: BodyDecodeContext) BodyDecodeContext {
     return .{
         .terminal = inherited.terminal and params_after.len == 0,
-        .trailing_exact = exactTrailingBodyFootprint(params_after, inherited.trailing_exact),
+        .trailing_variants = trailingBodyFootprintVariants(params_after, inherited.trailing_variants) orelse .{},
     };
 }
 
-fn exactTrailingBodyFootprint(params: []const ParamDef, inherited: ?BodyFootprint) ?BodyFootprint {
-    var total = inherited orelse return null;
+fn trailingBodyFootprintVariants(
+    params: []const ParamDef,
+    inherited: BodyFootprintVariants,
+) ?BodyFootprintVariants {
+    if (inherited.len == 0) return null;
+
+    var total = inherited;
     for (params) |param| {
-        const footprint = exactBodyFootprint(param) orelse return null;
-        total = addBodyFootprint(total, footprint) orelse return null;
+        const variants = bodyFootprintVariants(param) orelse return null;
+        total = addBodyFootprintVariantSets(total, variants) orelse return null;
     }
     return total;
 }
 
-fn exactBodyFootprint(param: ParamDef) ?BodyFootprint {
-    if (optionalInnerType(param.type_name) != null) return null;
+fn bodyFootprintVariants(param: ParamDef) ?BodyFootprintVariants {
+    if (optionalInnerType(param.type_name)) |inner_type| {
+        const optional_bit = BodyFootprint{ .bits = 1, .refs = 0 };
+        var variants = BodyFootprintVariants.initOne(optional_bit);
+        const inner_variants = bodyFootprintVariants(paramWithType(param, inner_type)) orelse return null;
+        for (inner_variants.slice()) |inner| {
+            const with_inner = addBodyFootprint(optional_bit, inner) orelse return null;
+            variants.add(with_inner) catch return null;
+        }
+        return variants;
+    }
+
     if (arrayInnerType(param.type_name) != null) return null;
 
     if (isCompositeParam(param)) {
-        var total = zero_body_footprint;
+        var total = BodyFootprintVariants.initOne(zero_body_footprint);
         for (param.components) |component| {
-            const footprint = exactBodyFootprint(component) orelse return null;
-            total = addBodyFootprint(total, footprint) orelse return null;
+            const variants = bodyFootprintVariants(component) orelse return null;
+            total = addBodyFootprintVariantSets(total, variants) orelse return null;
         }
         return total;
     }
 
-    if (std.mem.eql(u8, param.type_name, "bool")) return .{ .bits = 1, .refs = 0 };
-    if (std.mem.eql(u8, param.type_name, "address")) return .{ .bits = 267, .refs = 0 };
-    if (fixedBytesLength(param.type_name)) |byte_len| return .{ .bits = @intCast(byte_len * 8), .refs = 0 };
+    if (std.mem.eql(u8, param.type_name, "bool")) return BodyFootprintVariants.initOne(.{ .bits = 1, .refs = 0 });
+    if (std.mem.eql(u8, param.type_name, "address")) return BodyFootprintVariants.initOne(.{ .bits = 267, .refs = 0 });
+    if (fixedBytesLength(param.type_name)) |byte_len| return BodyFootprintVariants.initOne(.{ .bits = @intCast(byte_len * 8), .refs = 0 });
 
     if (std.mem.startsWith(u8, param.type_name, "uint")) {
-        return .{ .bits = parseSizedTypeBits(param.type_name, "uint", 64) catch return null, .refs = 0 };
+        return BodyFootprintVariants.initOne(.{
+            .bits = parseSizedTypeBits(param.type_name, "uint", 64) catch return null,
+            .refs = 0,
+        });
     }
     if (std.mem.startsWith(u8, param.type_name, "int")) {
-        return .{ .bits = parseSizedTypeBits(param.type_name, "int", 64) catch return null, .refs = 0 };
+        return BodyFootprintVariants.initOne(.{
+            .bits = parseSizedTypeBits(param.type_name, "int", 64) catch return null,
+            .refs = 0,
+        });
     }
 
     if (dictionaryTypeInfo(param.type_name)) |dict| {
         return switch (dict.storage) {
-            .by_ref => .{ .bits = 0, .refs = 1 },
+            .by_ref => BodyFootprintVariants.initOne(.{ .bits = 0, .refs = 1 }),
             .in_cell => null,
         };
     }
 
-    if (isRefCellLikeAbiType(param.type_name)) return .{ .bits = 0, .refs = 1 };
+    if (isRefCellLikeAbiType(param.type_name)) return BodyFootprintVariants.initOne(.{ .bits = 0, .refs = 1 });
 
     return null;
+}
+
+fn addBodyFootprintVariantSets(lhs: BodyFootprintVariants, rhs: BodyFootprintVariants) ?BodyFootprintVariants {
+    if (lhs.len == 0 or rhs.len == 0) return null;
+
+    var result = BodyFootprintVariants{};
+    for (lhs.slice()) |left| {
+        for (rhs.slice()) |right| {
+            const sum = addBodyFootprint(left, right) orelse return null;
+            result.add(sum) catch return null;
+        }
+    }
+    return result;
 }
 
 fn addBodyFootprint(lhs: BodyFootprint, rhs: BodyFootprint) ?BodyFootprint {
@@ -3538,12 +3600,52 @@ fn addBodyFootprint(lhs: BodyFootprint, rhs: BodyFootprint) ?BodyFootprint {
     };
 }
 
+fn bodyFootprintEql(lhs: BodyFootprint, rhs: BodyFootprint) bool {
+    return lhs.bits == rhs.bits and lhs.refs == rhs.refs;
+}
+
+fn resolveVariableBytesTrailingFootprint(
+    slice: *const cell.Slice,
+    variants: BodyFootprintVariants,
+) !?BodyFootprint {
+    if (variants.len == 0) return null;
+
+    var match: ?BodyFootprint = null;
+    for (variants.slice()) |candidate| {
+        if (slice.remainingRefs() != candidate.refs) continue;
+        if (slice.remainingBits() < candidate.bits) continue;
+
+        const prefix_bits = slice.remainingBits() - candidate.bits;
+        if (prefix_bits % 8 != 0) continue;
+
+        if (match != null and !bodyFootprintEql(match.?, candidate)) return error.InvalidAbiOutputs;
+        match = candidate;
+    }
+    return match;
+}
+
+fn resolveVariableBocTrailingFootprint(
+    slice: *const cell.Slice,
+    variants: BodyFootprintVariants,
+) !?BodyFootprint {
+    if (variants.len == 0) return null;
+
+    var match: ?BodyFootprint = null;
+    for (variants.slice()) |candidate| {
+        if (slice.remainingBits() < candidate.bits or slice.remainingRefs() < candidate.refs) continue;
+
+        if (match != null and !bodyFootprintEql(match.?, candidate)) return error.InvalidAbiOutputs;
+        match = candidate;
+    }
+    return match;
+}
+
 fn loadVariableBodyBytesAlloc(
     allocator: std.mem.Allocator,
     slice: *cell.Slice,
     context: BodyDecodeContext,
 ) ![]u8 {
-    const trailing = context.trailing_exact orelse {
+    const trailing = (try resolveVariableBytesTrailingFootprint(slice, context.trailing_variants)) orelse {
         if (!context.terminal) return error.UnsupportedAbiType;
         return loadRemainingBodyBytesAlloc(allocator, slice);
     };
@@ -3561,7 +3663,7 @@ fn buildVariableBodyBocAlloc(
     slice: *cell.Slice,
     context: BodyDecodeContext,
 ) ![]u8 {
-    const trailing = context.trailing_exact orelse {
+    const trailing = (try resolveVariableBocTrailingFootprint(slice, context.trailing_variants)) orelse {
         if (!context.terminal) return error.UnsupportedAbiType;
         return buildRemainingBodyBocAlloc(allocator, slice);
     };
@@ -4447,6 +4549,59 @@ test "abi adapter decodes function body with string before trailing scalar" {
     );
 }
 
+test "abi adapter decodes function body with string before optional and trailing scalar" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "set_note",
+        \\      "opcode": "0x0BADCAFE",
+        \\      "inputs": [
+        \\        {"name": "note", "type": "string"},
+        \\        {"name": "enabled", "type": "optional<bool>"},
+        \\        {"name": "mode", "type": "uint8"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var parsed = try parseAbiInfoJsonAlloc(allocator, json);
+    defer parsed.deinit(allocator);
+
+    const present_body = try buildFunctionBodyBocAlloc(allocator, parsed.abi.functions[0], &.{
+        .{ .text = "hello optional" },
+        .{ .uint = 1 },
+        .{ .uint = 7 },
+    });
+    defer allocator.free(present_body);
+
+    const present_decoded = try decodeFunctionBodyFromAbiJsonAlloc(allocator, &parsed.abi, null, present_body);
+    defer allocator.free(present_decoded);
+
+    try std.testing.expectEqualStrings(
+        "{\"note\":\"hello optional\",\"enabled\":true,\"mode\":7}",
+        present_decoded,
+    );
+
+    const absent_body = try buildFunctionBodyBocAlloc(allocator, parsed.abi.functions[0], &.{
+        .{ .text = "hello optional" },
+        .{ .null = {} },
+        .{ .uint = 9 },
+    });
+    defer allocator.free(absent_body);
+
+    const absent_decoded = try decodeFunctionBodyFromAbiJsonAlloc(allocator, &parsed.abi, null, absent_body);
+    defer allocator.free(absent_decoded);
+
+    try std.testing.expectEqualStrings(
+        "{\"note\":\"hello optional\",\"enabled\":null,\"mode\":9}",
+        absent_decoded,
+    );
+}
+
 test "abi adapter decodes opcode-less function body by explicit selector" {
     const allocator = std.testing.allocator;
     const json =
@@ -4594,6 +4749,75 @@ test "abi adapter decodes event body with inline cell before trailing scalar" {
     );
     defer allocator.free(expected);
     try std.testing.expectEqualStrings(expected, decoded);
+}
+
+test "abi adapter decodes event body with bytes before optional and trailing scalar" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "events": [
+        \\    {
+        \\      "name": "BytesPayloadSet",
+        \\      "opcode": "0x01020305",
+        \\      "inputs": [
+        \\        {"name": "payload", "type": "bytes"},
+        \\        {"name": "enabled", "type": "optional<bool>"},
+        \\        {"name": "mode", "type": "uint8"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    const payload_b64 = try base64EncodeAlloc(allocator, "memo");
+    defer allocator.free(payload_b64);
+
+    var parsed = try parseAbiInfoJsonAlloc(allocator, json);
+    defer parsed.deinit(allocator);
+
+    var present_builder = cell.Builder.init();
+    try present_builder.storeUint(0x01020305, 32);
+    try present_builder.storeBits("memo", 32);
+    try present_builder.storeUint(1, 1);
+    try present_builder.storeUint(1, 1);
+    try present_builder.storeUint(7, 8);
+    const present_body = try present_builder.toCell(allocator);
+    defer present_body.deinit(allocator);
+    const present_boc = try boc.serializeBoc(allocator, present_body);
+    defer allocator.free(present_boc);
+
+    const present_decoded = try decodeEventBodyFromAbiJsonAlloc(allocator, &parsed.abi, null, present_boc);
+    defer allocator.free(present_decoded);
+
+    const present_expected = try std.fmt.allocPrint(
+        allocator,
+        "{{\"payload\":\"{s}\",\"enabled\":true,\"mode\":7}}",
+        .{payload_b64},
+    );
+    defer allocator.free(present_expected);
+    try std.testing.expectEqualStrings(present_expected, present_decoded);
+
+    var absent_builder = cell.Builder.init();
+    try absent_builder.storeUint(0x01020305, 32);
+    try absent_builder.storeBits("memo", 32);
+    try absent_builder.storeUint(0, 1);
+    try absent_builder.storeUint(9, 8);
+    const absent_body = try absent_builder.toCell(allocator);
+    defer absent_body.deinit(allocator);
+    const absent_boc = try boc.serializeBoc(allocator, absent_body);
+    defer allocator.free(absent_boc);
+
+    const absent_decoded = try decodeEventBodyFromAbiJsonAlloc(allocator, &parsed.abi, null, absent_boc);
+    defer allocator.free(absent_decoded);
+
+    const absent_expected = try std.fmt.allocPrint(
+        allocator,
+        "{{\"payload\":\"{s}\",\"enabled\":null,\"mode\":9}}",
+        .{payload_b64},
+    );
+    defer allocator.free(absent_expected);
+    try std.testing.expectEqualStrings(absent_expected, absent_decoded);
 }
 
 test "abi adapter resolves overloaded functions by full selector" {
