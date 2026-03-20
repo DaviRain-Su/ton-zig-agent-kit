@@ -8,6 +8,8 @@ const jetton = @import("jetton.zig");
 pub const StandardBodyKind = enum {
     comment,
     jetton_transfer,
+    jetton_internal_transfer,
+    jetton_transfer_notification,
     jetton_burn,
     nft_transfer,
 };
@@ -15,6 +17,8 @@ pub const StandardBodyKind = enum {
 pub fn parseKind(text: []const u8) !StandardBodyKind {
     if (std.ascii.eqlIgnoreCase(text, "comment")) return .comment;
     if (std.ascii.eqlIgnoreCase(text, "jetton_transfer") or std.ascii.eqlIgnoreCase(text, "jetton-transfer")) return .jetton_transfer;
+    if (std.ascii.eqlIgnoreCase(text, "jetton_internal_transfer") or std.ascii.eqlIgnoreCase(text, "jetton-internal-transfer")) return .jetton_internal_transfer;
+    if (std.ascii.eqlIgnoreCase(text, "jetton_transfer_notification") or std.ascii.eqlIgnoreCase(text, "jetton-transfer-notification")) return .jetton_transfer_notification;
     if (std.ascii.eqlIgnoreCase(text, "jetton_burn") or std.ascii.eqlIgnoreCase(text, "jetton-burn")) return .jetton_burn;
     if (std.ascii.eqlIgnoreCase(text, "nft_transfer") or std.ascii.eqlIgnoreCase(text, "nft-transfer")) return .nft_transfer;
     return error.UnknownStandardBodyKind;
@@ -24,6 +28,8 @@ pub fn kindName(kind: StandardBodyKind) []const u8 {
     return switch (kind) {
         .comment => "comment",
         .jetton_transfer => "jetton_transfer",
+        .jetton_internal_transfer => "jetton_internal_transfer",
+        .jetton_transfer_notification => "jetton_transfer_notification",
         .jetton_burn => "jetton_burn",
         .nft_transfer => "nft_transfer",
     };
@@ -56,6 +62,8 @@ pub fn buildBodyFromJsonAlloc(
     return switch (kind) {
         .comment => buildCommentBodyBocAlloc(allocator, try getRequiredString(object, "comment")),
         .jetton_transfer => buildJettonTransferBodyAlloc(allocator, object),
+        .jetton_internal_transfer => buildJettonInternalTransferBodyAlloc(allocator, object),
+        .jetton_transfer_notification => buildJettonTransferNotificationBodyAlloc(allocator, object),
         .jetton_burn => buildJettonBurnBodyAlloc(allocator, object),
         .nft_transfer => buildNftTransferBodyAlloc(allocator, object),
     };
@@ -146,6 +154,54 @@ fn buildJettonBurnBodyAlloc(allocator: std.mem.Allocator, object: std.json.Objec
         amount,
         response_destination,
         custom_payload,
+    );
+}
+
+fn buildJettonInternalTransferBodyAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap) ![]u8 {
+    const query_id = try getOptionalU64(object, "query_id", 0);
+    const amount = try getRequiredU64(object, "amount");
+    const sender = try getRequiredString(object, "sender");
+    const response_address = try getRequiredString(object, "response_address");
+    const forward_ton_amount = try getOptionalU64(object, "forward_ton_amount", 0);
+
+    const forward_payload = try loadOptionalPayloadAlloc(
+        allocator,
+        object,
+        "forward_payload_boc_base64",
+        "forward_comment",
+    );
+    defer if (forward_payload) |value| allocator.free(value);
+
+    return jetton.createInternalTransferMessage(
+        allocator,
+        query_id,
+        amount,
+        sender,
+        response_address,
+        forward_ton_amount,
+        forward_payload,
+    );
+}
+
+fn buildJettonTransferNotificationBodyAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap) ![]u8 {
+    const query_id = try getOptionalU64(object, "query_id", 0);
+    const amount = try getRequiredU64(object, "amount");
+    const sender = try getRequiredString(object, "sender");
+
+    const forward_payload = try loadOptionalPayloadAlloc(
+        allocator,
+        object,
+        "forward_payload_boc_base64",
+        "forward_comment",
+    );
+    defer if (forward_payload) |value| allocator.free(value);
+
+    return jetton.createTransferNotificationMessage(
+        allocator,
+        query_id,
+        amount,
+        sender,
+        forward_payload,
     );
 }
 
@@ -276,6 +332,47 @@ test "standard body builds jetton transfer with forward comment" {
     defer analysis.deinit(allocator);
     try std.testing.expectEqualStrings("jetton_transfer", analysis.opcode_name.?);
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"forward_comment\":\"memo\"") != null);
+}
+
+test "standard body builds jetton internal transfer with forward comment" {
+    const allocator = std.testing.allocator;
+    const body_boc = try buildBodyFromJsonAlloc(allocator, .jetton_internal_transfer,
+        \\{
+        \\  "query_id": 7,
+        \\  "amount": 123,
+        \\  "sender": "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+        \\  "response_address": "0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        \\  "forward_ton_amount": 9,
+        \\  "forward_comment": "notify"
+        \\}
+    );
+    defer allocator.free(body_boc);
+
+    var analysis = try @import("../core/body_inspector.zig").inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("jetton_internal_transfer", analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"sender\":\"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"response_address\":\"0:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"forward_comment\":\"notify\"") != null);
+}
+
+test "standard body builds jetton transfer notification with forward comment" {
+    const allocator = std.testing.allocator;
+    const body_boc = try buildBodyFromJsonAlloc(allocator, .jetton_transfer_notification,
+        \\{
+        \\  "query_id": 3,
+        \\  "amount": 555,
+        \\  "sender": "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+        \\  "forward_comment": "airdrop"
+        \\}
+    );
+    defer allocator.free(body_boc);
+
+    var analysis = try @import("../core/body_inspector.zig").inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("jetton_transfer_notification", analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"sender\":\"0:83dfd552e63729b472fcbcc8c45ebcc6691702558b68ec7527e1ba403a0f31a8\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"forward_comment\":\"airdrop\"") != null);
 }
 
 test "standard body builds nft transfer with forward comment" {

@@ -3488,6 +3488,8 @@ fn printBodyAnalysis(allocator: std.mem.Allocator, body: *const Cell) void {
 fn standardBodyBuildTemplate(opcode_name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, opcode_name, "comment")) return "ton-zig-agent-kit cell build-standard comment @spec.json";
     if (std.mem.eql(u8, opcode_name, "jetton_transfer")) return "ton-zig-agent-kit cell build-standard jetton_transfer @spec.json";
+    if (std.mem.eql(u8, opcode_name, "jetton_internal_transfer")) return "ton-zig-agent-kit cell build-standard jetton_internal_transfer @spec.json";
+    if (std.mem.eql(u8, opcode_name, "jetton_transfer_notification")) return "ton-zig-agent-kit cell build-standard jetton_transfer_notification @spec.json";
     if (std.mem.eql(u8, opcode_name, "jetton_burn")) return "ton-zig-agent-kit cell build-standard jetton_burn @spec.json";
     if (std.mem.eql(u8, opcode_name, "nft_transfer")) return "ton-zig-agent-kit cell build-standard nft_transfer @spec.json";
     return null;

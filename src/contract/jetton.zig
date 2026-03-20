@@ -191,6 +191,66 @@ pub fn createTransferMessage(
     return try @import("../core/boc.zig").serializeBoc(allocator, c);
 }
 
+/// Create Jetton internal transfer message body
+pub fn createInternalTransferMessage(
+    allocator: std.mem.Allocator,
+    query_id: u64,
+    amount: u64,
+    sender: []const u8,
+    response_address: []const u8,
+    forward_ton_amount: u64,
+    forward_payload: ?[]const u8,
+) ![]u8 {
+    var builder = cell.Builder.init();
+
+    // op::internal_transfer = 0x178d4519
+    try builder.storeUint(0x178D4519, 32);
+    try builder.storeUint(query_id, 64);
+    try builder.storeCoins(amount);
+    try builder.storeAddress(sender);
+    try builder.storeAddress(response_address);
+    try builder.storeCoins(forward_ton_amount);
+    if (forward_payload) |payload| {
+        try builder.storeUint(1, 1); // forward_payload in ref
+        try body_builder.storeRefBoc(&builder, allocator, payload);
+    } else {
+        try builder.storeUint(0, 1); // empty inline payload
+    }
+
+    const c = try builder.toCell(allocator);
+    defer c.deinit(allocator);
+
+    return try @import("../core/boc.zig").serializeBoc(allocator, c);
+}
+
+/// Create Jetton transfer notification message body
+pub fn createTransferNotificationMessage(
+    allocator: std.mem.Allocator,
+    query_id: u64,
+    amount: u64,
+    sender: []const u8,
+    forward_payload: ?[]const u8,
+) ![]u8 {
+    var builder = cell.Builder.init();
+
+    // op::transfer_notification = 0x7362d09c
+    try builder.storeUint(0x7362D09C, 32);
+    try builder.storeUint(query_id, 64);
+    try builder.storeCoins(amount);
+    try builder.storeAddress(sender);
+    if (forward_payload) |payload| {
+        try builder.storeUint(1, 1); // forward_payload in ref
+        try body_builder.storeRefBoc(&builder, allocator, payload);
+    } else {
+        try builder.storeUint(0, 1); // empty inline payload
+    }
+
+    const c = try builder.toCell(allocator);
+    defer c.deinit(allocator);
+
+    return try @import("../core/boc.zig").serializeBoc(allocator, c);
+}
+
 /// Create Jetton burn message body
 pub fn createBurnMessage(
     allocator: std.mem.Allocator,
