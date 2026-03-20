@@ -92,55 +92,85 @@ fn decodeKnownBodyJsonAlloc(allocator: std.mem.Allocator, opcode: u32, slice: *c
     };
 }
 
-const PayloadText = struct {
+const PayloadAnalysis = struct {
     comment: ?[]u8 = null,
     tail_utf8: ?[]u8 = null,
+    boc_base64: ?[]u8 = null,
 
     fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         if (self.comment) |value| allocator.free(value);
         if (self.tail_utf8) |value| allocator.free(value);
+        if (self.boc_base64) |value| allocator.free(value);
         self.* = .{};
     }
 };
 
-fn inspectPayloadCellTextAlloc(allocator: std.mem.Allocator, value: *const cell.Cell) anyerror!PayloadText {
+const MaybePayloadRef = struct {
+    present: bool = false,
+    boc_base64: ?[]u8 = null,
+
+    fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.boc_base64) |value| allocator.free(value);
+        self.* = .{};
+    }
+};
+
+fn inspectPayloadCellAlloc(allocator: std.mem.Allocator, value: *const cell.Cell) anyerror!PayloadAnalysis {
     var nested = try inspectBodyCellAlloc(allocator, value);
     defer nested.deinit(allocator);
 
     return .{
         .comment = if (nested.comment) |text| try allocator.dupe(u8, text) else null,
         .tail_utf8 = if (nested.tail_utf8) |text| try allocator.dupe(u8, text) else null,
+        .boc_base64 = try serializeCellBocBase64Alloc(allocator, value),
     };
 }
 
-fn inspectPayloadSliceTextAlloc(allocator: std.mem.Allocator, payload: *cell.Slice) anyerror!PayloadText {
+fn inspectPayloadSliceAlloc(allocator: std.mem.Allocator, payload: *cell.Slice) anyerror!PayloadAnalysis {
     var slice_value = payload.*;
     if (slice_value.remainingBits() == 0 and slice_value.remainingRefs() == 0) return .{};
 
+    const boc_base64 = try serializeSliceBocBase64Alloc(allocator, &slice_value);
+    errdefer allocator.free(boc_base64);
+
     if (slice_value.remainingBits() < 32) {
-        return .{ .tail_utf8 = try maybeFlattenUtf8TailAlloc(allocator, &slice_value) };
+        return .{
+            .tail_utf8 = try maybeFlattenUtf8TailAlloc(allocator, &slice_value),
+            .boc_base64 = boc_base64,
+        };
     }
 
     const opcode: u32 = @intCast(try loadUintDynamic(&slice_value, 32));
     if (opcode == op_comment) {
-        return .{ .comment = try maybeFlattenUtf8TailAlloc(allocator, &slice_value) };
+        return .{
+            .comment = try maybeFlattenUtf8TailAlloc(allocator, &slice_value),
+            .boc_base64 = boc_base64,
+        };
     }
-    return .{ .tail_utf8 = try maybeFlattenUtf8TailAlloc(allocator, &slice_value) };
+    return .{
+        .tail_utf8 = try maybeFlattenUtf8TailAlloc(allocator, &slice_value),
+        .boc_base64 = boc_base64,
+    };
 }
 
-fn loadMaybeRefCell(slice: *cell.Slice) anyerror!bool {
+fn loadMaybeRefPayloadAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror!MaybePayloadRef {
     const has_ref = (try slice.loadUint(1)) == 1;
-    if (has_ref) _ = try slice.loadRef();
-    return has_ref;
+    if (!has_ref) return .{};
+
+    const payload = try slice.loadRef();
+    return .{
+        .present = true,
+        .boc_base64 = try serializeCellBocBase64Alloc(allocator, payload),
+    };
 }
 
-fn loadEitherPayloadTextAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror!PayloadText {
+fn loadEitherPayloadAnalysisAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror!PayloadAnalysis {
     const is_ref = (try slice.loadUint(1)) == 1;
     if (is_ref) {
         const payload = try slice.loadRef();
-        return inspectPayloadCellTextAlloc(allocator, payload);
+        return inspectPayloadCellAlloc(allocator, payload);
     }
-    return inspectPayloadSliceTextAlloc(allocator, slice);
+    return inspectPayloadSliceAlloc(allocator, slice);
 }
 
 fn decodeJettonTransferJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror![]u8 {
@@ -148,9 +178,10 @@ fn decodeJettonTransferJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slic
     const amount = try slice.loadCoins();
     const destination = try slice.loadAddress();
     const response_destination = try slice.loadAddress();
-    const has_custom_payload = try loadMaybeRefCell(slice);
+    var custom_payload = try loadMaybeRefPayloadAlloc(allocator, slice);
+    defer custom_payload.deinit(allocator);
     const forward_ton_amount = try slice.loadCoins();
-    var forward_payload = try loadEitherPayloadTextAlloc(allocator, slice);
+    var forward_payload = try loadEitherPayloadAnalysisAlloc(allocator, slice);
     defer forward_payload.deinit(allocator);
 
     const destination_raw = try address.formatRaw(allocator, &destination);
@@ -166,7 +197,7 @@ fn decodeJettonTransferJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slic
         destination_raw,
         "response_destination",
         response_destination_raw,
-        has_custom_payload,
+        &custom_payload,
         forward_ton_amount,
         &forward_payload,
     );
@@ -178,7 +209,7 @@ fn decodeJettonInternalTransferJsonAlloc(allocator: std.mem.Allocator, slice: *c
     const sender = try slice.loadAddress();
     const response_address = try slice.loadAddress();
     const forward_ton_amount = try slice.loadCoins();
-    var forward_payload = try loadEitherPayloadTextAlloc(allocator, slice);
+    var forward_payload = try loadEitherPayloadAnalysisAlloc(allocator, slice);
     defer forward_payload.deinit(allocator);
 
     const sender_raw = try address.formatRaw(allocator, &sender);
@@ -194,7 +225,7 @@ fn decodeJettonInternalTransferJsonAlloc(allocator: std.mem.Allocator, slice: *c
         sender_raw,
         "response_address",
         response_address_raw,
-        false,
+        null,
         forward_ton_amount,
         &forward_payload,
     );
@@ -204,7 +235,7 @@ fn decodeJettonTransferNotificationJsonAlloc(allocator: std.mem.Allocator, slice
     const query_id = try slice.loadUint(64);
     const amount = try slice.loadCoins();
     const sender = try slice.loadAddress();
-    var forward_payload = try loadEitherPayloadTextAlloc(allocator, slice);
+    var forward_payload = try loadEitherPayloadAnalysisAlloc(allocator, slice);
     defer forward_payload.deinit(allocator);
 
     const sender_raw = try address.formatRaw(allocator, &sender);
@@ -227,30 +258,33 @@ fn decodeJettonBurnJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) a
     const query_id = try slice.loadUint(64);
     const amount = try slice.loadCoins();
     const response_destination = try slice.loadAddress();
-    const has_custom_payload = try loadMaybeRefCell(slice);
+    var custom_payload = try loadMaybeRefPayloadAlloc(allocator, slice);
+    defer custom_payload.deinit(allocator);
 
     const response_destination_raw = try address.formatRaw(allocator, &response_destination);
     defer allocator.free(response_destination_raw);
 
-    return std.fmt.allocPrint(
-        allocator,
-        "{{\"query_id\":{d},\"amount\":{d},\"response_destination\":\"{s}\",\"custom_payload_ref\":{s}}}",
-        .{
-            query_id,
-            amount,
-            response_destination_raw,
-            if (has_custom_payload) "true" else "false",
-        },
-    );
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+    try writer.writer.writeAll("{\"query_id\":");
+    try writer.writer.print("{d}", .{query_id});
+    try writer.writer.writeAll(",\"amount\":");
+    try writer.writer.print("{d}", .{amount});
+    try writer.writer.writeAll(",\"response_destination\":");
+    try writeJsonString(&writer.writer, response_destination_raw);
+    try appendCustomPayloadJson(&writer.writer, &custom_payload);
+    try writer.writer.writeByte('}');
+    return try writer.toOwnedSlice();
 }
 
 fn decodeNftTransferJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror![]u8 {
     const query_id = try slice.loadUint(64);
     const new_owner = try slice.loadAddress();
     const response_destination = try slice.loadAddress();
-    const has_custom_payload = try loadMaybeRefCell(slice);
+    var custom_payload = try loadMaybeRefPayloadAlloc(allocator, slice);
+    defer custom_payload.deinit(allocator);
     const forward_amount = try slice.loadCoins();
-    var forward_payload = try loadEitherPayloadTextAlloc(allocator, slice);
+    var forward_payload = try loadEitherPayloadAnalysisAlloc(allocator, slice);
     defer forward_payload.deinit(allocator);
 
     const new_owner_raw = try address.formatRaw(allocator, &new_owner);
@@ -266,8 +300,7 @@ fn decodeNftTransferJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) 
     try writeJsonString(&writer.writer, new_owner_raw);
     try writer.writer.writeAll(",\"response_destination\":");
     try writeJsonString(&writer.writer, response_destination_raw);
-    try writer.writer.writeAll(",\"custom_payload_ref\":");
-    try writer.writer.writeAll(if (has_custom_payload) "true" else "false");
+    try appendCustomPayloadJson(&writer.writer, &custom_payload);
     try writer.writer.writeAll(",\"forward_amount\":");
     try writer.writer.print("{d}", .{forward_amount});
     try appendForwardPayloadJson(&writer.writer, &forward_payload);
@@ -283,9 +316,9 @@ fn buildTransferLikeJsonAlloc(
     first_addr_value: []const u8,
     second_addr_name: []const u8,
     second_addr_value: []const u8,
-    has_custom_payload: bool,
+    custom_payload: ?*const MaybePayloadRef,
     forward_ton_amount: u64,
-    forward_payload: *const PayloadText,
+    forward_payload: *const PayloadAnalysis,
 ) anyerror![]u8 {
     var writer = std.io.Writer.Allocating.init(allocator);
     errdefer writer.deinit();
@@ -301,8 +334,9 @@ fn buildTransferLikeJsonAlloc(
     try writeJsonString(&writer.writer, second_addr_name);
     try writer.writer.writeByte(':');
     try writeJsonString(&writer.writer, second_addr_value);
-    try writer.writer.writeAll(",\"custom_payload_ref\":");
-    try writer.writer.writeAll(if (has_custom_payload) "true" else "false");
+    if (custom_payload) |payload| {
+        try appendCustomPayloadJson(&writer.writer, payload);
+    }
     try writer.writer.writeAll(",\"forward_ton_amount\":");
     try writer.writer.print("{d}", .{forward_ton_amount});
     try appendForwardPayloadJson(&writer.writer, forward_payload);
@@ -310,7 +344,24 @@ fn buildTransferLikeJsonAlloc(
     return try writer.toOwnedSlice();
 }
 
-fn appendForwardPayloadJson(writer: anytype, payload: *const PayloadText) anyerror!void {
+fn appendCustomPayloadJson(writer: anytype, payload: *const MaybePayloadRef) anyerror!void {
+    try writer.writeAll(",\"custom_payload_ref\":");
+    try writer.writeAll(if (payload.present) "true" else "false");
+    try writer.writeAll(",\"custom_payload_boc_base64\":");
+    if (payload.boc_base64) |value| {
+        try writeJsonString(writer, value);
+    } else {
+        try writer.writeAll("null");
+    }
+}
+
+fn appendForwardPayloadJson(writer: anytype, payload: *const PayloadAnalysis) anyerror!void {
+    try writer.writeAll(",\"forward_payload_boc_base64\":");
+    if (payload.boc_base64) |value| {
+        try writeJsonString(writer, value);
+    } else {
+        try writer.writeAll("null");
+    }
     try writer.writeAll(",\"forward_comment\":");
     if (payload.comment) |value| {
         try writeJsonString(writer, value);
@@ -334,6 +385,27 @@ fn buildSimpleStringJsonAlloc(allocator: std.mem.Allocator, field_name: []const 
     try writeJsonString(&writer.writer, value);
     try writer.writer.writeByte('}');
     return try writer.toOwnedSlice();
+}
+
+fn serializeCellBocBase64Alloc(allocator: std.mem.Allocator, value: *const cell.Cell) ![]u8 {
+    const payload_boc = try boc.serializeBoc(allocator, @constCast(value));
+    defer allocator.free(payload_boc);
+
+    const encoded_len = std.base64.standard.Encoder.calcSize(payload_boc.len);
+    const encoded = try allocator.alloc(u8, encoded_len);
+    errdefer allocator.free(encoded);
+    _ = std.base64.standard.Encoder.encode(encoded, payload_boc);
+    return encoded;
+}
+
+fn serializeSliceBocBase64Alloc(allocator: std.mem.Allocator, slice: *cell.Slice) ![]u8 {
+    var builder = cell.Builder.init();
+    var copy = slice.*;
+    try builder.storeSlice(&copy);
+
+    const payload_cell = try builder.toCell(allocator);
+    defer payload_cell.deinit(allocator);
+    return serializeCellBocBase64Alloc(allocator, payload_cell);
 }
 
 fn writeJsonString(writer: anytype, value: []const u8) anyerror!void {
@@ -459,6 +531,8 @@ test "body inspector best-effort decodes jetton transfer" {
     defer payload.deinit(allocator);
     const payload_boc = try boc.serializeBoc(allocator, payload);
     defer allocator.free(payload_boc);
+    const payload_b64 = try serializeCellBocBase64Alloc(allocator, payload);
+    defer allocator.free(payload_b64);
 
     const body_boc = try @import("../contract/jetton.zig").createTransferMessage(
         allocator,
@@ -481,7 +555,40 @@ test "body inspector best-effort decodes jetton transfer" {
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"query_id\":7") != null);
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"amount\":1234") != null);
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"forward_ton_amount\":99") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"forward_payload_boc_base64\":\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, payload_b64) != null);
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"forward_comment\":\"memo\"") != null);
+}
+
+test "body inspector preserves custom payload boc in jetton burn" {
+    const allocator = std.testing.allocator;
+
+    var payload_builder = cell.Builder.init();
+    try payload_builder.storeUint(0xCAFE, 16);
+    const payload = try payload_builder.toCell(allocator);
+    defer payload.deinit(allocator);
+    const payload_boc = try boc.serializeBoc(allocator, payload);
+    defer allocator.free(payload_boc);
+    const payload_b64 = try serializeCellBocBase64Alloc(allocator, payload);
+    defer allocator.free(payload_b64);
+
+    const body_boc = try @import("../contract/jetton.zig").createBurnMessage(
+        allocator,
+        8,
+        777,
+        "0:2222222222222222222222222222222222222222222222222222222222222222",
+        payload_boc,
+    );
+    defer allocator.free(body_boc);
+
+    var analysis = try inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+
+    try std.testing.expectEqual(@as(?u32, op_jetton_burn), analysis.opcode);
+    try std.testing.expectEqualStrings("jetton_burn", analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"custom_payload_ref\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"custom_payload_boc_base64\":\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, payload_b64) != null);
 }
 
 test "body inspector best-effort decodes nft transfer" {
@@ -491,6 +598,8 @@ test "body inspector best-effort decodes nft transfer" {
     try payload_builder.storeUint(0, 32);
     try payload_builder.storeBits("gift", 32);
     const payload = try payload_builder.toCell(allocator);
+    const payload_b64 = try serializeCellBocBase64Alloc(allocator, payload);
+    defer allocator.free(payload_b64);
 
     var builder = cell.Builder.init();
     try builder.storeUint(op_nft_transfer, 32);
@@ -513,5 +622,7 @@ test "body inspector best-effort decodes nft transfer" {
     try std.testing.expectEqualStrings("nft_transfer", analysis.opcode_name.?);
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"query_id\":9") != null);
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"forward_amount\":11") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"forward_payload_boc_base64\":\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, payload_b64) != null);
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"forward_comment\":\"gift\"") != null);
 }
