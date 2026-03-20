@@ -764,10 +764,11 @@ fn parseTransactions(allocator: std.mem.Allocator, value: std.json.Value) ![]typ
 }
 
 fn parseTransaction(allocator: std.mem.Allocator, value: std.json.Value) !types.Transaction {
+    if (value != .object) return error.InvalidResponse;
     const object = value.object;
 
     var out_msgs: []*types.Message = &.{};
-    if (object.get("out_msgs")) |out_msgs_value| {
+    if (getFirstObjectValue(object, &.{ "out_msgs", "out_messages", "messages" })) |out_msgs_value| {
         if (out_msgs_value == .array) {
             out_msgs = try allocator.alloc(*types.Message, out_msgs_value.array.items.len);
             for (out_msgs_value.array.items, 0..) |out_msg, i| {
@@ -777,15 +778,16 @@ fn parseTransaction(allocator: std.mem.Allocator, value: std.json.Value) !types.
     }
 
     return types.Transaction{
-        .hash = try dupJsonString(allocator, object.get("hash") orelse return error.InvalidResponse),
-        .lt = try parseInt64Value(object.get("lt") orelse return error.InvalidResponse),
-        .timestamp = try parseInt64Value((object.get("now") orelse object.get("utime") orelse return error.InvalidResponse)),
-        .in_msg = if (object.get("in_msg")) |in_msg| try parseMessage(allocator, in_msg) else null,
+        .hash = try dupJsonString(allocator, getFirstObjectValue(object, &.{ "hash", "tx_hash" }) orelse return error.InvalidResponse),
+        .lt = try parseInt64Value(getFirstObjectValue(object, &.{ "lt", "logical_time" }) orelse return error.InvalidResponse),
+        .timestamp = try parseInt64Value(getFirstObjectValue(object, &.{ "now", "utime", "timestamp", "time" }) orelse return error.InvalidResponse),
+        .in_msg = if (getFirstObjectValue(object, &.{ "in_msg", "in_message" })) |in_msg| try parseMessage(allocator, in_msg) else null,
         .out_msgs = out_msgs,
     };
 }
 
 fn parseMessage(allocator: std.mem.Allocator, value: std.json.Value) !*types.Message {
+    if (value != .object) return error.InvalidResponse;
     const object = value.object;
     const msg = try allocator.create(types.Message);
     errdefer allocator.destroy(msg);
@@ -793,35 +795,135 @@ fn parseMessage(allocator: std.mem.Allocator, value: std.json.Value) !*types.Mes
     var raw_body: []u8 = &.{};
     var body_cell: ?*boc.Cell = null;
 
-    if (object.get("message_content")) |content| {
-        if (content == .object) {
-            if (content.object.get("body")) |body_value| {
-                if (body_value == .string and body_value.string.len > 0) {
-                    raw_body = try decodeBase64Standard(allocator, body_value.string);
-                    body_cell = boc.deserializeBoc(allocator, raw_body) catch null;
-                }
-            } else if (content.object.get("decoded")) |decoded_value| {
-                if (decoded_value == .string) {
-                    raw_body = try allocator.dupe(u8, decoded_value.string);
-                } else if (decoded_value == .object) {
-                    if (decoded_value.object.get("comment")) |comment_value| {
-                        raw_body = try dupJsonString(allocator, comment_value);
-                    }
-                }
-            }
-        }
+    if (getFirstObjectValue(object, &.{ "message_content", "msg_data", "content" })) |content| {
+        try applyMessageBodyValue(allocator, content, &raw_body, &body_cell);
+    }
+    if (getFirstObjectValue(object, &.{ "body", "boc", "base64", "hex" })) |content| {
+        try applyEncodedBodyValue(allocator, content, &raw_body, &body_cell);
+    }
+    if (getFirstObjectValue(object, &.{ "raw_body", "text", "decoded_body" })) |content| {
+        try applyDecodedBodyValue(allocator, content, &raw_body, &body_cell);
     }
 
     msg.* = .{
-        .hash = try dupJsonString(allocator, object.get("hash") orelse return error.InvalidResponse),
-        .source = try parseOptionalAddress(object.get("source")),
-        .destination = try parseOptionalAddress(object.get("destination")),
-        .value = if (object.get("value")) |value_field| try parseUint64Value(value_field) else 0,
+        .hash = try dupJsonString(allocator, getFirstObjectValue(object, &.{ "hash", "msg_hash" }) orelse return error.InvalidResponse),
+        .source = try parseOptionalAddress(getFirstObjectValue(object, &.{ "source", "src" })),
+        .destination = try parseOptionalAddress(getFirstObjectValue(object, &.{ "destination", "dst" })),
+        .value = if (getFirstObjectValue(object, &.{ "value", "amount" })) |value_field| try parseUint64Value(value_field) else 0,
         .body = body_cell,
         .raw_body = raw_body,
     };
 
     return msg;
+}
+
+fn getFirstObjectValue(object: std.json.ObjectMap, comptime keys: []const []const u8) ?std.json.Value {
+    inline for (keys) |key| {
+        if (object.get(key)) |value| return value;
+    }
+    return null;
+}
+
+fn applyMessageBodyValue(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+    raw_body: *[]u8,
+    body_cell: *?*boc.Cell,
+) anyerror!void {
+    switch (value) {
+        .object => |object| {
+            if (getFirstObjectValue(object, &.{ "body", "boc", "base64", "hex", "bytes", "data", "raw" })) |encoded| {
+                try applyEncodedBodyValue(allocator, encoded, raw_body, body_cell);
+            }
+            if (getFirstObjectValue(object, &.{ "decoded", "comment", "text", "raw_body" })) |decoded| {
+                try applyDecodedBodyValue(allocator, decoded, raw_body, body_cell);
+            }
+        },
+        .string => try applyDecodedBodyValue(allocator, value, raw_body, body_cell),
+        else => {},
+    }
+}
+
+fn applyEncodedBodyValue(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+    raw_body: *[]u8,
+    body_cell: *?*boc.Cell,
+) anyerror!void {
+    if (raw_body.*.len > 0 and body_cell.* != null) return;
+
+    switch (value) {
+        .object => |object| {
+            if (getFirstObjectValue(object, &.{ "body", "boc", "base64", "hex", "bytes", "data", "raw" })) |nested| {
+                try applyEncodedBodyValue(allocator, nested, raw_body, body_cell);
+            } else if (getFirstObjectValue(object, &.{ "text", "comment", "raw_body" })) |text| {
+                try applyDecodedBodyValue(allocator, text, raw_body, body_cell);
+            }
+        },
+        .string => |string| {
+            if (string.len == 0) return;
+            const decoded = if (looksLikeHexString(string))
+                try decodeHexString(allocator, string)
+            else
+                try decodeBase64Flexible(allocator, string);
+
+            if (raw_body.*.len == 0) {
+                raw_body.* = decoded;
+            } else {
+                allocator.free(decoded);
+            }
+
+            if (body_cell.* == null and raw_body.*.len > 0) {
+                body_cell.* = boc.deserializeBoc(allocator, raw_body.*) catch null;
+            }
+        },
+        else => {},
+    }
+}
+
+fn applyDecodedBodyValue(
+    allocator: std.mem.Allocator,
+    value: std.json.Value,
+    raw_body: *[]u8,
+    body_cell: *?*boc.Cell,
+) anyerror!void {
+    if (raw_body.*.len > 0) return;
+
+    switch (value) {
+        .string => |string| {
+            if (string.len == 0) return;
+            raw_body.* = try allocator.dupe(u8, string);
+        },
+        .object => |object| {
+            if (getFirstObjectValue(object, &.{ "comment", "text", "raw_body" })) |text| {
+                try applyDecodedBodyValue(allocator, text, raw_body, body_cell);
+            } else if (getFirstObjectValue(object, &.{ "body", "boc", "base64", "hex" })) |encoded| {
+                try applyEncodedBodyValue(allocator, encoded, raw_body, body_cell);
+            } else if (getFirstObjectValue(object, &.{ "decoded", "value", "data" })) |nested| {
+                try applyDecodedBodyValue(allocator, nested, raw_body, body_cell);
+            }
+        },
+        else => {},
+    }
+}
+
+fn looksLikeHexString(input: []const u8) bool {
+    const value = if (std.mem.startsWith(u8, input, "0x") or std.mem.startsWith(u8, input, "0X")) input[2..] else input;
+    if (value.len == 0 or value.len % 2 != 0) return false;
+
+    for (value) |char| {
+        switch (char) {
+            '0'...'9', 'a'...'f', 'A'...'F' => {},
+            else => return false,
+        }
+    }
+
+    return true;
+}
+
+fn decodeHexString(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    const value = if (std.mem.startsWith(u8, input, "0x") or std.mem.startsWith(u8, input, "0X")) input[2..] else input;
+    return decodeHex(allocator, value);
 }
 
 fn parseOptionalAddress(value: ?std.json.Value) !?types.Address {
@@ -1382,4 +1484,73 @@ test "parse v3 transaction payload" {
     try std.testing.expectEqual(@as(i64, 123), txs[0].lt);
     try std.testing.expect(txs[0].in_msg != null);
     try std.testing.expectEqual(@as(u16, 32), txs[0].in_msg.?.body.?.bit_len);
+}
+
+test "parse transaction payload aliases and body wrappers" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "transactions": [
+        \\    {
+        \\      "tx_hash": "tx_hash_alias",
+        \\      "logical_time": "789",
+        \\      "timestamp": "654",
+        \\      "in_message": {
+        \\        "msg_hash": "in_hash_alias",
+        \\        "src": "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+        \\        "dst": "EQCD39VS5jcptHL8vMjEXrzGaRcCVYto7HUn4bpAOg8xqB2N",
+        \\        "amount": "2000",
+        \\        "msg_data": {
+        \\          "body": {
+        \\            "base64": "te6cckEBAQEABgAACP/////btDe4"
+        \\          }
+        \\        }
+        \\      },
+        \\      "out_messages": [
+        \\        {
+        \\          "hash": "out_hash_text",
+        \\          "source": "EQCD39VS5jcptHL8vMjEXrzGaRcCVYto7HUn4bpAOg8xqB2N",
+        \\          "destination": "EQCD39VS5jcptHL8vMjEXrzGaRcCVYto7HUn4bpAOg8xqB2N",
+        \\          "value": "0",
+        \\          "msg_data": {
+        \\            "text": "plain comment"
+        \\          }
+        \\        },
+        \\        {
+        \\          "hash": "out_hash_boc",
+        \\          "source": "EQCD39VS5jcptHL8vMjEXrzGaRcCVYto7HUn4bpAOg8xqB2N",
+        \\          "destination": "EQCD39VS5jcptHL8vMjEXrzGaRcCVYto7HUn4bpAOg8xqB2N",
+        \\          "value": "0",
+        \\          "boc": "te6cckEBAQEABgAACP/////btDe4"
+        \\        }
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json, .{});
+    defer parsed.deinit();
+
+    const txs = try parseTransactions(allocator, parsed.value.object.get("transactions").?);
+    defer {
+        var client = TonHttpClient{
+            .allocator = allocator,
+            .base_url = "",
+            .api_key = null,
+            .http_client = .{ .allocator = allocator },
+        };
+        client.freeTransactions(txs);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), txs.len);
+    try std.testing.expectEqualStrings("tx_hash_alias", txs[0].hash);
+    try std.testing.expectEqual(@as(i64, 789), txs[0].lt);
+    try std.testing.expectEqual(@as(i64, 654), txs[0].timestamp);
+    try std.testing.expect(txs[0].in_msg != null);
+    try std.testing.expectEqual(@as(u64, 2000), txs[0].in_msg.?.value);
+    try std.testing.expectEqual(@as(u16, 32), txs[0].in_msg.?.body.?.bit_len);
+    try std.testing.expectEqual(@as(usize, 2), txs[0].out_msgs.len);
+    try std.testing.expectEqualStrings("plain comment", txs[0].out_msgs[0].raw_body);
+    try std.testing.expectEqual(@as(u16, 32), txs[0].out_msgs[1].body.?.bit_len);
 }
