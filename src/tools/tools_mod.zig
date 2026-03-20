@@ -945,6 +945,22 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 };
             }
 
+            if (std.mem.eql(u8, opcode_name, "excesses")) {
+                return .{
+                    .body_cli_template = try allocator.dupe(u8, "ton-zig-agent-kit cell build-standard excesses @spec.json"),
+                    .send_cli_template = if (is_incoming)
+                        try std.fmt.allocPrint(
+                            allocator,
+                            "ton-zig-agent-kit wallet send-standard <wallet_addr> {s} <amount_nanoton> excesses @spec.json",
+                            .{contract_address},
+                        )
+                    else
+                        null,
+                    .example_spec_json = null,
+                    .note = try allocator.dupe(u8, "Spec JSON: {\"query_id\":0}"),
+                };
+            }
+
             if (std.mem.eql(u8, opcode_name, "jetton_transfer")) {
                 return .{
                     .body_cli_template = try allocator.dupe(u8, "ton-zig-agent-kit cell build-standard jetton_transfer @spec.json"),
@@ -1009,6 +1025,22 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 };
             }
 
+            if (std.mem.eql(u8, opcode_name, "jetton_burn_notification")) {
+                return .{
+                    .body_cli_template = try allocator.dupe(u8, "ton-zig-agent-kit cell build-standard jetton_burn_notification @spec.json"),
+                    .send_cli_template = if (is_incoming)
+                        try std.fmt.allocPrint(
+                            allocator,
+                            "ton-zig-agent-kit wallet send-standard <wallet_addr> {s} <amount_nanoton> jetton_burn_notification @spec.json",
+                            .{contract_address},
+                        )
+                    else
+                        null,
+                    .example_spec_json = null,
+                    .note = try allocator.dupe(u8, "Spec JSON: {\"query_id\":0,\"amount\":0,\"sender\":\"0:...\",\"response_destination\":\"0:...\"}"),
+                };
+            }
+
             if (std.mem.eql(u8, opcode_name, "nft_transfer")) {
                 return .{
                     .body_cli_template = try allocator.dupe(u8, "ton-zig-agent-kit cell build-standard nft_transfer @spec.json"),
@@ -1022,6 +1054,22 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                         null,
                     .example_spec_json = null,
                     .note = try allocator.dupe(u8, "Spec JSON: {\"query_id\":0,\"new_owner\":\"0:...\",\"response_destination\":\"0:...\",\"forward_amount\":0,\"forward_comment\":\"<text>\"}"),
+                };
+            }
+
+            if (std.mem.eql(u8, opcode_name, "nft_ownership_assigned")) {
+                return .{
+                    .body_cli_template = try allocator.dupe(u8, "ton-zig-agent-kit cell build-standard nft_ownership_assigned @spec.json"),
+                    .send_cli_template = if (is_incoming)
+                        try std.fmt.allocPrint(
+                            allocator,
+                            "ton-zig-agent-kit wallet send-standard <wallet_addr> {s} <amount_nanoton> nft_ownership_assigned @spec.json",
+                            .{contract_address},
+                        )
+                    else
+                        null,
+                    .example_spec_json = null,
+                    .note = try allocator.dupe(u8, "Spec JSON: {\"query_id\":0,\"prev_owner\":\"0:...\",\"forward_comment\":\"<text>\"}"),
                 };
             }
 
@@ -6162,6 +6210,143 @@ test "agent tools inspectContract builds templates for observed jetton standard 
     try std.testing.expect(result.details_json != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"opcode_name\":\"jetton_internal_transfer\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.details_json.?, "\"opcode_name\":\"jetton_transfer_notification\"") != null);
+}
+
+test "agent tools inspectContract builds templates for additional standard messages without abi" {
+    const allocator = std.testing.allocator;
+
+    const incoming_body = try @import("../contract/standard_body.zig").createJettonBurnNotificationMessage(
+        allocator,
+        21,
+        444,
+        "0:1111111111111111111111111111111111111111111111111111111111111111",
+        "0:2222222222222222222222222222222222222222222222222222222222222222",
+    );
+    defer allocator.free(incoming_body);
+
+    const forward_payload = try @import("../contract/standard_body.zig").buildCommentBodyBocAlloc(allocator, "assigned");
+    defer allocator.free(forward_payload);
+
+    const outgoing_body = try @import("../contract/standard_body.zig").createNftOwnershipAssignedMessage(
+        allocator,
+        22,
+        "0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        forward_payload,
+    );
+    defer allocator.free(outgoing_body);
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+        incoming_body: []const u8,
+        outgoing_body: []const u8,
+
+        fn freeMessage(self: *@This(), msg: *core_types.Message) void {
+            if (msg.hash.len > 0) self.allocator.free(msg.hash);
+            if (msg.raw_body.len > 0) self.allocator.free(msg.raw_body);
+            if (msg.body) |body| body.deinit(self.allocator);
+            self.allocator.destroy(msg);
+        }
+
+        pub fn runGetMethod(self: *@This(), _: []const u8, _: []const u8, _: []const []const u8) anyerror!core_types.RunGetMethodResponse {
+            _ = self;
+            return error.InvalidResponse;
+        }
+
+        pub fn freeRunGetMethodResponse(self: *@This(), response: *core_types.RunGetMethodResponse) void {
+            _ = self;
+            _ = response;
+        }
+
+        pub fn getTransactions(self: *@This(), addr: []const u8, limit: u32) ![]core_types.Transaction {
+            _ = limit;
+
+            const txs = try self.allocator.alloc(core_types.Transaction, 1);
+            errdefer self.allocator.free(txs);
+
+            const in_msg = try self.allocator.create(core_types.Message);
+            errdefer self.allocator.destroy(in_msg);
+            const in_body = try boc.deserializeBoc(self.allocator, self.incoming_body);
+            errdefer in_body.deinit(self.allocator);
+            in_msg.* = .{
+                .hash = try self.allocator.dupe(u8, "inspect-extra-in"),
+                .source = try address_mod.parseAddress("0:9999999999999999999999999999999999999999999999999999999999999999"),
+                .destination = try address_mod.parseAddress(addr),
+                .value = 111,
+                .body = in_body,
+                .raw_body = &.{},
+            };
+
+            const out_msg = try self.allocator.create(core_types.Message);
+            errdefer self.allocator.destroy(out_msg);
+            const out_body = try boc.deserializeBoc(self.allocator, self.outgoing_body);
+            errdefer out_body.deinit(self.allocator);
+            out_msg.* = .{
+                .hash = try self.allocator.dupe(u8, "inspect-extra-out"),
+                .source = try address_mod.parseAddress(addr),
+                .destination = try address_mod.parseAddress("0:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"),
+                .value = 22,
+                .body = out_body,
+                .raw_body = &.{},
+            };
+
+            const out_msgs = try self.allocator.alloc(*core_types.Message, 1);
+            errdefer self.allocator.free(out_msgs);
+            out_msgs[0] = out_msg;
+
+            txs[0] = .{
+                .hash = try self.allocator.dupe(u8, "inspect-extra-tx"),
+                .lt = 77,
+                .timestamp = 88,
+                .in_msg = in_msg,
+                .out_msgs = out_msgs,
+            };
+            return txs;
+        }
+
+        pub fn freeTransactions(self: *@This(), txs: []core_types.Transaction) void {
+            for (txs) |*tx| self.freeTransaction(tx);
+            if (txs.len > 0) self.allocator.free(txs);
+        }
+
+        pub fn freeTransaction(self: *@This(), tx: *core_types.Transaction) void {
+            if (tx.hash.len > 0) self.allocator.free(tx.hash);
+            if (tx.in_msg) |msg| self.freeMessage(msg);
+            for (tx.out_msgs) |msg| self.freeMessage(msg);
+            if (tx.out_msgs.len > 0) self.allocator.free(tx.out_msgs);
+            tx.* = undefined;
+        }
+    };
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    var client = FakeClient{
+        .allocator = allocator,
+        .incoming_body = incoming_body,
+        .outgoing_body = outgoing_body,
+    };
+    var tools = FakeTools.init(allocator, &client, .{ .rpc_url = "https://example.invalid" });
+
+    var result = try tools.inspectContract("0:3333333333333333333333333333333333333333333333333333333333333333");
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqual(@as(usize, 2), result.observed_messages.len);
+
+    try std.testing.expectEqualStrings("jetton_burn_notification", result.observed_messages[0].opcode_name.?);
+    try std.testing.expectEqualStrings(
+        "ton-zig-agent-kit cell build-standard jetton_burn_notification @spec.json",
+        result.observed_messages[0].template.?.body_cli_template.?,
+    );
+    try std.testing.expect(result.observed_messages[0].template.?.example_spec_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.observed_messages[0].template.?.example_spec_json.?, "\"amount\":444") != null);
+
+    try std.testing.expectEqualStrings("nft_ownership_assigned", result.observed_messages[1].opcode_name.?);
+    try std.testing.expectEqualStrings(
+        "ton-zig-agent-kit cell build-standard nft_ownership_assigned @spec.json",
+        result.observed_messages[1].template.?.body_cli_template.?,
+    );
+    try std.testing.expect(result.observed_messages[1].template.?.send_cli_template == null);
+    try std.testing.expect(result.observed_messages[1].template.?.example_spec_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.observed_messages[1].template.?.example_spec_json.?, "\"forward_comment\":\"assigned\"") != null);
 }
 
 test "agent tools describeAbi returns structured templates for direct source" {

@@ -7,31 +7,40 @@ const jetton = @import("jetton.zig");
 
 pub const StandardBodyKind = enum {
     comment,
+    excesses,
     jetton_transfer,
     jetton_internal_transfer,
     jetton_transfer_notification,
     jetton_burn,
+    jetton_burn_notification,
     nft_transfer,
+    nft_ownership_assigned,
 };
 
 pub fn parseKind(text: []const u8) !StandardBodyKind {
     if (std.ascii.eqlIgnoreCase(text, "comment")) return .comment;
+    if (std.ascii.eqlIgnoreCase(text, "excesses")) return .excesses;
     if (std.ascii.eqlIgnoreCase(text, "jetton_transfer") or std.ascii.eqlIgnoreCase(text, "jetton-transfer")) return .jetton_transfer;
     if (std.ascii.eqlIgnoreCase(text, "jetton_internal_transfer") or std.ascii.eqlIgnoreCase(text, "jetton-internal-transfer")) return .jetton_internal_transfer;
     if (std.ascii.eqlIgnoreCase(text, "jetton_transfer_notification") or std.ascii.eqlIgnoreCase(text, "jetton-transfer-notification")) return .jetton_transfer_notification;
     if (std.ascii.eqlIgnoreCase(text, "jetton_burn") or std.ascii.eqlIgnoreCase(text, "jetton-burn")) return .jetton_burn;
+    if (std.ascii.eqlIgnoreCase(text, "jetton_burn_notification") or std.ascii.eqlIgnoreCase(text, "jetton-burn-notification")) return .jetton_burn_notification;
     if (std.ascii.eqlIgnoreCase(text, "nft_transfer") or std.ascii.eqlIgnoreCase(text, "nft-transfer")) return .nft_transfer;
+    if (std.ascii.eqlIgnoreCase(text, "nft_ownership_assigned") or std.ascii.eqlIgnoreCase(text, "nft-ownership-assigned") or std.ascii.eqlIgnoreCase(text, "ownership_assigned") or std.ascii.eqlIgnoreCase(text, "ownership-assigned")) return .nft_ownership_assigned;
     return error.UnknownStandardBodyKind;
 }
 
 pub fn kindName(kind: StandardBodyKind) []const u8 {
     return switch (kind) {
         .comment => "comment",
+        .excesses => "excesses",
         .jetton_transfer => "jetton_transfer",
         .jetton_internal_transfer => "jetton_internal_transfer",
         .jetton_transfer_notification => "jetton_transfer_notification",
         .jetton_burn => "jetton_burn",
+        .jetton_burn_notification => "jetton_burn_notification",
         .nft_transfer => "nft_transfer",
+        .nft_ownership_assigned => "nft_ownership_assigned",
     };
 }
 
@@ -61,11 +70,14 @@ pub fn buildBodyFromJsonAlloc(
 
     return switch (kind) {
         .comment => buildCommentBodyBocAlloc(allocator, try getRequiredString(object, "comment")),
+        .excesses => buildExcessesBodyAlloc(allocator, object),
         .jetton_transfer => buildJettonTransferBodyAlloc(allocator, object),
         .jetton_internal_transfer => buildJettonInternalTransferBodyAlloc(allocator, object),
         .jetton_transfer_notification => buildJettonTransferNotificationBodyAlloc(allocator, object),
         .jetton_burn => buildJettonBurnBodyAlloc(allocator, object),
+        .jetton_burn_notification => buildJettonBurnNotificationBodyAlloc(allocator, object),
         .nft_transfer => buildNftTransferBodyAlloc(allocator, object),
+        .nft_ownership_assigned => buildNftOwnershipAssignedBodyAlloc(allocator, object),
     };
 }
 
@@ -73,6 +85,33 @@ pub fn buildCommentBodyBocAlloc(allocator: std.mem.Allocator, comment: []const u
     var builder = cell.Builder.init();
     try builder.storeUint(0, 32);
     try builder.storeBits(comment, @intCast(comment.len * 8));
+    const root = try builder.toCell(allocator);
+    defer root.deinit(allocator);
+    return boc.serializeBoc(allocator, root);
+}
+
+pub fn createExcessesMessage(allocator: std.mem.Allocator, query_id: u64) ![]u8 {
+    var builder = cell.Builder.init();
+    try builder.storeUint(0xD53276DB, 32);
+    try builder.storeUint(query_id, 64);
+    const root = try builder.toCell(allocator);
+    defer root.deinit(allocator);
+    return boc.serializeBoc(allocator, root);
+}
+
+pub fn createJettonBurnNotificationMessage(
+    allocator: std.mem.Allocator,
+    query_id: u64,
+    amount: u64,
+    sender: []const u8,
+    response_destination: []const u8,
+) ![]u8 {
+    var builder = cell.Builder.init();
+    try builder.storeUint(0x7BDD97DE, 32);
+    try builder.storeUint(query_id, 64);
+    try builder.storeCoins(amount);
+    try builder.storeAddress(sender);
+    try builder.storeAddress(response_destination);
     const root = try builder.toCell(allocator);
     defer root.deinit(allocator);
     return boc.serializeBoc(allocator, root);
@@ -109,6 +148,32 @@ pub fn createNftTransferMessage(
     const root = try builder.toCell(allocator);
     defer root.deinit(allocator);
     return boc.serializeBoc(allocator, root);
+}
+
+pub fn createNftOwnershipAssignedMessage(
+    allocator: std.mem.Allocator,
+    query_id: u64,
+    prev_owner: []const u8,
+    forward_payload: ?[]const u8,
+) ![]u8 {
+    var builder = cell.Builder.init();
+    try builder.storeUint(0x05138D91, 32);
+    try builder.storeUint(query_id, 64);
+    try builder.storeAddress(prev_owner);
+    if (forward_payload) |payload| {
+        try builder.storeUint(1, 1);
+        try body_builder.storeRefBoc(&builder, allocator, payload);
+    } else {
+        try builder.storeUint(0, 1);
+    }
+
+    const root = try builder.toCell(allocator);
+    defer root.deinit(allocator);
+    return boc.serializeBoc(allocator, root);
+}
+
+fn buildExcessesBodyAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap) ![]u8 {
+    return createExcessesMessage(allocator, try getOptionalU64(object, "query_id", 0));
 }
 
 fn buildJettonTransferBodyAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap) ![]u8 {
@@ -154,6 +219,16 @@ fn buildJettonBurnBodyAlloc(allocator: std.mem.Allocator, object: std.json.Objec
         amount,
         response_destination,
         custom_payload,
+    );
+}
+
+fn buildJettonBurnNotificationBodyAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap) ![]u8 {
+    return createJettonBurnNotificationMessage(
+        allocator,
+        try getOptionalU64(object, "query_id", 0),
+        try getRequiredU64(object, "amount"),
+        try getRequiredString(object, "sender"),
+        try getRequiredString(object, "response_destination"),
     );
 }
 
@@ -229,6 +304,23 @@ fn buildNftTransferBodyAlloc(allocator: std.mem.Allocator, object: std.json.Obje
         response_destination,
         custom_payload,
         forward_amount,
+        forward_payload,
+    );
+}
+
+fn buildNftOwnershipAssignedBodyAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap) ![]u8 {
+    const forward_payload = try loadOptionalPayloadAlloc(
+        allocator,
+        object,
+        "forward_payload_boc_base64",
+        "forward_comment",
+    );
+    defer if (forward_payload) |value| allocator.free(value);
+
+    return createNftOwnershipAssignedMessage(
+        allocator,
+        try getOptionalU64(object, "query_id", 0),
+        try getRequiredString(object, "prev_owner"),
         forward_payload,
     );
 }
@@ -314,6 +406,17 @@ test "standard body builds comment body from json" {
     try std.testing.expectEqualStrings("hello", analysis.comment.?);
 }
 
+test "standard body builds excesses body from json" {
+    const allocator = std.testing.allocator;
+    const body_boc = try buildBodyFromJsonAlloc(allocator, .excesses, "{\"query_id\":44}");
+    defer allocator.free(body_boc);
+
+    var analysis = try @import("../core/body_inspector.zig").inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("excesses", analysis.opcode_name.?);
+    try std.testing.expectEqualStrings("{\"query_id\":44}", analysis.decoded_json.?);
+}
+
 test "standard body builds jetton transfer with forward comment" {
     const allocator = std.testing.allocator;
     const body_boc = try buildBodyFromJsonAlloc(allocator, .jetton_transfer,
@@ -375,6 +478,26 @@ test "standard body builds jetton transfer notification with forward comment" {
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"forward_comment\":\"airdrop\"") != null);
 }
 
+test "standard body builds jetton burn notification" {
+    const allocator = std.testing.allocator;
+    const body_boc = try buildBodyFromJsonAlloc(allocator, .jetton_burn_notification,
+        \\{
+        \\  "query_id": 19,
+        \\  "amount": 777,
+        \\  "sender": "0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        \\  "response_destination": "0:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+        \\}
+    );
+    defer allocator.free(body_boc);
+
+    var analysis = try @import("../core/body_inspector.zig").inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("jetton_burn_notification", analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"amount\":777") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"sender\":\"0:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"response_destination\":\"0:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"") != null);
+}
+
 test "standard body builds nft transfer with forward comment" {
     const allocator = std.testing.allocator;
     const body_boc = try buildBodyFromJsonAlloc(allocator, .nft_transfer,
@@ -392,4 +515,22 @@ test "standard body builds nft transfer with forward comment" {
     defer analysis.deinit(allocator);
     try std.testing.expectEqualStrings("nft_transfer", analysis.opcode_name.?);
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"forward_comment\":\"gift\"") != null);
+}
+
+test "standard body builds nft ownership assigned with forward comment" {
+    const allocator = std.testing.allocator;
+    const body_boc = try buildBodyFromJsonAlloc(allocator, .nft_ownership_assigned,
+        \\{
+        \\  "query_id": 6,
+        \\  "prev_owner": "0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        \\  "forward_comment": "assigned"
+        \\}
+    );
+    defer allocator.free(body_boc);
+
+    var analysis = try @import("../core/body_inspector.zig").inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("nft_ownership_assigned", analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"prev_owner\":\"0:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"forward_comment\":\"assigned\"") != null);
 }
