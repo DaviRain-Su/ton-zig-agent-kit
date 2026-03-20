@@ -533,8 +533,9 @@ fn AgentToolsImpl(comptime ClientType: type) type {
 
         fn deriveConfiguredWalletRawAddressAlloc(self: *@This()) ![]u8 {
             const private_key = self.config.wallet_private_key orelse return error.MissingWalletPrivateKey;
-            var wallet_init = try signing.deriveWalletV4InitFromPrivateKeyAlloc(
+            var wallet_init = try signing.deriveWalletInitFromPrivateKeyAlloc(
                 self.allocator,
+                self.config.wallet_version,
                 self.config.wallet_workchain,
                 self.config.wallet_id,
                 private_key,
@@ -544,8 +545,9 @@ fn AgentToolsImpl(comptime ClientType: type) type {
         }
 
         fn buildWalletInitResultAlloc(self: *@This(), private_key: [32]u8) !tools_types.WalletInitResult {
-            var wallet_init = try signing.deriveWalletV4InitFromPrivateKeyAlloc(
+            var wallet_init = try signing.deriveWalletInitFromPrivateKeyAlloc(
                 self.allocator,
+                self.config.wallet_version,
                 self.config.wallet_workchain,
                 self.config.wallet_id,
                 private_key,
@@ -569,6 +571,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             return tools_types.WalletInitResult{
                 .raw_address = raw_address,
                 .user_friendly_address = user_friendly_address,
+                .wallet_version = wallet_init.version,
                 .workchain = self.config.wallet_workchain,
                 .wallet_id = self.config.wallet_id,
                 .public_key_hex = public_key_hex,
@@ -720,6 +723,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 .wallet_address = wallet_address,
                 .destination = owned_destination,
                 .amount = amount,
+                .wallet_version = built.version,
                 .wallet_id = built.wallet_id,
                 .seqno = built.seqno,
                 .external_boc = external_boc,
@@ -2325,7 +2329,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             };
         }
 
-        /// Derive the default wallet v4 address and StateInit from the configured private key.
+        /// Derive the configured wallet address and StateInit from the configured private key.
         pub fn deriveWalletInit(self: *@This()) !tools_types.WalletInitResult {
             const private_key = self.config.wallet_private_key orelse {
                 return tools_types.WalletInitResult{
@@ -3125,7 +3129,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             return self.sendWalletMessages(destination, amount, msgs);
         }
 
-        /// Deploy the configured wallet itself using its derived v4 address and StateInit.
+        /// Deploy the configured wallet itself using its derived address and StateInit.
         pub fn deployWalletSelf(self: *@This()) !tools_types.SendResult {
             const private_key = self.config.wallet_private_key orelse {
                 return tools_types.SendResult{
@@ -3152,7 +3156,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
 
             const result = signing.deployWallet(
                 self.client,
-                .v4,
+                self.config.wallet_version,
                 private_key,
                 self.config.wallet_workchain,
                 self.config.wallet_id,
@@ -3185,7 +3189,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
 
             var built = signing.buildWalletDeploymentAlloc(
                 self.allocator,
-                .v4,
+                self.config.wallet_version,
                 private_key,
                 self.config.wallet_workchain,
                 self.config.wallet_id,
@@ -3215,7 +3219,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
 
             const result = signing.sendInitialTransfer(
                 self.client,
-                .v4,
+                self.config.wallet_version,
                 private_key,
                 self.config.wallet_workchain,
                 self.config.wallet_id,
@@ -4059,7 +4063,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
 
             const result = signing.sendMessagesAuto(
                 self.client,
-                .auto,
+                self.config.wallet_version,
                 private_key,
                 self.config.wallet_address,
                 self.config.wallet_workchain,
@@ -4178,6 +4182,7 @@ test "agent tools deriveWalletInit matches signing helper" {
     defer allocator.free(result.state_init_boc);
 
     try std.testing.expect(result.success);
+    try std.testing.expectEqual(signing.WalletVersion.v4, result.wallet_version);
 
     var expected = try signing.deriveWalletV4InitFromPrivateKeyAlloc(allocator, -1, 0xA1B2C3D4, keypair[0]);
     defer expected.deinit(allocator);
@@ -4187,6 +4192,40 @@ test "agent tools deriveWalletInit matches signing helper" {
     try std.testing.expectEqualStrings(expected_raw, result.raw_address);
     try std.testing.expectEqual(@as(i8, -1), result.workchain);
     try std.testing.expectEqual(@as(u32, 0xA1B2C3D4), result.wallet_id);
+}
+
+test "agent tools deriveWalletInit supports wallet v5" {
+    const allocator = std.testing.allocator;
+
+    const FakeClient = struct {};
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    var client = FakeClient{};
+    const keypair = try signing.generateKeypair("tools-wallet-init-v5");
+    const config = tools_types.AgentToolsConfig{
+        .rpc_url = "https://example.invalid",
+        .wallet_private_key = keypair[0],
+        .wallet_version = .v5,
+        .wallet_workchain = 0,
+        .wallet_id = signing.default_wallet_id_v5_mainnet,
+    };
+
+    var tools = FakeTools.init(allocator, &client, config);
+    const result = try tools.deriveWalletInit();
+    defer allocator.free(result.raw_address);
+    defer allocator.free(result.user_friendly_address);
+    defer allocator.free(result.public_key_hex);
+    defer allocator.free(result.state_init_boc);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqual(signing.WalletVersion.v5, result.wallet_version);
+
+    var expected = try signing.deriveWalletV5InitFromPrivateKeyAlloc(allocator, 0, signing.default_wallet_id_v5_mainnet, keypair[0]);
+    defer expected.deinit(allocator);
+    const expected_raw = try address_mod.formatRaw(allocator, &expected.address);
+    defer allocator.free(expected_raw);
+
+    try std.testing.expectEqualStrings(expected_raw, result.raw_address);
 }
 
 test "agent tools deployWalletSelf submits derived wallet deployment" {
@@ -4245,6 +4284,7 @@ test "agent tools buildWalletSelfDeploy builds wallet deployment external messag
     defer result.deinit(allocator);
 
     try std.testing.expect(result.success);
+    try std.testing.expectEqual(signing.WalletVersion.v4, result.wallet_version);
     try std.testing.expect(result.state_init_attached);
     try std.testing.expectEqual(@as(u32, 0), result.seqno);
     try std.testing.expectEqualStrings(result.wallet_address, result.destination);

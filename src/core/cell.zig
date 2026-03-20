@@ -26,10 +26,9 @@ pub const Cell = struct {
     }
 
     pub fn deinit(self: *Cell, allocator: std.mem.Allocator) void {
-        for (self.refs[0..self.ref_cnt]) |ref| {
-            if (ref) |r| r.deinit(allocator);
-        }
-        allocator.destroy(self);
+        var visited = std.AutoHashMap(*Cell, void).init(allocator);
+        defer visited.deinit();
+        self.deinitTracked(allocator, &visited);
     }
 
     pub fn toSlice(self: *Cell) Slice {
@@ -83,6 +82,18 @@ pub const Cell = struct {
             pos += 32;
         }
         return pos;
+    }
+
+    fn deinitTracked(self: *Cell, allocator: std.mem.Allocator, visited: *std.AutoHashMap(*Cell, void)) void {
+        const entry = visited.getOrPut(self) catch {
+            return;
+        };
+        if (entry.found_existing) return;
+
+        for (self.refs[0..self.ref_cnt]) |ref| {
+            if (ref) |r| r.deinitTracked(allocator, visited);
+        }
+        allocator.destroy(self);
     }
 };
 

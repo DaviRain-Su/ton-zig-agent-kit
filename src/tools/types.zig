@@ -374,6 +374,7 @@ pub const BuiltWalletMessageResult = struct {
     wallet_address: []const u8,
     destination: []const u8,
     amount: u64,
+    wallet_version: signing.WalletVersion = .v4,
     wallet_id: u32,
     seqno: u32,
     external_boc: []const u8,
@@ -403,6 +404,7 @@ pub const AgentToolsConfig = struct {
     api_key: ?[]const u8 = null,
     wallet_address: ?[]const u8 = null,
     wallet_private_key: ?[32]u8 = null,
+    wallet_version: signing.WalletVersion = .v4,
     wallet_workchain: i8 = 0,
     wallet_id: u32 = signing.default_wallet_id_v4,
 };
@@ -410,6 +412,7 @@ pub const AgentToolsConfig = struct {
 pub const WalletInitResult = struct {
     raw_address: []const u8,
     user_friendly_address: []const u8,
+    wallet_version: signing.WalletVersion = .v4,
     workchain: i8,
     wallet_id: u32,
     public_key_hex: []const u8,
