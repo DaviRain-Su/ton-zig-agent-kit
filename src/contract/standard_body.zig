@@ -17,6 +17,8 @@ pub const StandardBodyKind = enum {
     jetton_burn_notification,
     nft_get_static_data,
     nft_report_static_data,
+    nft_get_royalty_params,
+    nft_report_royalty_params,
     nft_transfer,
     nft_ownership_assigned,
 };
@@ -33,6 +35,8 @@ pub fn parseKind(text: []const u8) !StandardBodyKind {
     if (std.ascii.eqlIgnoreCase(text, "jetton_burn_notification") or std.ascii.eqlIgnoreCase(text, "jetton-burn-notification")) return .jetton_burn_notification;
     if (std.ascii.eqlIgnoreCase(text, "nft_get_static_data") or std.ascii.eqlIgnoreCase(text, "nft-get-static-data") or std.ascii.eqlIgnoreCase(text, "get_static_data") or std.ascii.eqlIgnoreCase(text, "get-static-data")) return .nft_get_static_data;
     if (std.ascii.eqlIgnoreCase(text, "nft_report_static_data") or std.ascii.eqlIgnoreCase(text, "nft-report-static-data") or std.ascii.eqlIgnoreCase(text, "report_static_data") or std.ascii.eqlIgnoreCase(text, "report-static-data")) return .nft_report_static_data;
+    if (std.ascii.eqlIgnoreCase(text, "nft_get_royalty_params") or std.ascii.eqlIgnoreCase(text, "nft-get-royalty-params") or std.ascii.eqlIgnoreCase(text, "get_royalty_params") or std.ascii.eqlIgnoreCase(text, "get-royalty-params")) return .nft_get_royalty_params;
+    if (std.ascii.eqlIgnoreCase(text, "nft_report_royalty_params") or std.ascii.eqlIgnoreCase(text, "nft-report-royalty-params") or std.ascii.eqlIgnoreCase(text, "report_royalty_params") or std.ascii.eqlIgnoreCase(text, "report-royalty-params")) return .nft_report_royalty_params;
     if (std.ascii.eqlIgnoreCase(text, "nft_transfer") or std.ascii.eqlIgnoreCase(text, "nft-transfer")) return .nft_transfer;
     if (std.ascii.eqlIgnoreCase(text, "nft_ownership_assigned") or std.ascii.eqlIgnoreCase(text, "nft-ownership-assigned") or std.ascii.eqlIgnoreCase(text, "ownership_assigned") or std.ascii.eqlIgnoreCase(text, "ownership-assigned")) return .nft_ownership_assigned;
     return error.UnknownStandardBodyKind;
@@ -51,6 +55,8 @@ pub fn kindName(kind: StandardBodyKind) []const u8 {
         .jetton_burn_notification => "jetton_burn_notification",
         .nft_get_static_data => "nft_get_static_data",
         .nft_report_static_data => "nft_report_static_data",
+        .nft_get_royalty_params => "nft_get_royalty_params",
+        .nft_report_royalty_params => "nft_report_royalty_params",
         .nft_transfer => "nft_transfer",
         .nft_ownership_assigned => "nft_ownership_assigned",
     };
@@ -92,6 +98,8 @@ pub fn buildBodyFromJsonAlloc(
         .jetton_burn_notification => buildJettonBurnNotificationBodyAlloc(allocator, object),
         .nft_get_static_data => buildNftGetStaticDataBodyAlloc(allocator, object),
         .nft_report_static_data => buildNftReportStaticDataBodyAlloc(allocator, object),
+        .nft_get_royalty_params => buildNftGetRoyaltyParamsBodyAlloc(allocator, object),
+        .nft_report_royalty_params => buildNftReportRoyaltyParamsBodyAlloc(allocator, object),
         .nft_transfer => buildNftTransferBodyAlloc(allocator, object),
         .nft_ownership_assigned => buildNftOwnershipAssignedBodyAlloc(allocator, object),
     };
@@ -193,6 +201,33 @@ pub fn createNftReportStaticDataMessage(
     try builder.storeUint(query_id, 64);
     try builder.storeUintBytes(index_bytes, 256);
     try builder.storeAddress(collection);
+    const root = try builder.toCell(allocator);
+    defer root.deinit(allocator);
+    return boc.serializeBoc(allocator, root);
+}
+
+pub fn createNftGetRoyaltyParamsMessage(allocator: std.mem.Allocator, query_id: u64) ![]u8 {
+    var builder = cell.Builder.init();
+    try builder.storeUint(0x693D3950, 32);
+    try builder.storeUint(query_id, 64);
+    const root = try builder.toCell(allocator);
+    defer root.deinit(allocator);
+    return boc.serializeBoc(allocator, root);
+}
+
+pub fn createNftReportRoyaltyParamsMessage(
+    allocator: std.mem.Allocator,
+    query_id: u64,
+    numerator: u16,
+    denominator: u16,
+    destination: []const u8,
+) ![]u8 {
+    var builder = cell.Builder.init();
+    try builder.storeUint(0xA8CB00AD, 32);
+    try builder.storeUint(query_id, 64);
+    try builder.storeUint(numerator, 16);
+    try builder.storeUint(denominator, 16);
+    try builder.storeAddress(destination);
     const root = try builder.toCell(allocator);
     defer root.deinit(allocator);
     return boc.serializeBoc(allocator, root);
@@ -344,6 +379,20 @@ fn buildNftReportStaticDataBodyAlloc(allocator: std.mem.Allocator, object: std.j
         try getOptionalU64(object, "query_id", 0),
         index_bytes,
         try getRequiredString(object, "collection"),
+    );
+}
+
+fn buildNftGetRoyaltyParamsBodyAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap) ![]u8 {
+    return createNftGetRoyaltyParamsMessage(allocator, try getOptionalU64(object, "query_id", 0));
+}
+
+fn buildNftReportRoyaltyParamsBodyAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap) ![]u8 {
+    return createNftReportRoyaltyParamsMessage(
+        allocator,
+        try getOptionalU64(object, "query_id", 0),
+        @intCast(try getRequiredU64(object, "numerator")),
+        @intCast(try getRequiredU64(object, "denominator")),
+        try getRequiredString(object, "destination"),
     );
 }
 
@@ -787,6 +836,37 @@ test "standard body builds nft report static data" {
     try std.testing.expectEqualStrings("nft_report_static_data", analysis.opcode_name.?);
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"index\":\"0x1234\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"collection\":\"0:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"") != null);
+}
+
+test "standard body builds nft get royalty params" {
+    const allocator = std.testing.allocator;
+    const body_boc = try buildBodyFromJsonAlloc(allocator, .nft_get_royalty_params, "{\"query_id\":10}");
+    defer allocator.free(body_boc);
+
+    var analysis = try @import("../core/body_inspector.zig").inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("nft_get_royalty_params", analysis.opcode_name.?);
+    try std.testing.expectEqualStrings("{\"query_id\":10}", analysis.decoded_json.?);
+}
+
+test "standard body builds nft report royalty params" {
+    const allocator = std.testing.allocator;
+    const body_boc = try buildBodyFromJsonAlloc(allocator, .nft_report_royalty_params,
+        \\{
+        \\  "query_id": 11,
+        \\  "numerator": 25,
+        \\  "denominator": 1000,
+        \\  "destination": "0:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD"
+        \\}
+    );
+    defer allocator.free(body_boc);
+
+    var analysis = try @import("../core/body_inspector.zig").inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("nft_report_royalty_params", analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"numerator\":25") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"denominator\":1000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"destination\":\"0:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"") != null);
 }
 
 test "standard body builds nft transfer with forward comment" {

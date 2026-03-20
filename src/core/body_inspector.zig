@@ -35,6 +35,8 @@ const op_jetton_burn: u32 = 0x595F07BC;
 const op_jetton_burn_notification: u32 = 0x7BDD97DE;
 const op_nft_get_static_data: u32 = 0x2FCB26A2;
 const op_nft_report_static_data: u32 = 0x8B771735;
+const op_nft_get_royalty_params: u32 = 0x693D3950;
+const op_nft_report_royalty_params: u32 = 0xA8CB00AD;
 const op_nft_transfer: u32 = 0x5FCC3D14;
 const op_nft_ownership_assigned: u32 = 0x05138D91;
 
@@ -89,6 +91,8 @@ fn knownOpcodeName(opcode: u32) ?[]const u8 {
         op_jetton_burn_notification => "jetton_burn_notification",
         op_nft_get_static_data => "nft_get_static_data",
         op_nft_report_static_data => "nft_report_static_data",
+        op_nft_get_royalty_params => "nft_get_royalty_params",
+        op_nft_report_royalty_params => "nft_report_royalty_params",
         op_nft_transfer => "nft_transfer",
         op_nft_ownership_assigned => "nft_ownership_assigned",
         else => null,
@@ -107,6 +111,8 @@ fn decodeKnownBodyJsonAlloc(allocator: std.mem.Allocator, opcode: u32, slice: *c
         op_jetton_burn_notification => try decodeJettonBurnNotificationJsonAlloc(allocator, slice),
         op_nft_get_static_data => try decodeNftGetStaticDataJsonAlloc(allocator, slice),
         op_nft_report_static_data => try decodeNftReportStaticDataJsonAlloc(allocator, slice),
+        op_nft_get_royalty_params => try decodeNftGetRoyaltyParamsJsonAlloc(allocator, slice),
+        op_nft_report_royalty_params => try decodeNftReportRoyaltyParamsJsonAlloc(allocator, slice),
         op_nft_transfer => try decodeNftTransferJsonAlloc(allocator, slice),
         op_nft_ownership_assigned => try decodeNftOwnershipAssignedJsonAlloc(allocator, slice),
         else => null,
@@ -416,6 +422,39 @@ fn decodeNftReportStaticDataJsonAlloc(allocator: std.mem.Allocator, slice: *cell
     try writeJsonString(&writer.writer, index);
     try writer.writer.writeAll(",\"collection\":");
     try writeJsonString(&writer.writer, collection_raw);
+    try writer.writer.writeByte('}');
+    return try writer.toOwnedSlice();
+}
+
+fn decodeNftGetRoyaltyParamsJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror![]u8 {
+    const query_id = try slice.loadUint(64);
+
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+    try writer.writer.writeAll("{\"query_id\":");
+    try writer.writer.print("{d}", .{query_id});
+    try writer.writer.writeByte('}');
+    return try writer.toOwnedSlice();
+}
+
+fn decodeNftReportRoyaltyParamsJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror![]u8 {
+    const query_id = try slice.loadUint(64);
+    const numerator = try slice.loadUint16();
+    const denominator = try slice.loadUint16();
+    const destination = try slice.loadAddress();
+    const destination_raw = try address.formatRaw(allocator, &destination);
+    defer allocator.free(destination_raw);
+
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+    try writer.writer.writeAll("{\"query_id\":");
+    try writer.writer.print("{d}", .{query_id});
+    try writer.writer.writeAll(",\"numerator\":");
+    try writer.writer.print("{d}", .{numerator});
+    try writer.writer.writeAll(",\"denominator\":");
+    try writer.writer.print("{d}", .{denominator});
+    try writer.writer.writeAll(",\"destination\":");
+    try writeJsonString(&writer.writer, destination_raw);
     try writer.writer.writeByte('}');
     return try writer.toOwnedSlice();
 }
@@ -943,6 +982,42 @@ test "body inspector best-effort decodes nft report static data" {
     try std.testing.expectEqualStrings("nft_report_static_data", analysis.opcode_name.?);
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"index\":\"0x1234\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"collection\":\"0:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"") != null);
+}
+
+test "body inspector best-effort decodes nft get royalty params" {
+    const allocator = std.testing.allocator;
+
+    const body_boc = try @import("../contract/standard_body.zig").createNftGetRoyaltyParamsMessage(allocator, 20);
+    defer allocator.free(body_boc);
+
+    var analysis = try inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+
+    try std.testing.expectEqual(@as(?u32, op_nft_get_royalty_params), analysis.opcode);
+    try std.testing.expectEqualStrings("nft_get_royalty_params", analysis.opcode_name.?);
+    try std.testing.expectEqualStrings("{\"query_id\":20}", analysis.decoded_json.?);
+}
+
+test "body inspector best-effort decodes nft report royalty params" {
+    const allocator = std.testing.allocator;
+
+    const body_boc = try @import("../contract/standard_body.zig").createNftReportRoyaltyParamsMessage(
+        allocator,
+        21,
+        25,
+        1000,
+        "0:DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+    );
+    defer allocator.free(body_boc);
+
+    var analysis = try inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+
+    try std.testing.expectEqual(@as(?u32, op_nft_report_royalty_params), analysis.opcode);
+    try std.testing.expectEqualStrings("nft_report_royalty_params", analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"numerator\":25") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"denominator\":1000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"destination\":\"0:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"") != null);
 }
 
 test "body inspector best-effort decodes nft ownership assigned" {
