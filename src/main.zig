@@ -1381,8 +1381,9 @@ pub fn main() !void {
             const info = try signing.getWalletInfo(&provider, wallet_addr);
             std.debug.print("Wallet info:\n", .{});
             std.debug.print("  Address: {s}\n", .{wallet_addr});
+            std.debug.print("  Version: {s}\n", .{signing.walletVersionName(info.version)});
             std.debug.print("  Seqno: {d}\n", .{info.seqno});
-            std.debug.print("  Subwallet ID: {d} (0x{X:0>8})\n", .{ info.wallet_id, info.wallet_id });
+            std.debug.print("  Wallet ID: {d} (0x{X:0>8})\n", .{ info.wallet_id, info.wallet_id });
             std.debug.print("  Public key: ", .{});
             for (info.public_key) |byte| {
                 std.debug.print("{X:0>2}", .{byte});
@@ -1924,7 +1925,7 @@ pub fn main() !void {
             };
             const private_key = wallet_keys.private_key_seed;
 
-            var result = try signing.sendTransfer(&provider, .v4, private_key, wallet_addr, dest, amount, null);
+            var result = try signing.sendTransfer(&provider, .auto, private_key, wallet_addr, dest, amount, null);
             defer provider.freeSendBocResponse(&result);
 
             std.debug.print("Transfer submitted:\n", .{});
@@ -1952,7 +1953,7 @@ pub fn main() !void {
             };
             const private_key = wallet_keys.private_key_seed;
 
-            var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
+            var result = try signing.sendBody(&provider, .auto, private_key, wallet_addr, dest, amount, body);
             defer provider.freeSendBocResponse(&result);
 
             std.debug.print("Contract message submitted:\n", .{});
@@ -1980,7 +1981,7 @@ pub fn main() !void {
             };
             const private_key = wallet_keys.private_key_seed;
 
-            var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
+            var result = try signing.sendBody(&provider, .auto, private_key, wallet_addr, dest, amount, body);
             defer provider.freeSendBocResponse(&result);
 
             std.debug.print("Contract message submitted:\n", .{});
@@ -2008,7 +2009,7 @@ pub fn main() !void {
             };
             const private_key = wallet_keys.private_key_seed;
 
-            var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
+            var result = try signing.sendBody(&provider, .auto, private_key, wallet_addr, dest, amount, body);
             defer provider.freeSendBocResponse(&result);
 
             std.debug.print("Standard contract message submitted:\n", .{});
@@ -2041,7 +2042,7 @@ pub fn main() !void {
             };
             const private_key = wallet_keys.private_key_seed;
 
-            var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
+            var result = try signing.sendBody(&provider, .auto, private_key, wallet_addr, dest, amount, body);
             defer provider.freeSendBocResponse(&result);
 
             std.debug.print("Typed contract message submitted:\n", .{});
@@ -2083,7 +2084,7 @@ pub fn main() !void {
             };
             const private_key = wallet_keys.private_key_seed;
 
-            var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
+            var result = try signing.sendBody(&provider, .auto, private_key, wallet_addr, dest, amount, body);
             defer provider.freeSendBocResponse(&result);
 
             std.debug.print("Function contract message submitted:\n", .{});
@@ -2126,7 +2127,7 @@ pub fn main() !void {
             };
             const private_key = wallet_keys.private_key_seed;
 
-            var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
+            var result = try signing.sendBody(&provider, .auto, private_key, wallet_addr, dest, amount, body);
             defer provider.freeSendBocResponse(&result);
 
             std.debug.print("ABI contract message submitted:\n", .{});
@@ -2173,7 +2174,7 @@ pub fn main() !void {
             };
             const private_key = wallet_keys.private_key_seed;
 
-            var result = try signing.sendBody(&provider, .v4, private_key, wallet_addr, dest, amount, body);
+            var result = try signing.sendBody(&provider, .auto, private_key, wallet_addr, dest, amount, body);
             defer provider.freeSendBocResponse(&result);
 
             std.debug.print("Auto ABI contract message submitted:\n", .{});
@@ -2209,7 +2210,7 @@ pub fn main() !void {
             };
             const private_key = wallet_keys.private_key_seed;
 
-            var result = try signing.sendDeploy(&provider, .v4, private_key, wallet_addr, dest, amount, state_init_boc, body_boc);
+            var result = try signing.sendDeploy(&provider, .auto, private_key, wallet_addr, dest, amount, state_init_boc, body_boc);
             defer provider.freeSendBocResponse(&result);
 
             std.debug.print("Deploy message submitted:\n", .{});
@@ -2248,7 +2249,7 @@ pub fn main() !void {
             };
             const private_key = wallet_keys.private_key_seed;
 
-            var result = try signing.sendDeploy(&provider, .v4, private_key, wallet_addr, dest_raw, amount, state_init_boc, body_boc);
+            var result = try signing.sendDeploy(&provider, .auto, private_key, wallet_addr, dest_raw, amount, state_init_boc, body_boc);
             defer provider.freeSendBocResponse(&result);
 
             std.debug.print("Deploy message submitted:\n", .{});
@@ -3103,7 +3104,7 @@ fn buildCliWalletSignedMessageAuto(
     return signing.buildSignedMessagesAutoAlloc(
         provider,
         allocator,
-        .v4,
+        .auto,
         private_key,
         null,
         0,
@@ -3125,6 +3126,7 @@ fn printBuiltWalletExternalMessage(
 
     std.debug.print("Built signed wallet external message:\n", .{});
     std.debug.print("  Wallet: {s}\n", .{built.wallet_address});
+    std.debug.print("  Version: {s}\n", .{signing.walletVersionName(built.version)});
     std.debug.print("  Destination: {s}\n", .{destination});
     std.debug.print("  Amount: {d}\n", .{amount});
     std.debug.print("  Wallet ID: {d} (0x{X:0>8})\n", .{ built.wallet_id, built.wallet_id });

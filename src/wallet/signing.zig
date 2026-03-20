@@ -11,16 +11,40 @@ const generic_contract = @import("../contract/contract.zig");
 
 const Ed25519 = std.crypto.sign.Ed25519;
 pub const default_wallet_id_v4: u32 = 698983191;
+pub const default_wallet_id_v5_mainnet: u32 = 2147483409;
+pub const default_wallet_id_v5_testnet: u32 = 2147483645;
 const simple_send_opcode: u32 = 0;
+const wallet_v5_auth_signed_external: u32 = 0x7369676e;
+const wallet_v5_action_send_msg: u32 = 0x0ec3c86d;
 const wallet_v4r2_code_boc_hex =
     "B5EE9C72410214010002D4000114FF00F4A413F4BCF2C80B010201200203020148040504F8F28308D71820D31FD31FD31F02F823BBF264ED44D0D31FD31FD3FFF404D15143BAF2A15151BAF2A205F901541064F910F2A3F80024A4C8CB1F5240CB1F5230CBFF5210F400C9ED54F80F01D30721C0009F6C519320D74A96D307D402FB00E830E021C001E30021C002E30001C0039130E30D03A4C8CB1F12CB1FCBFF1011121302E6D001D0D3032171B0925F04E022D749C120925F04E002D31F218210706C7567BD22821064737472BDB0925F05E003FA403020FA4401C8CA07CBFFC9D0ED44D0810140D721F404305C810108F40A6FA131B3925F07E005D33FC8258210706C7567BA923830E30D03821064737472BA925F06E30D06070201200809007801FA00F40430F8276F2230500AA121BEF2E0508210706C7567831EB17080185004CB0526CF1658FA0219F400CB6917CB1F5260CB3F20C98040FB0006008A5004810108F45930ED44D0810140D720C801CF16F400C9ED540172B08E23821064737472831EB17080185005CB055003CF1623FA0213CB6ACB1FCB3FC98040FB00925F03E20201200A0B0059BD242B6F6A2684080A06B90FA0218470D4080847A4937D29910CE6903E9FF9837812801B7810148987159F31840201580C0D0011B8C97ED44D0D70B1F8003DB29DFB513420405035C87D010C00B23281F2FFF274006040423D029BE84C600201200E0F0019ADCE76A26840206B90EB85FFC00019AF1DF6A26840106B90EB858FC0006ED207FA00D4D422F90005C8CA0715CBFFC9D077748018C8CB05CB0222CF165005FA0214CB6B12CCCCC973FB00C84014810108F451F2A7020070810108D718FA00D33FC8542047810108F451F2A782106E6F746570748018C8CB05CB025006CF165004FA0214CB6A12CB1FCB3FC973FB0002006C810108D718FA00D33F305224810108F459F2A782106473747270748018C8CB05CB025005CF165003FA0213CB6ACB1F12CB3FC973FB00000AF400C9ED54696225E5";
 const wallet_v4r2_code_hash_base64 = "/rX/aCDi/w2Ug+fg1iyBfYRniftK5YDIeIZtlZ2r1cA=";
 
 pub const WalletVersion = enum {
+    auto,
     v2,
     v3,
     v4,
+    v5,
 };
+
+pub fn walletVersionName(version: WalletVersion) []const u8 {
+    return switch (version) {
+        .auto => "auto",
+        .v2 => "v2",
+        .v3 => "v3",
+        .v4 => "v4",
+        .v5 => "v5",
+    };
+}
+
+fn defaultWalletIdForVersion(version: WalletVersion) !u32 {
+    return switch (version) {
+        .v4 => default_wallet_id_v4,
+        .v5 => default_wallet_id_v5_mainnet,
+        else => error.UnsupportedWalletVersion,
+    };
+}
 
 pub const WalletMessage = struct {
     destination: []const u8,
@@ -36,6 +60,7 @@ pub const WalletInfo = struct {
     seqno: u32,
     wallet_id: u32,
     public_key: [32]u8,
+    version: WalletVersion = .v4,
 };
 
 pub const WalletV4Init = struct {
@@ -56,6 +81,7 @@ pub const BuiltWalletExternalMessage = struct {
     state_init_attached: bool,
     wallet_id: u32,
     seqno: u32,
+    version: WalletVersion = .v4,
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         if (self.wallet_address.len > 0) allocator.free(self.wallet_address);
@@ -285,6 +311,87 @@ fn createWalletV4SigningPayloadCell(
     return builder.toCell(allocator);
 }
 
+fn createWalletV5SendActionCell(
+    allocator: std.mem.Allocator,
+    msg: WalletMessage,
+) !*cell.Cell {
+    var builder = cell.Builder.init();
+    errdefer deinitBuilderRefs(allocator, &builder);
+
+    try builder.storeUint(wallet_v5_action_send_msg, 32);
+    try builder.storeUint(msg.mode, 8);
+    const out_msg = try createInternalTransferMessageCell(allocator, msg);
+    try builder.storeRef(out_msg);
+    return builder.toCell(allocator);
+}
+
+fn createEmptyCell(allocator: std.mem.Allocator) !*cell.Cell {
+    var builder = cell.Builder.init();
+    return builder.toCell(allocator);
+}
+
+fn createWalletV5OutListCell(
+    allocator: std.mem.Allocator,
+    messages: []const WalletMessage,
+) !*cell.Cell {
+    var prev = try createEmptyCell(allocator);
+    errdefer prev.deinit(allocator);
+
+    for (messages) |msg| {
+        const action_cell = try createWalletV5SendActionCell(allocator, msg);
+        errdefer action_cell.deinit(allocator);
+
+        var builder = cell.Builder.init();
+        errdefer deinitBuilderRefs(allocator, &builder);
+        try builder.storeRef(prev);
+        var action_slice = action_cell.toSlice();
+        try builder.storeSlice(&action_slice);
+
+        const next = try builder.toCell(allocator);
+        destroyCellShallow(allocator, action_cell);
+        prev = next;
+    }
+
+    return prev;
+}
+
+fn storeWalletV5InnerRequest(
+    builder: *cell.Builder,
+    allocator: std.mem.Allocator,
+    messages: []const WalletMessage,
+) !void {
+    if (messages.len > 255) return error.TooManyMessages;
+
+    if (messages.len > 0) {
+        const out_list = try createWalletV5OutListCell(allocator, messages);
+        try builder.storeUint(1, 1); // out_actions present
+        try builder.storeRef(out_list);
+    } else {
+        try builder.storeUint(0, 1); // no out_actions
+    }
+
+    try builder.storeUint(0, 1); // no extended actions
+}
+
+fn createWalletV5SigningPayloadCell(
+    allocator: std.mem.Allocator,
+    wallet_id: u32,
+    seqno: u32,
+    valid_until: u32,
+    messages: []const WalletMessage,
+) !*cell.Cell {
+    var builder = cell.Builder.init();
+    errdefer deinitBuilderRefs(allocator, &builder);
+
+    try builder.storeUint(wallet_v5_auth_signed_external, 32);
+    try builder.storeUint(wallet_id, 32);
+    try builder.storeUint(valid_until, 32);
+    try builder.storeUint(seqno, 32);
+    try storeWalletV5InnerRequest(&builder, allocator, messages);
+
+    return builder.toCell(allocator);
+}
+
 fn createSignedBodyCell(
     allocator: std.mem.Allocator,
     private_key_seed: [32]u8,
@@ -304,6 +411,27 @@ fn createSignedBodyCell(
     var payload_slice = payload_cell.toSlice();
     try builder.storeSlice(&payload_slice);
 
+    return builder.toCell(allocator);
+}
+
+fn createWalletV5SignedBodyCell(
+    allocator: std.mem.Allocator,
+    private_key_seed: [32]u8,
+    wallet_id: u32,
+    seqno: u32,
+    valid_until: u32,
+    messages: []const WalletMessage,
+) !*cell.Cell {
+    const payload_cell = try createWalletV5SigningPayloadCell(allocator, wallet_id, seqno, valid_until, messages);
+    defer destroyCellShallow(allocator, payload_cell);
+
+    const signature = try signMessage(private_key_seed, &payload_cell.hash());
+
+    var builder = cell.Builder.init();
+    errdefer deinitBuilderRefs(allocator, &builder);
+    var payload_slice = payload_cell.toSlice();
+    try builder.storeSlice(&payload_slice);
+    try builder.storeBits(&signature, signature.len * 8);
     return builder.toCell(allocator);
 }
 
@@ -335,6 +463,24 @@ fn createWalletV4ExternalMessageWithId(
     errdefer signed_body.deinit(allocator);
 
     const ext_msg = try createExternalIncomingMessageCell(allocator, wallet_addr, signed_body, state_init_boc);
+    defer ext_msg.deinit(allocator);
+
+    return boc.serializeBoc(allocator, ext_msg);
+}
+
+fn createWalletV5ExternalMessageWithId(
+    allocator: std.mem.Allocator,
+    private_key_seed: [32]u8,
+    wallet_addr: []const u8,
+    wallet_id: u32,
+    seqno: u32,
+    valid_until: u32,
+    messages: []const WalletMessage,
+) ![]u8 {
+    const signed_body = try createWalletV5SignedBodyCell(allocator, private_key_seed, wallet_id, seqno, valid_until, messages);
+    errdefer signed_body.deinit(allocator);
+
+    const ext_msg = try createExternalIncomingMessageCell(allocator, wallet_addr, signed_body, null);
     defer ext_msg.deinit(allocator);
 
     return boc.serializeBoc(allocator, ext_msg);
@@ -377,8 +523,6 @@ pub fn createSignedTransfer(
     seqno: u32,
     msgs: []const WalletMessage,
 ) ![]u8 {
-    if (version != .v4) return error.UnsupportedWalletVersion;
-
     const valid_until = @as(u32, @intCast(std.time.timestamp())) + 60;
 
     return createSignedTransferWithWalletId(
@@ -386,7 +530,7 @@ pub fn createSignedTransfer(
         version,
         private_key,
         wallet_address,
-        default_wallet_id_v4,
+        try defaultWalletIdForVersion(version),
         seqno,
         msgs,
         valid_until,
@@ -403,18 +547,28 @@ pub fn createSignedTransferWithWalletId(
     msgs: []const WalletMessage,
     valid_until: u32,
 ) ![]u8 {
-    if (version != .v4) return error.UnsupportedWalletVersion;
-
-    return createWalletV4ExternalMessageWithId(
-        allocator,
-        private_key,
-        wallet_address,
-        wallet_id,
-        seqno,
-        valid_until,
-        msgs,
-        null,
-    );
+    return switch (version) {
+        .v4 => createWalletV4ExternalMessageWithId(
+            allocator,
+            private_key,
+            wallet_address,
+            wallet_id,
+            seqno,
+            valid_until,
+            msgs,
+            null,
+        ),
+        .v5 => createWalletV5ExternalMessageWithId(
+            allocator,
+            private_key,
+            wallet_address,
+            wallet_id,
+            seqno,
+            valid_until,
+            msgs,
+        ),
+        else => error.UnsupportedWalletVersion,
+    };
 }
 
 /// Get seqno from wallet
@@ -443,6 +597,14 @@ pub fn getSubwalletId(client: anytype, wallet_address: []const u8) !u32 {
     return generic_contract.stackEntryAsUnsigned(u32, &result.stack[0]);
 }
 
+pub fn getWalletId(client: anytype, wallet_address: []const u8) !u32 {
+    var result = try client.runGetMethod(wallet_address, "get_wallet_id", &.{});
+    defer client.freeRunGetMethodResponse(&result);
+
+    if (result.stack.len == 0) return error.InvalidResponse;
+    return generic_contract.stackEntryAsUnsigned(u32, &result.stack[0]);
+}
+
 pub fn getPublicKey(client: anytype, wallet_address: []const u8) ![32]u8 {
     var result = try client.runGetMethod(wallet_address, "get_public_key", &.{});
     defer client.freeRunGetMethodResponse(&result);
@@ -452,10 +614,23 @@ pub fn getPublicKey(client: anytype, wallet_address: []const u8) ![32]u8 {
 }
 
 pub fn getWalletInfo(client: anytype, wallet_address: []const u8) !WalletInfo {
+    const seqno = try getSeqno(client, wallet_address);
+    const public_key = try getPublicKey(client, wallet_address);
+
+    if (getWalletId(client, wallet_address)) |wallet_id| {
+        return .{
+            .seqno = seqno,
+            .wallet_id = wallet_id,
+            .public_key = public_key,
+            .version = .v5,
+        };
+    } else |_| {}
+
     return .{
-        .seqno = try getSeqno(client, wallet_address),
+        .seqno = seqno,
         .wallet_id = try getSubwalletId(client, wallet_address),
-        .public_key = try getPublicKey(client, wallet_address),
+        .public_key = public_key,
+        .version = .v4,
     };
 }
 
@@ -604,6 +779,7 @@ pub fn buildInitialMessagesAlloc(
         .state_init_attached = true,
         .wallet_id = wallet_id,
         .seqno = 0,
+        .version = .v4,
     };
 }
 
@@ -689,9 +865,33 @@ pub fn sendMessages(
     wallet_address: []const u8,
     msgs: []const WalletMessage,
 ) !types.SendBocResponse {
-    const wallet_info = try getWalletInfo(client, wallet_address);
+    const wallet_info: WalletInfo = if (version == .auto)
+        try getWalletInfo(client, wallet_address)
+    else switch (version) {
+        .v4 => .{
+            .seqno = try getSeqno(client, wallet_address),
+            .wallet_id = try getSubwalletId(client, wallet_address),
+            .public_key = try getPublicKey(client, wallet_address),
+            .version = WalletVersion.v4,
+        },
+        .v5 => .{
+            .seqno = try getSeqno(client, wallet_address),
+            .wallet_id = try getWalletId(client, wallet_address),
+            .public_key = try getPublicKey(client, wallet_address),
+            .version = WalletVersion.v5,
+        },
+        else => return error.UnsupportedWalletVersion,
+    };
     try verifyWalletPublicKey(private_key, wallet_info.public_key);
-    return sendPreparedMessages(client, version, private_key, wallet_address, wallet_info.wallet_id, wallet_info.seqno, msgs);
+    return sendPreparedMessages(
+        client,
+        wallet_info.version,
+        private_key,
+        wallet_address,
+        wallet_info.wallet_id,
+        wallet_info.seqno,
+        msgs,
+    );
 }
 
 pub fn sendMessagesAuto(
@@ -707,7 +907,13 @@ pub fn sendMessagesAuto(
         return sendMessages(client, version, private_key, addr, msgs);
     }
 
+    const effective_version: WalletVersion = switch (version) {
+        .auto => .v4,
+        else => version,
+    };
+
     const allocator = std.heap.page_allocator;
+    if (effective_version != .v4) return error.UnsupportedWalletVersion;
     var init = try deriveWalletV4InitFromPrivateKeyAlloc(allocator, workchain, wallet_id, private_key);
     defer init.deinit(allocator);
 
@@ -716,13 +922,13 @@ pub fn sendMessagesAuto(
 
     const wallet_info = getWalletInfo(client, raw_address) catch |err| {
         if (err == error.InvalidResponse) {
-            return sendInitialMessages(client, version, private_key, workchain, wallet_id, msgs);
+            return sendInitialMessages(client, effective_version, private_key, workchain, wallet_id, msgs);
         }
         return err;
     };
 
     try verifyWalletPublicKey(private_key, wallet_info.public_key);
-    return sendPreparedMessages(client, version, private_key, raw_address, wallet_info.wallet_id, wallet_info.seqno, msgs);
+    return sendPreparedMessages(client, wallet_info.version, private_key, raw_address, wallet_info.wallet_id, wallet_info.seqno, msgs);
 }
 
 pub fn buildSignedMessagesAutoAlloc(
@@ -735,19 +941,33 @@ pub fn buildSignedMessagesAutoAlloc(
     wallet_id: u32,
     msgs: []const WalletMessage,
 ) !BuiltWalletExternalMessage {
-    if (version != .v4) return error.UnsupportedWalletVersion;
-
     const valid_until = @as(u32, @intCast(std.time.timestamp())) + 60;
 
     if (wallet_address) |addr| {
-        const wallet_info = try getWalletInfo(client, addr);
+        const wallet_info: WalletInfo = if (version == .auto)
+            try getWalletInfo(client, addr)
+        else switch (version) {
+            .v4 => .{
+                .seqno = try getSeqno(client, addr),
+                .wallet_id = try getSubwalletId(client, addr),
+                .public_key = try getPublicKey(client, addr),
+                .version = WalletVersion.v4,
+            },
+            .v5 => .{
+                .seqno = try getSeqno(client, addr),
+                .wallet_id = try getWalletId(client, addr),
+                .public_key = try getPublicKey(client, addr),
+                .version = WalletVersion.v5,
+            },
+            else => return error.UnsupportedWalletVersion,
+        };
         try verifyWalletPublicKey(private_key, wallet_info.public_key);
 
         return .{
             .wallet_address = try allocator.dupe(u8, addr),
             .boc = try createSignedTransferWithWalletId(
                 allocator,
-                version,
+                wallet_info.version,
                 private_key,
                 addr,
                 wallet_info.wallet_id,
@@ -758,8 +978,15 @@ pub fn buildSignedMessagesAutoAlloc(
             .state_init_attached = false,
             .wallet_id = wallet_info.wallet_id,
             .seqno = wallet_info.seqno,
+            .version = wallet_info.version,
         };
     }
+
+    const effective_version: WalletVersion = switch (version) {
+        .auto => .v4,
+        else => version,
+    };
+    if (effective_version != .v4) return error.UnsupportedWalletVersion;
 
     var init = try deriveWalletV4InitFromPrivateKeyAlloc(allocator, workchain, wallet_id, private_key);
     defer init.deinit(allocator);
@@ -770,7 +997,7 @@ pub fn buildSignedMessagesAutoAlloc(
     const wallet_info = getWalletInfo(client, raw_address) catch |err| {
         if (err == error.InvalidResponse) {
             allocator.free(raw_address);
-            return buildInitialMessagesAlloc(allocator, version, private_key, workchain, wallet_id, msgs);
+            return buildInitialMessagesAlloc(allocator, effective_version, private_key, workchain, wallet_id, msgs);
         }
         return err;
     };
@@ -780,7 +1007,7 @@ pub fn buildSignedMessagesAutoAlloc(
         .wallet_address = raw_address,
         .boc = try createSignedTransferWithWalletId(
             allocator,
-            version,
+            wallet_info.version,
             private_key,
             raw_address,
             wallet_info.wallet_id,
@@ -791,6 +1018,7 @@ pub fn buildSignedMessagesAutoAlloc(
         .state_init_attached = false,
         .wallet_id = wallet_info.wallet_id,
         .seqno = wallet_info.seqno,
+        .version = wallet_info.version,
     };
 }
 
@@ -836,14 +1064,19 @@ test "wallet signing verifies with ed25519" {
 
     const body_cell = try ext_slice.loadRef();
     var body_slice = body_cell.toSlice();
-    const signature_bytes = try body_slice.loadBits(512);
+    var signature_bytes: [64]u8 = undefined;
+    @memset(&signature_bytes, 0);
+    for (0..512) |idx| {
+        const bit = try body_slice.loadUint(1);
+        signature_bytes[idx / 8] |= @as(u8, @intCast(bit)) << @as(u3, @intCast(7 - (idx % 8)));
+    }
 
     var payload_builder = cell.Builder.init();
     try payload_builder.storeSlice(&body_slice);
     const payload_cell = try payload_builder.toCell(allocator);
     defer destroyCellShallow(allocator, payload_cell);
 
-    const signature = Ed25519.Signature.fromBytes(signature_bytes[0..64].*);
+    const signature = Ed25519.Signature.fromBytes(signature_bytes);
     try signature.verify(&payload_cell.hash(), public_key);
 }
 
@@ -1003,6 +1236,87 @@ test "wallet signing includes referenced state init and disables bounce for depl
     const state_init_ref = try out_slice.loadRef();
     try std.testing.expectEqualSlices(u8, &state_init_ref.hash(), &expected_state_init.hash());
     try std.testing.expectEqual(@as(u64, 0), try out_slice.loadUint(1));
+}
+
+test "wallet v5 signing verifies with ed25519 and stores out action list" {
+    const allocator = std.testing.allocator;
+
+    const keypair = try generateKeypair("wallet-v5-sign");
+    var msgs = [_]WalletMessage{
+        .{
+            .destination = "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+            .amount = 123456789,
+        },
+    };
+
+    const signed = try createSignedTransferWithWalletId(
+        allocator,
+        .v5,
+        keypair[0],
+        "0:0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+        0xA1B2C3D4,
+        9,
+        msgs[0..],
+        1234567890,
+    );
+    defer allocator.free(signed);
+
+    const public_key = try Ed25519.PublicKey.fromBytes(keypair[1]);
+    const ext_msg = try boc.deserializeBoc(allocator, signed);
+    defer ext_msg.deinit(allocator);
+
+    var ext_slice = ext_msg.toSlice();
+    try std.testing.expectEqual(@as(u64, 0b10), try ext_slice.loadUint(2));
+    try std.testing.expectEqual(@as(u64, 0), try ext_slice.loadUint(2));
+    _ = try ext_slice.loadAddress();
+    try std.testing.expectEqual(@as(u64, 0), try ext_slice.loadCoins());
+    try std.testing.expectEqual(@as(u64, 0), try ext_slice.loadUint(1));
+    try std.testing.expectEqual(@as(u64, 1), try ext_slice.loadUint(1));
+
+    const body_cell = try ext_slice.loadRef();
+    var body_slice = body_cell.toSlice();
+    try std.testing.expectEqual(@as(u64, wallet_v5_auth_signed_external), try body_slice.loadUint(32));
+    try std.testing.expectEqual(@as(u64, 0xA1B2C3D4), try body_slice.loadUint(32));
+    try std.testing.expectEqual(@as(u64, 1234567890), try body_slice.loadUint(32));
+    try std.testing.expectEqual(@as(u64, 9), try body_slice.loadUint(32));
+    try std.testing.expectEqual(@as(u64, 1), try body_slice.loadUint(1));
+    const out_list = try body_slice.loadRef();
+    try std.testing.expectEqual(@as(u64, 0), try body_slice.loadUint(1));
+    var signature_bytes: [64]u8 = undefined;
+    @memset(&signature_bytes, 0);
+    for (0..512) |idx| {
+        const bit = try body_slice.loadUint(1);
+        signature_bytes[idx / 8] |= @as(u8, @intCast(bit)) << @as(u3, @intCast(7 - (idx % 8)));
+    }
+
+    var payload_builder = cell.Builder.init();
+    try payload_builder.storeUint(wallet_v5_auth_signed_external, 32);
+    try payload_builder.storeUint(0xA1B2C3D4, 32);
+    try payload_builder.storeUint(1234567890, 32);
+    try payload_builder.storeUint(9, 32);
+    try payload_builder.storeUint(1, 1);
+    try payload_builder.storeRef(out_list);
+    try payload_builder.storeUint(0, 1);
+    const payload_cell = try payload_builder.toCell(allocator);
+    defer destroyCellShallow(allocator, payload_cell);
+
+    const signature = Ed25519.Signature.fromBytes(signature_bytes);
+    try signature.verify(&payload_cell.hash(), public_key);
+
+    var out_list_slice = out_list.toSlice();
+    const prev = try out_list_slice.loadRef();
+    try std.testing.expect(prev.bit_len == 0 and prev.ref_cnt == 0);
+    try std.testing.expectEqual(@as(u64, wallet_v5_action_send_msg), try out_list_slice.loadUint(32));
+    try std.testing.expectEqual(@as(u64, 3), try out_list_slice.loadUint(8));
+    const out_msg = try out_list_slice.loadRef();
+    var out_msg_slice = out_msg.toSlice();
+    _ = try out_msg_slice.loadUint(1);
+    _ = try out_msg_slice.loadUint(1);
+    _ = try out_msg_slice.loadUint(1);
+    _ = try out_msg_slice.loadUint(1);
+    _ = try out_msg_slice.loadUint(2);
+    _ = try out_msg_slice.loadAddress();
+    try std.testing.expectEqual(@as(u64, 123456789), try out_msg_slice.loadCoins());
 }
 
 test "wallet signing supports custom wallet id" {
@@ -1393,6 +1707,141 @@ test "sendMessagesAuto uses deployed wallet when address is provided" {
     _ = try signed_slice.loadUint32();
     _ = try signed_slice.loadUint32();
     try std.testing.expectEqual(@as(u32, 7), try signed_slice.loadUint32());
+}
+
+test "wallet info auto-detects deployed wallet v5" {
+    const allocator = std.testing.allocator;
+    const keypair = try generateKeypair("wallet-info-v5");
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+        public_key_hex: []const u8,
+
+        pub fn runGetMethod(self: *@This(), _: []const u8, method: []const u8, _: []const []const u8) !types.RunGetMethodResponse {
+            const entry = if (std.mem.eql(u8, method, "seqno"))
+                types.StackEntry{ .number = 12 }
+            else if (std.mem.eql(u8, method, "get_wallet_id"))
+                types.StackEntry{ .number = 0x10203040 }
+            else if (std.mem.eql(u8, method, "get_public_key"))
+                types.StackEntry{ .big_number = try self.allocator.dupe(u8, self.public_key_hex) }
+            else
+                return error.InvalidResponse;
+
+            const entries = try self.allocator.alloc(types.StackEntry, 1);
+            entries[0] = entry;
+            return .{
+                .exit_code = 0,
+                .stack = entries,
+                .logs = "",
+            };
+        }
+
+        pub fn freeRunGetMethodResponse(self: *@This(), response: *types.RunGetMethodResponse) void {
+            for (response.stack) |*entry| {
+                switch (entry.*) {
+                    .big_number => |value| self.allocator.free(value),
+                    else => {},
+                }
+            }
+            self.allocator.free(response.stack);
+        }
+    };
+
+    const public_key_hex = try encodeHexPrefixedLowerAlloc(allocator, &keypair[1]);
+    defer allocator.free(public_key_hex);
+
+    var client = FakeClient{
+        .allocator = allocator,
+        .public_key_hex = public_key_hex,
+    };
+
+    const info = try getWalletInfo(&client, "0:0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF");
+    try std.testing.expectEqual(WalletVersion.v5, info.version);
+    try std.testing.expectEqual(@as(u32, 12), info.seqno);
+    try std.testing.expectEqual(@as(u32, 0x10203040), info.wallet_id);
+    try std.testing.expectEqualSlices(u8, &keypair[1], &info.public_key);
+}
+
+test "buildSignedMessagesAutoAlloc detects deployed wallet v5" {
+    const allocator = std.testing.allocator;
+    const keypair = try generateKeypair("wallet-build-v5");
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+        public_key_hex: []const u8,
+
+        pub fn runGetMethod(self: *@This(), _: []const u8, method: []const u8, _: []const []const u8) !types.RunGetMethodResponse {
+            const entry = if (std.mem.eql(u8, method, "seqno"))
+                types.StackEntry{ .number = 4 }
+            else if (std.mem.eql(u8, method, "get_wallet_id"))
+                types.StackEntry{ .number = 0x55667788 }
+            else if (std.mem.eql(u8, method, "get_public_key"))
+                types.StackEntry{ .big_number = try self.allocator.dupe(u8, self.public_key_hex) }
+            else
+                return error.InvalidResponse;
+
+            const entries = try self.allocator.alloc(types.StackEntry, 1);
+            entries[0] = entry;
+            return .{
+                .exit_code = 0,
+                .stack = entries,
+                .logs = "",
+            };
+        }
+
+        pub fn freeRunGetMethodResponse(self: *@This(), response: *types.RunGetMethodResponse) void {
+            for (response.stack) |*entry| {
+                switch (entry.*) {
+                    .big_number => |value| self.allocator.free(value),
+                    else => {},
+                }
+            }
+            self.allocator.free(response.stack);
+        }
+    };
+
+    const public_key_hex = try encodeHexPrefixedLowerAlloc(allocator, &keypair[1]);
+    defer allocator.free(public_key_hex);
+
+    var client = FakeClient{
+        .allocator = allocator,
+        .public_key_hex = public_key_hex,
+    };
+
+    var built = try buildSignedMessagesAutoAlloc(
+        &client,
+        allocator,
+        .auto,
+        keypair[0],
+        "0:0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+        0,
+        default_wallet_id_v4,
+        &[_]WalletMessage{
+            .{
+                .destination = "0:83DFD552E63729B472FCBCC8C45EBCC6691702558B68EC7527E1BA403A0F31A8",
+                .amount = 42,
+            },
+        },
+    );
+    defer built.deinit(allocator);
+
+    try std.testing.expectEqual(WalletVersion.v5, built.version);
+    try std.testing.expectEqual(@as(u32, 0x55667788), built.wallet_id);
+    try std.testing.expectEqual(@as(u32, 4), built.seqno);
+    try std.testing.expect(!built.state_init_attached);
+
+    const ext_msg = try boc.deserializeBoc(allocator, built.boc);
+    defer ext_msg.deinit(allocator);
+
+    var ext_slice = ext_msg.toSlice();
+    _ = try ext_slice.loadUint(2);
+    _ = try ext_slice.loadUint(2);
+    _ = try ext_slice.loadAddress();
+    _ = try ext_slice.loadCoins();
+    _ = try ext_slice.loadUint(1);
+    const body_ref = try ext_slice.loadRef();
+    var body_slice = body_ref.toSlice();
+    try std.testing.expectEqual(@as(u64, wallet_v5_auth_signed_external), try body_slice.loadUint(32));
 }
 
 test "wallet public key helper parses stack entry" {

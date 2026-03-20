@@ -3411,7 +3411,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             var built = signing.buildSignedMessagesAutoAlloc(
                 self.client,
                 self.allocator,
-                .v4,
+                .auto,
                 private_key,
                 self.config.wallet_address,
                 self.config.wallet_workchain,
@@ -3450,7 +3450,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             var built = signing.buildSignedMessagesAutoAlloc(
                 self.client,
                 self.allocator,
-                .v4,
+                .auto,
                 private_key,
                 self.config.wallet_address,
                 self.config.wallet_workchain,
@@ -3577,7 +3577,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             var built = signing.buildSignedMessagesAutoAlloc(
                 self.client,
                 self.allocator,
-                .v4,
+                .auto,
                 private_key,
                 self.config.wallet_address,
                 self.config.wallet_workchain,
@@ -4010,7 +4010,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
 
             const result = signing.sendMessagesAuto(
                 self.client,
-                .v4,
+                .auto,
                 private_key,
                 self.config.wallet_address,
                 self.config.wallet_workchain,
