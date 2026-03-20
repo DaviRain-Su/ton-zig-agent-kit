@@ -3819,9 +3819,12 @@ fn loadAddressFromBody(slice: *cell.Slice) !?types.Address {
 }
 
 fn loadRemainingBodyBytesAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) ![]u8 {
-    if (slice.remainingRefs() != 0) return error.UnsupportedAbiType;
-    if (slice.remainingBits() % 8 != 0) return error.InvalidAbiOutputs;
-    return loadBitsRightAlignedAlloc(allocator, slice, slice.remainingBits());
+    if (slice.remainingRefs() == 0) {
+        if (slice.remainingBits() % 8 != 0) return error.InvalidAbiOutputs;
+        return loadBitsRightAlignedAlloc(allocator, slice, slice.remainingBits());
+    }
+
+    return flattenSnakeTailBytesAlloc(allocator, slice);
 }
 
 fn loadRefBodyBocAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) ![]u8 {
@@ -3837,6 +3840,30 @@ fn buildRemainingBodyBocAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) 
     defer value.deinit(allocator);
 
     return boc.serializeBoc(allocator, value);
+}
+
+fn flattenSnakeTailBytesAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) ![]u8 {
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+
+    try appendSnakeSliceBytes(&writer.writer, slice);
+    return try writer.toOwnedSlice();
+}
+
+fn appendSnakeSliceBytes(writer: anytype, slice: *cell.Slice) !void {
+    if (slice.remainingBits() % 8 != 0) return error.InvalidAbiOutputs;
+    if (slice.remainingRefs() > 1) return error.InvalidAbiOutputs;
+
+    while (slice.remainingBits() > 0) {
+        try writer.writeByte(try slice.loadUint8());
+    }
+
+    if (slice.remainingRefs() == 1) {
+        const next = try slice.loadRef();
+        if (next.bit_len % 8 != 0 or next.ref_cnt > 1) return error.InvalidAbiOutputs;
+        var next_slice = next.toSlice();
+        try appendSnakeSliceBytes(writer, &next_slice);
+    }
 }
 
 fn writeDecodedOutputJson(
@@ -4602,6 +4629,48 @@ test "abi adapter decodes function body with string before optional and trailing
     );
 }
 
+test "abi adapter decodes terminal function string stored as snake tail" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "functions": [
+        \\    {
+        \\      "name": "set_note",
+        \\      "opcode": "0x0BADC0DE",
+        \\      "inputs": [
+        \\        {"name": "note", "type": "string"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var parsed = try parseAbiInfoJsonAlloc(allocator, json);
+    defer parsed.deinit(allocator);
+
+    var tail_builder = cell.Builder.init();
+    try tail_builder.storeBits("tail", 32);
+    const tail = try tail_builder.toCell(allocator);
+
+    var root_builder = cell.Builder.init();
+    try root_builder.storeUint(0x0BADC0DE, 32);
+    try root_builder.storeBits("snake-", 48);
+    try root_builder.storeRef(tail);
+    const body_cell = try root_builder.toCell(allocator);
+    defer body_cell.deinit(allocator);
+    const body_boc = try boc.serializeBoc(allocator, body_cell);
+    defer allocator.free(body_boc);
+
+    const decoded = try decodeFunctionBodyFromAbiJsonAlloc(allocator, &parsed.abi, null, body_boc);
+    defer allocator.free(decoded);
+
+    try std.testing.expectEqualStrings(
+        "{\"note\":\"snake-tail\"}",
+        decoded,
+    );
+}
+
 test "abi adapter decodes opcode-less function body by explicit selector" {
     const allocator = std.testing.allocator;
     const json =
@@ -4818,6 +4887,54 @@ test "abi adapter decodes event body with bytes before optional and trailing sca
     );
     defer allocator.free(absent_expected);
     try std.testing.expectEqualStrings(absent_expected, absent_decoded);
+}
+
+test "abi adapter decodes terminal event bytes stored as snake tail" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "version": "1.0",
+        \\  "events": [
+        \\    {
+        \\      "name": "BytesPayload",
+        \\      "opcode": "0x01020306",
+        \\      "inputs": [
+        \\        {"name": "payload", "type": "bytes"}
+        \\      ]
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    const payload_b64 = try base64EncodeAlloc(allocator, "memo-tail");
+    defer allocator.free(payload_b64);
+
+    var parsed = try parseAbiInfoJsonAlloc(allocator, json);
+    defer parsed.deinit(allocator);
+
+    var tail_builder = cell.Builder.init();
+    try tail_builder.storeBits("tail", 32);
+    const tail = try tail_builder.toCell(allocator);
+
+    var root_builder = cell.Builder.init();
+    try root_builder.storeUint(0x01020306, 32);
+    try root_builder.storeBits("memo-", 40);
+    try root_builder.storeRef(tail);
+    const body_cell = try root_builder.toCell(allocator);
+    defer body_cell.deinit(allocator);
+    const body_boc = try boc.serializeBoc(allocator, body_cell);
+    defer allocator.free(body_boc);
+
+    const decoded = try decodeEventBodyFromAbiJsonAlloc(allocator, &parsed.abi, null, body_boc);
+    defer allocator.free(decoded);
+
+    const expected = try std.fmt.allocPrint(
+        allocator,
+        "{{\"payload\":\"{s}\"}}",
+        .{payload_b64},
+    );
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, decoded);
 }
 
 test "abi adapter resolves overloaded functions by full selector" {
