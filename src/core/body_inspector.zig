@@ -113,6 +113,7 @@ fn knownOpcodeName(opcode: u32) ?[]const u8 {
 
 fn decodeKnownBodyJsonAlloc(allocator: std.mem.Allocator, opcode: u32, slice: *cell.Slice) anyerror!?[]u8 {
     return switch (opcode) {
+        op_encrypted_comment => try decodeEncryptedCommentJsonAlloc(allocator, slice),
         op_excesses => try decodeExcessesJsonAlloc(allocator, slice),
         op_jetton_provide_wallet_address => try decodeJettonProvideWalletAddressJsonAlloc(allocator, slice),
         op_jetton_take_wallet_address => try decodeJettonTakeWalletAddressJsonAlloc(allocator, slice),
@@ -240,6 +241,40 @@ fn decodeExcessesJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) any
     errdefer writer.deinit();
     try writer.writer.writeAll("{\"query_id\":");
     try writer.writer.print("{d}", .{query_id});
+    try writer.writer.writeByte('}');
+    return try writer.toOwnedSlice();
+}
+
+fn decodeEncryptedCommentJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror![]u8 {
+    if (slice.remainingRefs() != 0 or slice.remainingBits() % 8 != 0) return error.UnsupportedAbiType;
+
+    const payload = try loadRemainingBytesAlloc(allocator, slice);
+    defer allocator.free(payload);
+
+    const payload_base64 = try encodeBase64Alloc(allocator, payload);
+    defer allocator.free(payload_base64);
+
+    const payload_hex = try formatFullHexTextAlloc(allocator, payload);
+    defer allocator.free(payload_hex);
+
+    const payload_utf8 = if (payload.len > 0 and std.unicode.utf8ValidateSlice(payload))
+        try allocator.dupe(u8, payload)
+    else
+        null;
+    defer if (payload_utf8) |value| allocator.free(value);
+
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+    try writer.writer.writeAll("{\"payload_base64\":");
+    try writeJsonString(&writer.writer, payload_base64);
+    try writer.writer.writeAll(",\"payload_hex\":");
+    try writeJsonString(&writer.writer, payload_hex);
+    try writer.writer.writeAll(",\"payload_utf8\":");
+    if (payload_utf8) |value| {
+        try writeJsonString(&writer.writer, value);
+    } else {
+        try writer.writer.writeAll("null");
+    }
     try writer.writer.writeByte('}');
     return try writer.toOwnedSlice();
 }
@@ -786,11 +821,7 @@ fn serializeCellBocBase64Alloc(allocator: std.mem.Allocator, value: *const cell.
     const payload_boc = try boc.serializeBoc(allocator, @constCast(value));
     defer allocator.free(payload_boc);
 
-    const encoded_len = std.base64.standard.Encoder.calcSize(payload_boc.len);
-    const encoded = try allocator.alloc(u8, encoded_len);
-    errdefer allocator.free(encoded);
-    _ = std.base64.standard.Encoder.encode(encoded, payload_boc);
-    return encoded;
+    return encodeBase64Alloc(allocator, payload_boc);
 }
 
 fn serializeSliceBocBase64Alloc(allocator: std.mem.Allocator, slice: *cell.Slice) ![]u8 {
@@ -801,6 +832,14 @@ fn serializeSliceBocBase64Alloc(allocator: std.mem.Allocator, slice: *cell.Slice
     const payload_cell = try builder.toCell(allocator);
     defer payload_cell.deinit(allocator);
     return serializeCellBocBase64Alloc(allocator, payload_cell);
+}
+
+fn encodeBase64Alloc(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    const encoded_len = std.base64.standard.Encoder.calcSize(value.len);
+    const encoded = try allocator.alloc(u8, encoded_len);
+    errdefer allocator.free(encoded);
+    _ = std.base64.standard.Encoder.encode(encoded, value);
+    return encoded;
 }
 
 fn writeJsonString(writer: anytype, value: []const u8) anyerror!void {
@@ -902,8 +941,35 @@ fn formatHexTextAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return out;
 }
 
+fn formatFullHexTextAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    if (bytes.len == 0) return allocator.dupe(u8, "0x");
+
+    const out = try allocator.alloc(u8, 2 + bytes.len * 2);
+    errdefer allocator.free(out);
+    out[0] = '0';
+    out[1] = 'x';
+    var idx: usize = 2;
+    for (bytes) |byte| {
+        out[idx] = lowerHexChar(byte >> 4);
+        out[idx + 1] = lowerHexChar(byte & 0x0F);
+        idx += 2;
+    }
+    return out;
+}
+
 fn lowerHexChar(value: u8) u8 {
     return if (value < 10) '0' + value else 'a' + (value - 10);
+}
+
+fn loadRemainingBytesAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) ![]u8 {
+    if (slice.remainingRefs() != 0 or slice.remainingBits() % 8 != 0) return error.InvalidSnakeData;
+    const byte_len: usize = @intCast(slice.remainingBits() / 8);
+    const out = try allocator.alloc(u8, byte_len);
+    errdefer allocator.free(out);
+    for (out) |*byte| {
+        byte.* = try slice.loadUint8();
+    }
+    return out;
 }
 
 fn loadUintDynamic(slice: *cell.Slice, bits: u16) !u64 {
@@ -958,6 +1024,24 @@ test "body inspector extracts snake comment after zero opcode" {
     try std.testing.expectEqualStrings("hello", analysis.comment.?);
     try std.testing.expectEqualStrings("{\"comment\":\"hello\"}", analysis.decoded_json.?);
     try std.testing.expect(analysis.tail_utf8 == null);
+}
+
+test "body inspector best-effort decodes encrypted comment" {
+    const allocator = std.testing.allocator;
+
+    var builder = cell.Builder.init();
+    try builder.storeUint(op_encrypted_comment, 32);
+    try builder.storeBits(&.{ 0xDE, 0xAD, 0xBE, 0xEF }, 32);
+    const body = try builder.toCell(allocator);
+    defer body.deinit(allocator);
+
+    var analysis = try inspectBodyCellAlloc(allocator, body);
+    defer analysis.deinit(allocator);
+
+    try std.testing.expectEqual(@as(?u32, op_encrypted_comment), analysis.opcode);
+    try std.testing.expectEqualStrings("encrypted_comment", analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"payload_hex\":\"0xdeadbeef\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"payload_base64\":\"3q2+7w==\"") != null);
 }
 
 test "body inspector best-effort decodes jetton transfer" {

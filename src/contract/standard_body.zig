@@ -7,6 +7,7 @@ const jetton = @import("jetton.zig");
 
 pub const StandardBodyKind = enum {
     comment,
+    encrypted_comment,
     excesses,
     jetton_provide_wallet_address,
     jetton_take_wallet_address,
@@ -31,6 +32,7 @@ pub const StandardBodyKind = enum {
 
 pub fn parseKind(text: []const u8) !StandardBodyKind {
     if (std.ascii.eqlIgnoreCase(text, "comment")) return .comment;
+    if (std.ascii.eqlIgnoreCase(text, "encrypted_comment") or std.ascii.eqlIgnoreCase(text, "encrypted-comment")) return .encrypted_comment;
     if (std.ascii.eqlIgnoreCase(text, "excesses")) return .excesses;
     if (std.ascii.eqlIgnoreCase(text, "jetton_provide_wallet_address") or std.ascii.eqlIgnoreCase(text, "jetton-provide-wallet-address") or std.ascii.eqlIgnoreCase(text, "provide_wallet_address") or std.ascii.eqlIgnoreCase(text, "provide-wallet-address")) return .jetton_provide_wallet_address;
     if (std.ascii.eqlIgnoreCase(text, "jetton_take_wallet_address") or std.ascii.eqlIgnoreCase(text, "jetton-take-wallet-address") or std.ascii.eqlIgnoreCase(text, "take_wallet_address") or std.ascii.eqlIgnoreCase(text, "take-wallet-address")) return .jetton_take_wallet_address;
@@ -57,6 +59,7 @@ pub fn parseKind(text: []const u8) !StandardBodyKind {
 pub fn kindName(kind: StandardBodyKind) []const u8 {
     return switch (kind) {
         .comment => "comment",
+        .encrypted_comment => "encrypted_comment",
         .excesses => "excesses",
         .jetton_provide_wallet_address => "jetton_provide_wallet_address",
         .jetton_take_wallet_address => "jetton_take_wallet_address",
@@ -106,6 +109,7 @@ pub fn buildBodyFromJsonAlloc(
 
     return switch (kind) {
         .comment => buildCommentBodyBocAlloc(allocator, try getRequiredString(object, "comment")),
+        .encrypted_comment => buildEncryptedCommentBodyAlloc(allocator, object),
         .excesses => buildExcessesBodyAlloc(allocator, object),
         .jetton_provide_wallet_address => buildJettonProvideWalletAddressBodyAlloc(allocator, object),
         .jetton_take_wallet_address => buildJettonTakeWalletAddressBodyAlloc(allocator, object),
@@ -133,6 +137,15 @@ pub fn buildCommentBodyBocAlloc(allocator: std.mem.Allocator, comment: []const u
     var builder = cell.Builder.init();
     try builder.storeUint(0, 32);
     try builder.storeBits(comment, @intCast(comment.len * 8));
+    const root = try builder.toCell(allocator);
+    defer root.deinit(allocator);
+    return boc.serializeBoc(allocator, root);
+}
+
+pub fn createEncryptedCommentMessage(allocator: std.mem.Allocator, payload: []const u8) ![]u8 {
+    var builder = cell.Builder.init();
+    try builder.storeUint(0x2167DA4B, 32);
+    try builder.storeBits(payload, @intCast(payload.len * 8));
     const root = try builder.toCell(allocator);
     defer root.deinit(allocator);
     return boc.serializeBoc(allocator, root);
@@ -710,6 +723,12 @@ fn buildNftOwnershipAssignedBodyAlloc(allocator: std.mem.Allocator, object: std.
     );
 }
 
+fn buildEncryptedCommentBodyAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap) ![]u8 {
+    const payload = try loadRequiredOpaqueBytesAlloc(allocator, object, "payload_base64", "payload_hex", "payload_utf8");
+    defer allocator.free(payload);
+    return createEncryptedCommentMessage(allocator, payload);
+}
+
 fn getRequiredString(object: std.json.ObjectMap, field: []const u8) ![]const u8 {
     const value = object.get(field) orelse return error.MissingStandardBodyField;
     return switch (value) {
@@ -892,6 +911,60 @@ fn loadOptionalBocAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap
     };
 }
 
+fn loadRequiredOpaqueBytesAlloc(
+    allocator: std.mem.Allocator,
+    object: std.json.ObjectMap,
+    base64_field: []const u8,
+    hex_field: []const u8,
+    utf8_field: []const u8,
+) ![]u8 {
+    if (object.get(base64_field)) |value| {
+        return switch (value) {
+            .string => |text| try decodeBase64FlexibleAlloc(allocator, text),
+            else => error.InvalidStandardBodySpec,
+        };
+    }
+    if (object.get(hex_field)) |value| {
+        return switch (value) {
+            .string => |text| try parseOpaqueHexBytesAlloc(allocator, text),
+            else => error.InvalidStandardBodySpec,
+        };
+    }
+    if (object.get(utf8_field)) |value| {
+        return switch (value) {
+            .string => |text| try allocator.dupe(u8, text),
+            else => error.InvalidStandardBodySpec,
+        };
+    }
+    return error.MissingStandardBodyField;
+}
+
+fn parseOpaqueHexBytesAlloc(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    const trimmed = std.mem.trim(u8, text, " \t\r\n");
+    const value = if (std.mem.startsWith(u8, trimmed, "0x") or std.mem.startsWith(u8, trimmed, "0X")) trimmed[2..] else trimmed;
+    if (value.len == 0) return allocator.alloc(u8, 0);
+
+    const out = try allocator.alloc(u8, @divTrunc(value.len + 1, 2));
+    errdefer allocator.free(out);
+
+    var src_idx: usize = 0;
+    var dst_idx: usize = 0;
+    if (value.len % 2 != 0) {
+        out[0] = try hexCharValue(value[0]);
+        src_idx = 1;
+        dst_idx = 1;
+    }
+
+    while (src_idx < value.len) : (src_idx += 2) {
+        const hi = try hexCharValue(value[src_idx]);
+        const lo = try hexCharValue(value[src_idx + 1]);
+        out[dst_idx] = (hi << 4) | lo;
+        dst_idx += 1;
+    }
+
+    return out;
+}
+
 fn decodeBase64FlexibleAlloc(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return decodeBase64WithDecoder(allocator, input, std.base64.standard.Decoder) catch
         decodeBase64WithDecoder(allocator, input, std.base64.url_safe.Decoder);
@@ -921,6 +994,17 @@ test "standard body builds comment body from json" {
     defer analysis.deinit(allocator);
     try std.testing.expectEqualStrings("comment", analysis.opcode_name.?);
     try std.testing.expectEqualStrings("hello", analysis.comment.?);
+}
+
+test "standard body builds encrypted comment body from json" {
+    const allocator = std.testing.allocator;
+    const body_boc = try buildBodyFromJsonAlloc(allocator, .encrypted_comment, "{\"payload_hex\":\"0xdeadbeef\"}");
+    defer allocator.free(body_boc);
+
+    var analysis = try @import("../core/body_inspector.zig").inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("encrypted_comment", analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"payload_hex\":\"0xdeadbeef\"") != null);
 }
 
 test "standard body builds excesses body from json" {
