@@ -54,12 +54,14 @@ pub const BodyAnalysisResult = struct {
     opcode_name: ?[]const u8,
     comment: ?[]const u8,
     tail_utf8: ?[]const u8,
+    body_boc_base64: ?[]const u8 = null,
     decoded_json: ?[]const u8,
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         if (self.opcode_name) |value| allocator.free(value);
         if (self.comment) |value| allocator.free(value);
         if (self.tail_utf8) |value| allocator.free(value);
+        if (self.body_boc_base64) |value| allocator.free(value);
         if (self.decoded_json) |value| allocator.free(value);
         self.* = undefined;
     }

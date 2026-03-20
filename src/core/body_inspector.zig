@@ -79,6 +79,9 @@ pub fn inspectBodyCellAlloc(allocator: std.mem.Allocator, root: *const cell.Cell
 
     var decode_slice = slice;
     analysis.decoded_json = decodeKnownBodyJsonAlloc(allocator, analysis.opcode.?, &decode_slice) catch null;
+    if (analysis.decoded_json == null) {
+        analysis.decoded_json = buildUnknownBodyJsonAlloc(allocator, analysis.opcode.?, &slice) catch null;
+    }
     analysis.tail_utf8 = try maybeFlattenUtf8TailAlloc(allocator, &slice);
     return analysis;
 }
@@ -817,6 +820,63 @@ fn buildSimpleStringJsonAlloc(allocator: std.mem.Allocator, field_name: []const 
     return try writer.toOwnedSlice();
 }
 
+fn buildUnknownBodyJsonAlloc(allocator: std.mem.Allocator, opcode: u32, slice: *cell.Slice) anyerror![]u8 {
+    var payload_slice = slice.*;
+    const payload_boc_base64 = try serializeSliceBocBase64Alloc(allocator, &payload_slice);
+    defer allocator.free(payload_boc_base64);
+
+    const raw_bytes = if (payload_slice.remainingRefs() == 0 and payload_slice.remainingBits() % 8 == 0)
+        try loadRemainingBytesAlloc(allocator, &payload_slice)
+    else
+        null;
+    defer if (raw_bytes) |value| allocator.free(value);
+
+    const payload_base64 = if (raw_bytes) |bytes|
+        try encodeBase64Alloc(allocator, bytes)
+    else
+        null;
+    defer if (payload_base64) |value| allocator.free(value);
+
+    const payload_hex = if (raw_bytes) |bytes|
+        try formatFullHexTextAlloc(allocator, bytes)
+    else
+        null;
+    defer if (payload_hex) |value| allocator.free(value);
+
+    const payload_utf8 = if (raw_bytes) |bytes|
+        if (bytes.len > 0 and std.unicode.utf8ValidateSlice(bytes)) try allocator.dupe(u8, bytes) else null
+    else
+        null;
+    defer if (payload_utf8) |value| allocator.free(value);
+
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+    try writer.writer.writeAll("{\"opcode\":");
+    try writer.writer.print("\"0x{X}\"", .{opcode});
+    try writer.writer.writeAll(",\"payload_boc_base64\":");
+    try writeJsonString(&writer.writer, payload_boc_base64);
+    try writer.writer.writeAll(",\"payload_base64\":");
+    if (payload_base64) |value| {
+        try writeJsonString(&writer.writer, value);
+    } else {
+        try writer.writer.writeAll("null");
+    }
+    try writer.writer.writeAll(",\"payload_hex\":");
+    if (payload_hex) |value| {
+        try writeJsonString(&writer.writer, value);
+    } else {
+        try writer.writer.writeAll("null");
+    }
+    try writer.writer.writeAll(",\"payload_utf8\":");
+    if (payload_utf8) |value| {
+        try writeJsonString(&writer.writer, value);
+    } else {
+        try writer.writer.writeAll("null");
+    }
+    try writer.writer.writeByte('}');
+    return try writer.toOwnedSlice();
+}
+
 fn serializeCellBocBase64Alloc(allocator: std.mem.Allocator, value: *const cell.Cell) ![]u8 {
     const payload_boc = try boc.serializeBoc(allocator, @constCast(value));
     defer allocator.free(payload_boc);
@@ -999,6 +1059,9 @@ test "body inspector extracts opcode and utf8 tail" {
 
     try std.testing.expectEqual(@as(?u32, 0x11223344), analysis.opcode);
     try std.testing.expectEqualStrings("ping", analysis.tail_utf8.?);
+    try std.testing.expect(analysis.decoded_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"opcode\":\"0x11223344\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"payload_utf8\":\"ping\"") != null);
     try std.testing.expect(analysis.comment == null);
 }
 

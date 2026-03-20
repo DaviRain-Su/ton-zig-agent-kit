@@ -745,6 +745,7 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             if (analysis.opcode_name) |value| allocator.free(value);
             if (analysis.comment) |value| allocator.free(value);
             if (analysis.tail_utf8) |value| allocator.free(value);
+            if (analysis.body_boc_base64) |value| allocator.free(value);
             if (analysis.decoded_json) |value| allocator.free(value);
             analysis.* = undefined;
         }
@@ -774,11 +775,19 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 return null;
             }
 
+            const body_boc_base64 = blk: {
+                const serialized = try boc.serializeBoc(self.allocator, @constCast(body));
+                defer self.allocator.free(serialized);
+                break :blk try encodeBase64Alloc(self.allocator, serialized);
+            };
+            errdefer self.allocator.free(body_boc_base64);
+
             const result = tools_types.BodyAnalysisResult{
                 .opcode = analysis.opcode,
                 .opcode_name = analysis.opcode_name,
                 .comment = analysis.comment,
                 .tail_utf8 = analysis.tail_utf8,
+                .body_boc_base64 = body_boc_base64,
                 .decoded_json = analysis.decoded_json,
             };
             analysis.opcode_name = null;
@@ -1361,24 +1370,49 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                     }
                 }
                 if (value.opcode) |opcode| {
+                    const example_spec_json = if (value.body_boc_base64) |body_boc|
+                        if (value.decoded_json) |decoded|
+                            try std.fmt.allocPrint(
+                                self.allocator,
+                                "{{\"body_boc_base64\":\"{s}\",\"decoded\":{s}}}",
+                                .{ body_boc, decoded },
+                            )
+                        else
+                            try std.fmt.allocPrint(
+                                self.allocator,
+                                "{{\"opcode\":\"0x{X}\",\"body_boc_base64\":\"{s}\"}}",
+                                .{ opcode, body_boc },
+                            )
+                    else if (value.decoded_json) |decoded|
+                        try self.allocator.dupe(u8, decoded)
+                    else if (value.body_boc_base64) |body_boc|
+                        try std.fmt.allocPrint(
+                            self.allocator,
+                            "{{\"opcode\":\"0x{X}\",\"body_boc_base64\":\"{s}\"}}",
+                            .{ opcode, body_boc },
+                        )
+                    else
+                        null;
+                    errdefer if (example_spec_json) |text| self.allocator.free(text);
+
                     return .{
                         .body_cli_template = try std.fmt.allocPrint(
                             self.allocator,
-                            "ton-zig-agent-kit cell build-typed u32:0x{X} <more_ops...>",
-                            .{opcode},
+                            "ton-zig-agent-kit cell inspect-body <body_boc_base64>",
+                            .{},
                         ),
                         .send_cli_template = if (direction == .incoming)
                             try std.fmt.allocPrint(
                                 self.allocator,
-                                "ton-zig-agent-kit wallet send-ops <wallet_addr> {s} <amount_nanoton> u32:0x{X} <more_ops...>",
-                                .{ contract_address, opcode },
+                                "ton-zig-agent-kit wallet send-body <wallet_addr> {s} <amount_nanoton> <body_boc_base64>",
+                                .{contract_address},
                             )
                         else
                             null,
-                        .example_spec_json = null,
+                        .example_spec_json = example_spec_json,
                         .note = try std.fmt.allocPrint(
                             self.allocator,
-                            "Observed raw opcode 0x{X}; fill in the remaining fields manually.",
+                            "Observed raw opcode 0x{X}; replay with captured body BOC or inspect the decoded payload fields.",
                             .{opcode},
                         ),
                     };
@@ -7045,6 +7079,102 @@ test "agent tools inspectContract builds templates for encrypted comment message
     );
     try std.testing.expect(result.observed_messages[0].template.?.example_spec_json != null);
     try std.testing.expect(std.mem.indexOf(u8, result.observed_messages[0].template.?.example_spec_json.?, "\"payload_hex\":\"0xdeadbeef\"") != null);
+}
+
+test "agent tools inspectContract builds replay template for unknown opcode messages" {
+    const allocator = std.testing.allocator;
+
+    var builder = core_types.Builder.init();
+    try builder.storeUint(0x11223344, 32);
+    try builder.storeBits("ping", 32);
+    const body_cell = try builder.toCell(allocator);
+    defer body_cell.deinit(allocator);
+    const incoming_body = try boc.serializeBoc(allocator, body_cell);
+    defer allocator.free(incoming_body);
+
+    const FakeClient = struct {
+        allocator: std.mem.Allocator,
+        incoming_body: []const u8,
+
+        fn freeMessage(self: *@This(), msg: *core_types.Message) void {
+            if (msg.hash.len > 0) self.allocator.free(msg.hash);
+            if (msg.raw_body.len > 0) self.allocator.free(msg.raw_body);
+            if (msg.body) |body| body.deinit(self.allocator);
+            self.allocator.destroy(msg);
+        }
+
+        pub fn runGetMethod(self: *@This(), _: []const u8, _: []const u8, _: []const []const u8) anyerror!core_types.RunGetMethodResponse {
+            _ = self;
+            return error.InvalidResponse;
+        }
+
+        pub fn freeRunGetMethodResponse(self: *@This(), response: *core_types.RunGetMethodResponse) void {
+            _ = self;
+            _ = response;
+        }
+
+        pub fn getTransactions(self: *@This(), addr: []const u8, limit: u32) ![]core_types.Transaction {
+            _ = limit;
+
+            const txs = try self.allocator.alloc(core_types.Transaction, 1);
+            errdefer self.allocator.free(txs);
+
+            const in_msg = try self.allocator.create(core_types.Message);
+            errdefer self.allocator.destroy(in_msg);
+            const in_body = try boc.deserializeBoc(self.allocator, self.incoming_body);
+            errdefer in_body.deinit(self.allocator);
+            in_msg.* = .{
+                .hash = try self.allocator.dupe(u8, "inspect-raw-in"),
+                .source = try address_mod.parseAddress("0:9999999999999999999999999999999999999999999999999999999999999999"),
+                .destination = try address_mod.parseAddress(addr),
+                .value = 111,
+                .body = in_body,
+                .raw_body = &.{},
+            };
+
+            txs[0] = .{
+                .hash = try self.allocator.dupe(u8, "inspect-raw-tx"),
+                .lt = 101,
+                .timestamp = 102,
+                .in_msg = in_msg,
+                .out_msgs = &.{},
+            };
+            return txs;
+        }
+
+        pub fn freeTransactions(self: *@This(), txs: []core_types.Transaction) void {
+            for (txs) |*tx| self.freeTransaction(tx);
+            if (txs.len > 0) self.allocator.free(txs);
+        }
+
+        pub fn freeTransaction(self: *@This(), tx: *core_types.Transaction) void {
+            if (tx.hash.len > 0) self.allocator.free(tx.hash);
+            if (tx.in_msg) |msg| self.freeMessage(msg);
+            if (tx.out_msgs.len > 0) self.allocator.free(tx.out_msgs);
+            tx.* = undefined;
+        }
+    };
+    const FakeTools = AgentToolsImpl(*FakeClient);
+
+    var client = FakeClient{
+        .allocator = allocator,
+        .incoming_body = incoming_body,
+    };
+    var tools = FakeTools.init(allocator, &client, .{ .rpc_url = "https://example.invalid" });
+
+    var result = try tools.inspectContract("0:3333333333333333333333333333333333333333333333333333333333333333");
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.success);
+    try std.testing.expectEqual(@as(usize, 1), result.observed_messages.len);
+    try std.testing.expectEqual(@as(?u32, 0x11223344), result.observed_messages[0].opcode);
+    try std.testing.expectEqualStrings(
+        "ton-zig-agent-kit wallet send-body <wallet_addr> 0:3333333333333333333333333333333333333333333333333333333333333333 <amount_nanoton> <body_boc_base64>",
+        result.observed_messages[0].template.?.send_cli_template.?,
+    );
+    try std.testing.expect(result.observed_messages[0].template.?.example_spec_json != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.observed_messages[0].template.?.example_spec_json.?, "\"body_boc_base64\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.observed_messages[0].template.?.example_spec_json.?, "\"payload_utf8\":\"ping\"") != null);
 }
 
 test "agent tools describeAbi returns structured templates for direct source" {

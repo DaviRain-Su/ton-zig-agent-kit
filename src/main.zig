@@ -3513,6 +3513,8 @@ fn printBodyAnalysis(allocator: std.mem.Allocator, body: *const Cell) void {
                 std.debug.print("  Body reusable spec:\n{s}\n", .{value});
                 std.debug.print("  Build standard: {s}\n", .{template});
             }
+        } else if (analysis.opcode != null) {
+            std.debug.print("  Replay raw body: ton-zig-agent-kit wallet send-body <wallet_addr> <dest> <amount_nanoton> <body_boc_base64>\n", .{});
         }
     }
 }
