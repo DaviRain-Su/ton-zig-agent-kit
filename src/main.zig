@@ -3531,6 +3531,12 @@ fn standardBodyBuildTemplate(opcode_name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, opcode_name, "nft_report_static_data")) return "ton-zig-agent-kit cell build-standard nft_report_static_data @spec.json";
     if (std.mem.eql(u8, opcode_name, "nft_get_royalty_params")) return "ton-zig-agent-kit cell build-standard nft_get_royalty_params @spec.json";
     if (std.mem.eql(u8, opcode_name, "nft_report_royalty_params")) return "ton-zig-agent-kit cell build-standard nft_report_royalty_params @spec.json";
+    if (std.mem.eql(u8, opcode_name, "sbt_prove_ownership")) return "ton-zig-agent-kit cell build-standard sbt_prove_ownership @spec.json";
+    if (std.mem.eql(u8, opcode_name, "sbt_request_owner")) return "ton-zig-agent-kit cell build-standard sbt_request_owner @spec.json";
+    if (std.mem.eql(u8, opcode_name, "sbt_destroy")) return "ton-zig-agent-kit cell build-standard sbt_destroy @spec.json";
+    if (std.mem.eql(u8, opcode_name, "sbt_revoke")) return "ton-zig-agent-kit cell build-standard sbt_revoke @spec.json";
+    if (std.mem.eql(u8, opcode_name, "sbt_ownership_proof")) return "ton-zig-agent-kit cell build-standard sbt_ownership_proof @spec.json";
+    if (std.mem.eql(u8, opcode_name, "sbt_owner_info")) return "ton-zig-agent-kit cell build-standard sbt_owner_info @spec.json";
     if (std.mem.eql(u8, opcode_name, "nft_transfer")) return "ton-zig-agent-kit cell build-standard nft_transfer @spec.json";
     if (std.mem.eql(u8, opcode_name, "nft_ownership_assigned")) return "ton-zig-agent-kit cell build-standard nft_ownership_assigned @spec.json";
     return null;

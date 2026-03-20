@@ -19,6 +19,12 @@ pub const StandardBodyKind = enum {
     nft_report_static_data,
     nft_get_royalty_params,
     nft_report_royalty_params,
+    sbt_prove_ownership,
+    sbt_request_owner,
+    sbt_destroy,
+    sbt_revoke,
+    sbt_ownership_proof,
+    sbt_owner_info,
     nft_transfer,
     nft_ownership_assigned,
 };
@@ -37,6 +43,12 @@ pub fn parseKind(text: []const u8) !StandardBodyKind {
     if (std.ascii.eqlIgnoreCase(text, "nft_report_static_data") or std.ascii.eqlIgnoreCase(text, "nft-report-static-data") or std.ascii.eqlIgnoreCase(text, "report_static_data") or std.ascii.eqlIgnoreCase(text, "report-static-data")) return .nft_report_static_data;
     if (std.ascii.eqlIgnoreCase(text, "nft_get_royalty_params") or std.ascii.eqlIgnoreCase(text, "nft-get-royalty-params") or std.ascii.eqlIgnoreCase(text, "get_royalty_params") or std.ascii.eqlIgnoreCase(text, "get-royalty-params")) return .nft_get_royalty_params;
     if (std.ascii.eqlIgnoreCase(text, "nft_report_royalty_params") or std.ascii.eqlIgnoreCase(text, "nft-report-royalty-params") or std.ascii.eqlIgnoreCase(text, "report_royalty_params") or std.ascii.eqlIgnoreCase(text, "report-royalty-params")) return .nft_report_royalty_params;
+    if (std.ascii.eqlIgnoreCase(text, "sbt_prove_ownership") or std.ascii.eqlIgnoreCase(text, "sbt-prove-ownership") or std.ascii.eqlIgnoreCase(text, "prove_ownership") or std.ascii.eqlIgnoreCase(text, "prove-ownership")) return .sbt_prove_ownership;
+    if (std.ascii.eqlIgnoreCase(text, "sbt_request_owner") or std.ascii.eqlIgnoreCase(text, "sbt-request-owner") or std.ascii.eqlIgnoreCase(text, "request_owner") or std.ascii.eqlIgnoreCase(text, "request-owner")) return .sbt_request_owner;
+    if (std.ascii.eqlIgnoreCase(text, "sbt_destroy") or std.ascii.eqlIgnoreCase(text, "sbt-destroy") or std.ascii.eqlIgnoreCase(text, "destroy")) return .sbt_destroy;
+    if (std.ascii.eqlIgnoreCase(text, "sbt_revoke") or std.ascii.eqlIgnoreCase(text, "sbt-revoke") or std.ascii.eqlIgnoreCase(text, "revoke")) return .sbt_revoke;
+    if (std.ascii.eqlIgnoreCase(text, "sbt_ownership_proof") or std.ascii.eqlIgnoreCase(text, "sbt-ownership-proof") or std.ascii.eqlIgnoreCase(text, "ownership_proof") or std.ascii.eqlIgnoreCase(text, "ownership-proof")) return .sbt_ownership_proof;
+    if (std.ascii.eqlIgnoreCase(text, "sbt_owner_info") or std.ascii.eqlIgnoreCase(text, "sbt-owner-info") or std.ascii.eqlIgnoreCase(text, "owner_info") or std.ascii.eqlIgnoreCase(text, "owner-info")) return .sbt_owner_info;
     if (std.ascii.eqlIgnoreCase(text, "nft_transfer") or std.ascii.eqlIgnoreCase(text, "nft-transfer")) return .nft_transfer;
     if (std.ascii.eqlIgnoreCase(text, "nft_ownership_assigned") or std.ascii.eqlIgnoreCase(text, "nft-ownership-assigned") or std.ascii.eqlIgnoreCase(text, "ownership_assigned") or std.ascii.eqlIgnoreCase(text, "ownership-assigned")) return .nft_ownership_assigned;
     return error.UnknownStandardBodyKind;
@@ -57,6 +69,12 @@ pub fn kindName(kind: StandardBodyKind) []const u8 {
         .nft_report_static_data => "nft_report_static_data",
         .nft_get_royalty_params => "nft_get_royalty_params",
         .nft_report_royalty_params => "nft_report_royalty_params",
+        .sbt_prove_ownership => "sbt_prove_ownership",
+        .sbt_request_owner => "sbt_request_owner",
+        .sbt_destroy => "sbt_destroy",
+        .sbt_revoke => "sbt_revoke",
+        .sbt_ownership_proof => "sbt_ownership_proof",
+        .sbt_owner_info => "sbt_owner_info",
         .nft_transfer => "nft_transfer",
         .nft_ownership_assigned => "nft_ownership_assigned",
     };
@@ -100,6 +118,12 @@ pub fn buildBodyFromJsonAlloc(
         .nft_report_static_data => buildNftReportStaticDataBodyAlloc(allocator, object),
         .nft_get_royalty_params => buildNftGetRoyaltyParamsBodyAlloc(allocator, object),
         .nft_report_royalty_params => buildNftReportRoyaltyParamsBodyAlloc(allocator, object),
+        .sbt_prove_ownership => buildSbtProveOwnershipBodyAlloc(allocator, object),
+        .sbt_request_owner => buildSbtRequestOwnerBodyAlloc(allocator, object),
+        .sbt_destroy => buildSbtDestroyBodyAlloc(allocator, object),
+        .sbt_revoke => buildSbtRevokeBodyAlloc(allocator, object),
+        .sbt_ownership_proof => buildSbtOwnershipProofBodyAlloc(allocator, object),
+        .sbt_owner_info => buildSbtOwnerInfoBodyAlloc(allocator, object),
         .nft_transfer => buildNftTransferBodyAlloc(allocator, object),
         .nft_ownership_assigned => buildNftOwnershipAssignedBodyAlloc(allocator, object),
     };
@@ -228,6 +252,116 @@ pub fn createNftReportRoyaltyParamsMessage(
     try builder.storeUint(numerator, 16);
     try builder.storeUint(denominator, 16);
     try builder.storeAddress(destination);
+    const root = try builder.toCell(allocator);
+    defer root.deinit(allocator);
+    return boc.serializeBoc(allocator, root);
+}
+
+pub fn createSbtProveOwnershipMessage(
+    allocator: std.mem.Allocator,
+    query_id: u64,
+    destination: []const u8,
+    forward_payload: []const u8,
+    with_content: bool,
+) ![]u8 {
+    var builder = cell.Builder.init();
+    try builder.storeUint(0x04DED148, 32);
+    try builder.storeUint(query_id, 64);
+    try builder.storeAddress(destination);
+    try body_builder.storeRefBoc(&builder, allocator, forward_payload);
+    try builder.storeUint(if (with_content) 1 else 0, 1);
+    const root = try builder.toCell(allocator);
+    defer root.deinit(allocator);
+    return boc.serializeBoc(allocator, root);
+}
+
+pub fn createSbtRequestOwnerMessage(
+    allocator: std.mem.Allocator,
+    query_id: u64,
+    destination: []const u8,
+    forward_payload: []const u8,
+    with_content: bool,
+) ![]u8 {
+    var builder = cell.Builder.init();
+    try builder.storeUint(0xD0C3BFEA, 32);
+    try builder.storeUint(query_id, 64);
+    try builder.storeAddress(destination);
+    try body_builder.storeRefBoc(&builder, allocator, forward_payload);
+    try builder.storeUint(if (with_content) 1 else 0, 1);
+    const root = try builder.toCell(allocator);
+    defer root.deinit(allocator);
+    return boc.serializeBoc(allocator, root);
+}
+
+pub fn createSbtDestroyMessage(allocator: std.mem.Allocator, query_id: u64) ![]u8 {
+    var builder = cell.Builder.init();
+    try builder.storeUint(0x1F04537A, 32);
+    try builder.storeUint(query_id, 64);
+    const root = try builder.toCell(allocator);
+    defer root.deinit(allocator);
+    return boc.serializeBoc(allocator, root);
+}
+
+pub fn createSbtRevokeMessage(allocator: std.mem.Allocator, query_id: u64) ![]u8 {
+    var builder = cell.Builder.init();
+    try builder.storeUint(0x6F89F5E3, 32);
+    try builder.storeUint(query_id, 64);
+    const root = try builder.toCell(allocator);
+    defer root.deinit(allocator);
+    return boc.serializeBoc(allocator, root);
+}
+
+pub fn createSbtOwnershipProofMessage(
+    allocator: std.mem.Allocator,
+    query_id: u64,
+    item_id_bytes: []const u8,
+    owner: []const u8,
+    data_boc: []const u8,
+    revoked_at: u64,
+    content_boc: ?[]const u8,
+) ![]u8 {
+    var builder = cell.Builder.init();
+    try builder.storeUint(0x0524C7AE, 32);
+    try builder.storeUint(query_id, 64);
+    try builder.storeUintBytes(item_id_bytes, 256);
+    try builder.storeAddress(owner);
+    try body_builder.storeRefBoc(&builder, allocator, data_boc);
+    try builder.storeUint(revoked_at, 64);
+    if (content_boc) |payload| {
+        try builder.storeUint(1, 1);
+        try body_builder.storeRefBoc(&builder, allocator, payload);
+    } else {
+        try builder.storeUint(0, 1);
+    }
+    const root = try builder.toCell(allocator);
+    defer root.deinit(allocator);
+    return boc.serializeBoc(allocator, root);
+}
+
+pub fn createSbtOwnerInfoMessage(
+    allocator: std.mem.Allocator,
+    query_id: u64,
+    item_id_bytes: []const u8,
+    initiator: []const u8,
+    owner: []const u8,
+    data_boc: []const u8,
+    revoked_at: u64,
+    content_boc: ?[]const u8,
+) ![]u8 {
+    var builder = cell.Builder.init();
+    try builder.storeUint(0x0DD607E3, 32);
+    try builder.storeUint(query_id, 64);
+    try builder.storeUintBytes(item_id_bytes, 256);
+    try builder.storeAddress(initiator);
+    try builder.storeAddress(owner);
+    try body_builder.storeRefBoc(&builder, allocator, data_boc);
+    try builder.storeUint(revoked_at, 64);
+    if (content_boc) |payload| {
+        try builder.storeUint(1, 1);
+        try body_builder.storeRefBoc(&builder, allocator, payload);
+    } else {
+        try builder.storeUint(0, 1);
+    }
     const root = try builder.toCell(allocator);
     defer root.deinit(allocator);
     return boc.serializeBoc(allocator, root);
@@ -393,6 +527,93 @@ fn buildNftReportRoyaltyParamsBodyAlloc(allocator: std.mem.Allocator, object: st
         @intCast(try getRequiredU64(object, "numerator")),
         @intCast(try getRequiredU64(object, "denominator")),
         try getRequiredString(object, "destination"),
+    );
+}
+
+fn buildSbtProveOwnershipBodyAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap) ![]u8 {
+    const forward_payload = try loadRequiredPayloadAlloc(
+        allocator,
+        object,
+        "forward_payload_boc_base64",
+        "forward_comment",
+    );
+    defer allocator.free(forward_payload);
+
+    return createSbtProveOwnershipMessage(
+        allocator,
+        try getOptionalU64(object, "query_id", 0),
+        try getRequiredString(object, "destination"),
+        forward_payload,
+        try getOptionalBool(object, "with_content", false),
+    );
+}
+
+fn buildSbtRequestOwnerBodyAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap) ![]u8 {
+    const forward_payload = try loadRequiredPayloadAlloc(
+        allocator,
+        object,
+        "forward_payload_boc_base64",
+        "forward_comment",
+    );
+    defer allocator.free(forward_payload);
+
+    return createSbtRequestOwnerMessage(
+        allocator,
+        try getOptionalU64(object, "query_id", 0),
+        try getRequiredString(object, "destination"),
+        forward_payload,
+        try getOptionalBool(object, "with_content", false),
+    );
+}
+
+fn buildSbtDestroyBodyAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap) ![]u8 {
+    return createSbtDestroyMessage(allocator, try getOptionalU64(object, "query_id", 0));
+}
+
+fn buildSbtRevokeBodyAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap) ![]u8 {
+    return createSbtRevokeMessage(allocator, try getOptionalU64(object, "query_id", 0));
+}
+
+fn buildSbtOwnershipProofBodyAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap) ![]u8 {
+    const item_id_bytes = try parseJsonUnsignedBytesAlloc(allocator, object.get("item_id") orelse return error.MissingStandardBodyField);
+    defer allocator.free(item_id_bytes);
+
+    const data_boc = try loadRequiredPayloadAlloc(allocator, object, "data_boc_base64", "data_comment");
+    defer allocator.free(data_boc);
+
+    const content_boc = try loadOptionalBocAlloc(allocator, object, "content_boc_base64");
+    defer if (content_boc) |value| allocator.free(value);
+
+    return createSbtOwnershipProofMessage(
+        allocator,
+        try getOptionalU64(object, "query_id", 0),
+        item_id_bytes,
+        try getRequiredString(object, "owner"),
+        data_boc,
+        try getOptionalU64(object, "revoked_at", 0),
+        content_boc,
+    );
+}
+
+fn buildSbtOwnerInfoBodyAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap) ![]u8 {
+    const item_id_bytes = try parseJsonUnsignedBytesAlloc(allocator, object.get("item_id") orelse return error.MissingStandardBodyField);
+    defer allocator.free(item_id_bytes);
+
+    const data_boc = try loadRequiredPayloadAlloc(allocator, object, "data_boc_base64", "data_comment");
+    defer allocator.free(data_boc);
+
+    const content_boc = try loadOptionalBocAlloc(allocator, object, "content_boc_base64");
+    defer if (content_boc) |value| allocator.free(value);
+
+    return createSbtOwnerInfoMessage(
+        allocator,
+        try getOptionalU64(object, "query_id", 0),
+        item_id_bytes,
+        try getRequiredString(object, "initiator"),
+        try getRequiredString(object, "owner"),
+        data_boc,
+        try getOptionalU64(object, "revoked_at", 0),
+        content_boc,
     );
 }
 
@@ -650,6 +871,18 @@ fn loadOptionalPayloadAlloc(
     return null;
 }
 
+fn loadRequiredPayloadAlloc(
+    allocator: std.mem.Allocator,
+    object: std.json.ObjectMap,
+    boc_field: []const u8,
+    comment_field: []const u8,
+) ![]u8 {
+    if (try loadOptionalPayloadAlloc(allocator, object, boc_field, comment_field)) |value| {
+        return value;
+    }
+    return buildEmptyCellBocAlloc(allocator);
+}
+
 fn loadOptionalBocAlloc(allocator: std.mem.Allocator, object: std.json.ObjectMap, field: []const u8) !?[]u8 {
     const value = object.get(field) orelse return null;
     return switch (value) {
@@ -670,6 +903,13 @@ fn decodeBase64WithDecoder(allocator: std.mem.Allocator, input: []const u8, comp
     errdefer allocator.free(output);
     try decoder.decode(output, input);
     return output;
+}
+
+fn buildEmptyCellBocAlloc(allocator: std.mem.Allocator) ![]u8 {
+    var builder = cell.Builder.init();
+    const root = try builder.toCell(allocator);
+    defer root.deinit(allocator);
+    return boc.serializeBoc(allocator, root);
 }
 
 test "standard body builds comment body from json" {
@@ -867,6 +1107,99 @@ test "standard body builds nft report royalty params" {
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"numerator\":25") != null);
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"denominator\":1000") != null);
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"destination\":\"0:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"") != null);
+}
+
+test "standard body builds sbt prove ownership" {
+    const allocator = std.testing.allocator;
+    const body_boc = try buildBodyFromJsonAlloc(allocator, .sbt_prove_ownership,
+        \\{
+        \\  "query_id": 12,
+        \\  "destination": "0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        \\  "forward_comment": "prove",
+        \\  "with_content": true
+        \\}
+    );
+    defer allocator.free(body_boc);
+
+    var analysis = try @import("../core/body_inspector.zig").inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("sbt_prove_ownership", analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"with_content\":true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"forward_comment\":\"prove\"") != null);
+}
+
+test "standard body builds sbt request owner" {
+    const allocator = std.testing.allocator;
+    const body_boc = try buildBodyFromJsonAlloc(allocator, .sbt_request_owner,
+        \\{
+        \\  "query_id": 13,
+        \\  "destination": "0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        \\  "forward_comment": "owner?"
+        \\}
+    );
+    defer allocator.free(body_boc);
+
+    var analysis = try @import("../core/body_inspector.zig").inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("sbt_request_owner", analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"forward_comment\":\"owner?\"") != null);
+}
+
+test "standard body builds sbt destroy and revoke" {
+    const allocator = std.testing.allocator;
+
+    const destroy_boc = try buildBodyFromJsonAlloc(allocator, .sbt_destroy, "{\"query_id\":14}");
+    defer allocator.free(destroy_boc);
+    var destroy_analysis = try @import("../core/body_inspector.zig").inspectBodyBocAlloc(allocator, destroy_boc);
+    defer destroy_analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("sbt_destroy", destroy_analysis.opcode_name.?);
+
+    const revoke_boc = try buildBodyFromJsonAlloc(allocator, .sbt_revoke, "{\"query_id\":15}");
+    defer allocator.free(revoke_boc);
+    var revoke_analysis = try @import("../core/body_inspector.zig").inspectBodyBocAlloc(allocator, revoke_boc);
+    defer revoke_analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("sbt_revoke", revoke_analysis.opcode_name.?);
+}
+
+test "standard body builds sbt ownership proof" {
+    const allocator = std.testing.allocator;
+    const body_boc = try buildBodyFromJsonAlloc(allocator, .sbt_ownership_proof,
+        \\{
+        \\  "query_id": 16,
+        \\  "item_id": "0x1234",
+        \\  "owner": "0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        \\  "data_comment": "proof",
+        \\  "revoked_at": 99
+        \\}
+    );
+    defer allocator.free(body_boc);
+
+    var analysis = try @import("../core/body_inspector.zig").inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("sbt_ownership_proof", analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"item_id\":\"0x1234\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"data_comment\":\"proof\"") != null);
+}
+
+test "standard body builds sbt owner info" {
+    const allocator = std.testing.allocator;
+    const body_boc = try buildBodyFromJsonAlloc(allocator, .sbt_owner_info,
+        \\{
+        \\  "query_id": 17,
+        \\  "item_id": "0x1234",
+        \\  "initiator": "0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        \\  "owner": "0:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        \\  "data_comment": "owner-info",
+        \\  "revoked_at": 100
+        \\}
+    );
+    defer allocator.free(body_boc);
+
+    var analysis = try @import("../core/body_inspector.zig").inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("sbt_owner_info", analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"owner\":\"0:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"data_comment\":\"owner-info\"") != null);
 }
 
 test "standard body builds nft transfer with forward comment" {

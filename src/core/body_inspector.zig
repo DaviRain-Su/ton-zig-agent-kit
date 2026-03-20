@@ -37,6 +37,12 @@ const op_nft_get_static_data: u32 = 0x2FCB26A2;
 const op_nft_report_static_data: u32 = 0x8B771735;
 const op_nft_get_royalty_params: u32 = 0x693D3950;
 const op_nft_report_royalty_params: u32 = 0xA8CB00AD;
+const op_sbt_prove_ownership: u32 = 0x04DED148;
+const op_sbt_request_owner: u32 = 0xD0C3BFEA;
+const op_sbt_destroy: u32 = 0x1F04537A;
+const op_sbt_revoke: u32 = 0x6F89F5E3;
+const op_sbt_ownership_proof: u32 = 0x0524C7AE;
+const op_sbt_owner_info: u32 = 0x0DD607E3;
 const op_nft_transfer: u32 = 0x5FCC3D14;
 const op_nft_ownership_assigned: u32 = 0x05138D91;
 
@@ -93,6 +99,12 @@ fn knownOpcodeName(opcode: u32) ?[]const u8 {
         op_nft_report_static_data => "nft_report_static_data",
         op_nft_get_royalty_params => "nft_get_royalty_params",
         op_nft_report_royalty_params => "nft_report_royalty_params",
+        op_sbt_prove_ownership => "sbt_prove_ownership",
+        op_sbt_request_owner => "sbt_request_owner",
+        op_sbt_destroy => "sbt_destroy",
+        op_sbt_revoke => "sbt_revoke",
+        op_sbt_ownership_proof => "sbt_ownership_proof",
+        op_sbt_owner_info => "sbt_owner_info",
         op_nft_transfer => "nft_transfer",
         op_nft_ownership_assigned => "nft_ownership_assigned",
         else => null,
@@ -113,6 +125,12 @@ fn decodeKnownBodyJsonAlloc(allocator: std.mem.Allocator, opcode: u32, slice: *c
         op_nft_report_static_data => try decodeNftReportStaticDataJsonAlloc(allocator, slice),
         op_nft_get_royalty_params => try decodeNftGetRoyaltyParamsJsonAlloc(allocator, slice),
         op_nft_report_royalty_params => try decodeNftReportRoyaltyParamsJsonAlloc(allocator, slice),
+        op_sbt_prove_ownership => try decodeSbtProveOwnershipJsonAlloc(allocator, slice),
+        op_sbt_request_owner => try decodeSbtRequestOwnerJsonAlloc(allocator, slice),
+        op_sbt_destroy => try decodeSbtDestroyJsonAlloc(allocator, slice),
+        op_sbt_revoke => try decodeSbtRevokeJsonAlloc(allocator, slice),
+        op_sbt_ownership_proof => try decodeSbtOwnershipProofJsonAlloc(allocator, slice),
+        op_sbt_owner_info => try decodeSbtOwnerInfoJsonAlloc(allocator, slice),
         op_nft_transfer => try decodeNftTransferJsonAlloc(allocator, slice),
         op_nft_ownership_assigned => try decodeNftOwnershipAssignedJsonAlloc(allocator, slice),
         else => null,
@@ -208,6 +226,11 @@ fn loadEitherPayloadAnalysisAlloc(allocator: std.mem.Allocator, slice: *cell.Sli
         return inspectPayloadCellAlloc(allocator, payload);
     }
     return inspectPayloadSliceAlloc(allocator, slice);
+}
+
+fn loadRequiredRefPayloadAnalysisAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror!PayloadAnalysis {
+    const payload = try slice.loadRef();
+    return inspectPayloadCellAlloc(allocator, payload);
 }
 
 fn decodeExcessesJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror![]u8 {
@@ -455,6 +478,176 @@ fn decodeNftReportRoyaltyParamsJsonAlloc(allocator: std.mem.Allocator, slice: *c
     try writer.writer.print("{d}", .{denominator});
     try writer.writer.writeAll(",\"destination\":");
     try writeJsonString(&writer.writer, destination_raw);
+    try writer.writer.writeByte('}');
+    return try writer.toOwnedSlice();
+}
+
+fn decodeSbtProveOwnershipJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror![]u8 {
+    const query_id = try slice.loadUint(64);
+    const destination = try slice.loadAddress();
+    var forward_payload = try loadRequiredRefPayloadAnalysisAlloc(allocator, slice);
+    defer forward_payload.deinit(allocator);
+    const with_content = (try slice.loadUint(1)) == 1;
+
+    const destination_raw = try address.formatRaw(allocator, &destination);
+    defer allocator.free(destination_raw);
+
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+    try writer.writer.writeAll("{\"query_id\":");
+    try writer.writer.print("{d}", .{query_id});
+    try writer.writer.writeAll(",\"destination\":");
+    try writeJsonString(&writer.writer, destination_raw);
+    try appendForwardPayloadJson(&writer.writer, &forward_payload);
+    try writer.writer.writeAll(",\"with_content\":");
+    try writer.writer.writeAll(if (with_content) "true" else "false");
+    try writer.writer.writeByte('}');
+    return try writer.toOwnedSlice();
+}
+
+fn decodeSbtRequestOwnerJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror![]u8 {
+    const query_id = try slice.loadUint(64);
+    const destination = try slice.loadAddress();
+    var forward_payload = try loadRequiredRefPayloadAnalysisAlloc(allocator, slice);
+    defer forward_payload.deinit(allocator);
+    const with_content = (try slice.loadUint(1)) == 1;
+
+    const destination_raw = try address.formatRaw(allocator, &destination);
+    defer allocator.free(destination_raw);
+
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+    try writer.writer.writeAll("{\"query_id\":");
+    try writer.writer.print("{d}", .{query_id});
+    try writer.writer.writeAll(",\"destination\":");
+    try writeJsonString(&writer.writer, destination_raw);
+    try appendForwardPayloadJson(&writer.writer, &forward_payload);
+    try writer.writer.writeAll(",\"with_content\":");
+    try writer.writer.writeAll(if (with_content) "true" else "false");
+    try writer.writer.writeByte('}');
+    return try writer.toOwnedSlice();
+}
+
+fn decodeSbtDestroyJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror![]u8 {
+    const query_id = try slice.loadUint(64);
+
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+    try writer.writer.writeAll("{\"query_id\":");
+    try writer.writer.print("{d}", .{query_id});
+    try writer.writer.writeByte('}');
+    return try writer.toOwnedSlice();
+}
+
+fn decodeSbtRevokeJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror![]u8 {
+    return decodeSbtDestroyJsonAlloc(allocator, slice);
+}
+
+fn decodeSbtOwnershipProofJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror![]u8 {
+    const query_id = try slice.loadUint(64);
+    const item_id = try loadBitsHexTextAlloc(allocator, slice, 256);
+    defer allocator.free(item_id);
+    const owner = try slice.loadAddress();
+    var data_payload = try loadRequiredRefPayloadAnalysisAlloc(allocator, slice);
+    defer data_payload.deinit(allocator);
+    const revoked_at = try slice.loadUint(64);
+    var content_payload = try loadMaybeRefPayloadAlloc(allocator, slice);
+    defer content_payload.deinit(allocator);
+
+    const owner_raw = try address.formatRaw(allocator, &owner);
+    defer allocator.free(owner_raw);
+
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+    try writer.writer.writeAll("{\"query_id\":");
+    try writer.writer.print("{d}", .{query_id});
+    try writer.writer.writeAll(",\"item_id\":");
+    try writeJsonString(&writer.writer, item_id);
+    try writer.writer.writeAll(",\"owner\":");
+    try writeJsonString(&writer.writer, owner_raw);
+    try writer.writer.writeAll(",\"data_boc_base64\":");
+    if (data_payload.boc_base64) |value| {
+        try writeJsonString(&writer.writer, value);
+    } else {
+        try writer.writer.writeAll("null");
+    }
+    try writer.writer.writeAll(",\"data_comment\":");
+    if (data_payload.comment) |value| {
+        try writeJsonString(&writer.writer, value);
+    } else {
+        try writer.writer.writeAll("null");
+    }
+    try writer.writer.writeAll(",\"data_utf8_tail\":");
+    if (data_payload.tail_utf8) |value| {
+        try writeJsonString(&writer.writer, value);
+    } else {
+        try writer.writer.writeAll("null");
+    }
+    try writer.writer.writeAll(",\"revoked_at\":");
+    try writer.writer.print("{d}", .{revoked_at});
+    try writer.writer.writeAll(",\"content_boc_base64\":");
+    if (content_payload.boc_base64) |value| {
+        try writeJsonString(&writer.writer, value);
+    } else {
+        try writer.writer.writeAll("null");
+    }
+    try writer.writer.writeByte('}');
+    return try writer.toOwnedSlice();
+}
+
+fn decodeSbtOwnerInfoJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror![]u8 {
+    const query_id = try slice.loadUint(64);
+    const item_id = try loadBitsHexTextAlloc(allocator, slice, 256);
+    defer allocator.free(item_id);
+    const initiator = try slice.loadAddress();
+    const owner = try slice.loadAddress();
+    var data_payload = try loadRequiredRefPayloadAnalysisAlloc(allocator, slice);
+    defer data_payload.deinit(allocator);
+    const revoked_at = try slice.loadUint(64);
+    var content_payload = try loadMaybeRefPayloadAlloc(allocator, slice);
+    defer content_payload.deinit(allocator);
+
+    const initiator_raw = try address.formatRaw(allocator, &initiator);
+    defer allocator.free(initiator_raw);
+    const owner_raw = try address.formatRaw(allocator, &owner);
+    defer allocator.free(owner_raw);
+
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+    try writer.writer.writeAll("{\"query_id\":");
+    try writer.writer.print("{d}", .{query_id});
+    try writer.writer.writeAll(",\"item_id\":");
+    try writeJsonString(&writer.writer, item_id);
+    try writer.writer.writeAll(",\"initiator\":");
+    try writeJsonString(&writer.writer, initiator_raw);
+    try writer.writer.writeAll(",\"owner\":");
+    try writeJsonString(&writer.writer, owner_raw);
+    try writer.writer.writeAll(",\"data_boc_base64\":");
+    if (data_payload.boc_base64) |value| {
+        try writeJsonString(&writer.writer, value);
+    } else {
+        try writer.writer.writeAll("null");
+    }
+    try writer.writer.writeAll(",\"data_comment\":");
+    if (data_payload.comment) |value| {
+        try writeJsonString(&writer.writer, value);
+    } else {
+        try writer.writer.writeAll("null");
+    }
+    try writer.writer.writeAll(",\"data_utf8_tail\":");
+    if (data_payload.tail_utf8) |value| {
+        try writeJsonString(&writer.writer, value);
+    } else {
+        try writer.writer.writeAll("null");
+    }
+    try writer.writer.writeAll(",\"revoked_at\":");
+    try writer.writer.print("{d}", .{revoked_at});
+    try writer.writer.writeAll(",\"content_boc_base64\":");
+    if (content_payload.boc_base64) |value| {
+        try writeJsonString(&writer.writer, value);
+    } else {
+        try writer.writer.writeAll("null");
+    }
     try writer.writer.writeByte('}');
     return try writer.toOwnedSlice();
 }
@@ -1018,6 +1211,88 @@ test "body inspector best-effort decodes nft report royalty params" {
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"numerator\":25") != null);
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"denominator\":1000") != null);
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"destination\":\"0:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"") != null);
+}
+
+test "body inspector best-effort decodes sbt prove ownership" {
+    const allocator = std.testing.allocator;
+
+    const forward_payload = try @import("../contract/standard_body.zig").buildCommentBodyBocAlloc(allocator, "prove");
+    defer allocator.free(forward_payload);
+
+    const body_boc = try @import("../contract/standard_body.zig").createSbtProveOwnershipMessage(
+        allocator,
+        22,
+        "0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        forward_payload,
+        true,
+    );
+    defer allocator.free(body_boc);
+
+    var analysis = try inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+
+    try std.testing.expectEqual(@as(?u32, op_sbt_prove_ownership), analysis.opcode);
+    try std.testing.expectEqualStrings("sbt_prove_ownership", analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"forward_comment\":\"prove\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"with_content\":true") != null);
+}
+
+test "body inspector best-effort decodes sbt destroy and revoke" {
+    const allocator = std.testing.allocator;
+
+    const destroy_boc = try @import("../contract/standard_body.zig").createSbtDestroyMessage(allocator, 23);
+    defer allocator.free(destroy_boc);
+    var destroy_analysis = try inspectBodyBocAlloc(allocator, destroy_boc);
+    defer destroy_analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("sbt_destroy", destroy_analysis.opcode_name.?);
+
+    const revoke_boc = try @import("../contract/standard_body.zig").createSbtRevokeMessage(allocator, 24);
+    defer allocator.free(revoke_boc);
+    var revoke_analysis = try inspectBodyBocAlloc(allocator, revoke_boc);
+    defer revoke_analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("sbt_revoke", revoke_analysis.opcode_name.?);
+}
+
+test "body inspector best-effort decodes sbt ownership proof and owner info" {
+    const allocator = std.testing.allocator;
+
+    const data_boc = try @import("../contract/standard_body.zig").buildCommentBodyBocAlloc(allocator, "proof");
+    defer allocator.free(data_boc);
+
+    const ownership_boc = try @import("../contract/standard_body.zig").createSbtOwnershipProofMessage(
+        allocator,
+        25,
+        &.{ 0x12, 0x34 },
+        "0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        data_boc,
+        55,
+        null,
+    );
+    defer allocator.free(ownership_boc);
+
+    var ownership_analysis = try inspectBodyBocAlloc(allocator, ownership_boc);
+    defer ownership_analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("sbt_ownership_proof", ownership_analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, ownership_analysis.decoded_json.?, "\"item_id\":\"0x1234\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, ownership_analysis.decoded_json.?, "\"data_comment\":\"proof\"") != null);
+
+    const owner_info_boc = try @import("../contract/standard_body.zig").createSbtOwnerInfoMessage(
+        allocator,
+        26,
+        &.{ 0x12, 0x34 },
+        "0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "0:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        data_boc,
+        56,
+        null,
+    );
+    defer allocator.free(owner_info_boc);
+
+    var owner_info_analysis = try inspectBodyBocAlloc(allocator, owner_info_boc);
+    defer owner_info_analysis.deinit(allocator);
+    try std.testing.expectEqualStrings("sbt_owner_info", owner_info_analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, owner_info_analysis.decoded_json.?, "\"owner\":\"0:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, owner_info_analysis.decoded_json.?, "\"data_comment\":\"proof\"") != null);
 }
 
 test "body inspector best-effort decodes nft ownership assigned" {
