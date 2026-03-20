@@ -26,11 +26,15 @@ pub const BodyAnalysis = struct {
 const op_comment: u32 = 0x00000000;
 const op_encrypted_comment: u32 = 0x2167DA4B;
 const op_excesses: u32 = 0xD53276DB;
+const op_jetton_provide_wallet_address: u32 = 0x2C76B973;
+const op_jetton_take_wallet_address: u32 = 0xD1735400;
 const op_jetton_transfer: u32 = 0x0F8A7EA5;
 const op_jetton_internal_transfer: u32 = 0x178D4519;
 const op_jetton_transfer_notification: u32 = 0x7362D09C;
 const op_jetton_burn: u32 = 0x595F07BC;
 const op_jetton_burn_notification: u32 = 0x7BDD97DE;
+const op_nft_get_static_data: u32 = 0x2FCB26A2;
+const op_nft_report_static_data: u32 = 0x8B771735;
 const op_nft_transfer: u32 = 0x5FCC3D14;
 const op_nft_ownership_assigned: u32 = 0x05138D91;
 
@@ -76,11 +80,15 @@ fn knownOpcodeName(opcode: u32) ?[]const u8 {
         op_comment => "comment",
         op_encrypted_comment => "encrypted_comment",
         op_excesses => "excesses",
+        op_jetton_provide_wallet_address => "jetton_provide_wallet_address",
+        op_jetton_take_wallet_address => "jetton_take_wallet_address",
         op_jetton_transfer => "jetton_transfer",
         op_jetton_internal_transfer => "jetton_internal_transfer",
         op_jetton_transfer_notification => "jetton_transfer_notification",
         op_jetton_burn => "jetton_burn",
         op_jetton_burn_notification => "jetton_burn_notification",
+        op_nft_get_static_data => "nft_get_static_data",
+        op_nft_report_static_data => "nft_report_static_data",
         op_nft_transfer => "nft_transfer",
         op_nft_ownership_assigned => "nft_ownership_assigned",
         else => null,
@@ -90,11 +98,15 @@ fn knownOpcodeName(opcode: u32) ?[]const u8 {
 fn decodeKnownBodyJsonAlloc(allocator: std.mem.Allocator, opcode: u32, slice: *cell.Slice) anyerror!?[]u8 {
     return switch (opcode) {
         op_excesses => try decodeExcessesJsonAlloc(allocator, slice),
+        op_jetton_provide_wallet_address => try decodeJettonProvideWalletAddressJsonAlloc(allocator, slice),
+        op_jetton_take_wallet_address => try decodeJettonTakeWalletAddressJsonAlloc(allocator, slice),
         op_jetton_transfer => try decodeJettonTransferJsonAlloc(allocator, slice),
         op_jetton_internal_transfer => try decodeJettonInternalTransferJsonAlloc(allocator, slice),
         op_jetton_transfer_notification => try decodeJettonTransferNotificationJsonAlloc(allocator, slice),
         op_jetton_burn => try decodeJettonBurnJsonAlloc(allocator, slice),
         op_jetton_burn_notification => try decodeJettonBurnNotificationJsonAlloc(allocator, slice),
+        op_nft_get_static_data => try decodeNftGetStaticDataJsonAlloc(allocator, slice),
+        op_nft_report_static_data => try decodeNftReportStaticDataJsonAlloc(allocator, slice),
         op_nft_transfer => try decodeNftTransferJsonAlloc(allocator, slice),
         op_nft_ownership_assigned => try decodeNftOwnershipAssignedJsonAlloc(allocator, slice),
         else => null,
@@ -173,6 +185,16 @@ fn loadMaybeRefPayloadAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) an
     };
 }
 
+fn loadMaybeRefAddressRawAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror!?[]u8 {
+    const has_ref = (try slice.loadUint(1)) == 1;
+    if (!has_ref) return null;
+
+    const payload = try slice.loadRef();
+    var payload_slice = payload.toSlice();
+    const addr = try payload_slice.loadAddress();
+    return try address.formatRaw(allocator, &addr);
+}
+
 fn loadEitherPayloadAnalysisAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror!PayloadAnalysis {
     const is_ref = (try slice.loadUint(1)) == 1;
     if (is_ref) {
@@ -189,6 +211,51 @@ fn decodeExcessesJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) any
     errdefer writer.deinit();
     try writer.writer.writeAll("{\"query_id\":");
     try writer.writer.print("{d}", .{query_id});
+    try writer.writer.writeByte('}');
+    return try writer.toOwnedSlice();
+}
+
+fn decodeJettonProvideWalletAddressJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror![]u8 {
+    const query_id = try slice.loadUint(64);
+    const owner_address = try slice.loadAddress();
+    const include_address = (try slice.loadUint(1)) == 1;
+
+    const owner_raw = try address.formatRaw(allocator, &owner_address);
+    defer allocator.free(owner_raw);
+
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+    try writer.writer.writeAll("{\"query_id\":");
+    try writer.writer.print("{d}", .{query_id});
+    try writer.writer.writeAll(",\"owner_address\":");
+    try writeJsonString(&writer.writer, owner_raw);
+    try writer.writer.writeAll(",\"include_address\":");
+    try writer.writer.writeAll(if (include_address) "true" else "false");
+    try writer.writer.writeByte('}');
+    return try writer.toOwnedSlice();
+}
+
+fn decodeJettonTakeWalletAddressJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror![]u8 {
+    const query_id = try slice.loadUint(64);
+    const wallet_address = try slice.loadAddress();
+    const owner_address = try loadMaybeRefAddressRawAlloc(allocator, slice);
+    defer if (owner_address) |value| allocator.free(value);
+
+    const wallet_raw = try address.formatRaw(allocator, &wallet_address);
+    defer allocator.free(wallet_raw);
+
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+    try writer.writer.writeAll("{\"query_id\":");
+    try writer.writer.print("{d}", .{query_id});
+    try writer.writer.writeAll(",\"wallet_address\":");
+    try writeJsonString(&writer.writer, wallet_raw);
+    try writer.writer.writeAll(",\"owner_address\":");
+    if (owner_address) |value| {
+        try writeJsonString(&writer.writer, value);
+    } else {
+        try writer.writer.writeAll("null");
+    }
     try writer.writer.writeByte('}');
     return try writer.toOwnedSlice();
 }
@@ -318,6 +385,37 @@ fn decodeJettonBurnNotificationJsonAlloc(allocator: std.mem.Allocator, slice: *c
     try writeJsonString(&writer.writer, sender_raw);
     try writer.writer.writeAll(",\"response_destination\":");
     try writeJsonString(&writer.writer, response_destination_raw);
+    try writer.writer.writeByte('}');
+    return try writer.toOwnedSlice();
+}
+
+fn decodeNftGetStaticDataJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror![]u8 {
+    const query_id = try slice.loadUint(64);
+
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+    try writer.writer.writeAll("{\"query_id\":");
+    try writer.writer.print("{d}", .{query_id});
+    try writer.writer.writeByte('}');
+    return try writer.toOwnedSlice();
+}
+
+fn decodeNftReportStaticDataJsonAlloc(allocator: std.mem.Allocator, slice: *cell.Slice) anyerror![]u8 {
+    const query_id = try slice.loadUint(64);
+    const index = try loadBitsHexTextAlloc(allocator, slice, 256);
+    defer allocator.free(index);
+    const collection = try slice.loadAddress();
+    const collection_raw = try address.formatRaw(allocator, &collection);
+    defer allocator.free(collection_raw);
+
+    var writer = std.io.Writer.Allocating.init(allocator);
+    errdefer writer.deinit();
+    try writer.writer.writeAll("{\"query_id\":");
+    try writer.writer.print("{d}", .{query_id});
+    try writer.writer.writeAll(",\"index\":");
+    try writeJsonString(&writer.writer, index);
+    try writer.writer.writeAll(",\"collection\":");
+    try writeJsonString(&writer.writer, collection_raw);
     try writer.writer.writeByte('}');
     return try writer.toOwnedSlice();
 }
@@ -532,6 +630,50 @@ fn appendSnakeSliceBytes(writer: anytype, slice: *cell.Slice) !void {
     }
 }
 
+fn loadBitsHexTextAlloc(allocator: std.mem.Allocator, slice: *cell.Slice, bits: u16) ![]u8 {
+    if (bits % 8 != 0) return error.UnsupportedAbiType;
+    const bytes = try slice.loadBits(bits);
+    return formatHexTextAlloc(allocator, trimLeadingZeroBytesView(bytes));
+}
+
+fn trimLeadingZeroBytesView(bytes: []const u8) []const u8 {
+    var start: usize = 0;
+    while (start < bytes.len and bytes[start] == 0) : (start += 1) {}
+    return bytes[start..];
+}
+
+fn formatHexTextAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    if (bytes.len == 0) return allocator.dupe(u8, "0x0");
+
+    const hi_nibble = bytes[0] >> 4;
+    const prefix_digits: usize = if (hi_nibble == 0) 1 else 2;
+    const total_len: usize = 2 + prefix_digits + (bytes.len - 1) * 2;
+    const out = try allocator.alloc(u8, total_len);
+    errdefer allocator.free(out);
+
+    out[0] = '0';
+    out[1] = 'x';
+
+    var idx: usize = 2;
+    if (hi_nibble != 0) {
+        out[idx] = lowerHexChar(hi_nibble);
+        idx += 1;
+    }
+    out[idx] = lowerHexChar(bytes[0] & 0x0F);
+    idx += 1;
+
+    for (bytes[1..]) |byte| {
+        out[idx] = lowerHexChar(byte >> 4);
+        out[idx + 1] = lowerHexChar(byte & 0x0F);
+        idx += 2;
+    }
+    return out;
+}
+
+fn lowerHexChar(value: u8) u8 {
+    return if (value < 10) '0' + value else 'a' + (value - 10);
+}
+
 fn loadUintDynamic(slice: *cell.Slice, bits: u16) !u64 {
     if (bits > 64) return error.UnsupportedAbiType;
     if (slice.remainingBits() < bits) return error.NotEnoughData;
@@ -706,6 +848,46 @@ test "body inspector best-effort decodes excesses" {
     try std.testing.expectEqualStrings("{\"query_id\":44}", analysis.decoded_json.?);
 }
 
+test "body inspector best-effort decodes jetton provide wallet address" {
+    const allocator = std.testing.allocator;
+
+    const body_boc = try @import("../contract/standard_body.zig").createJettonProvideWalletAddressMessage(
+        allocator,
+        12,
+        "0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        true,
+    );
+    defer allocator.free(body_boc);
+
+    var analysis = try inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+
+    try std.testing.expectEqual(@as(?u32, op_jetton_provide_wallet_address), analysis.opcode);
+    try std.testing.expectEqualStrings("jetton_provide_wallet_address", analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"query_id\":12") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"include_address\":true") != null);
+}
+
+test "body inspector best-effort decodes jetton take wallet address" {
+    const allocator = std.testing.allocator;
+
+    const body_boc = try @import("../contract/standard_body.zig").createJettonTakeWalletAddressMessage(
+        allocator,
+        13,
+        "0:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+        "0:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    );
+    defer allocator.free(body_boc);
+
+    var analysis = try inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+
+    try std.testing.expectEqual(@as(?u32, op_jetton_take_wallet_address), analysis.opcode);
+    try std.testing.expectEqualStrings("jetton_take_wallet_address", analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"wallet_address\":\"0:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"owner_address\":\"0:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"") != null);
+}
+
 test "body inspector best-effort decodes jetton burn notification" {
     const allocator = std.testing.allocator;
 
@@ -727,6 +909,40 @@ test "body inspector best-effort decodes jetton burn notification" {
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"amount\":333") != null);
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"sender\":\"0:1111111111111111111111111111111111111111111111111111111111111111\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"response_destination\":\"0:2222222222222222222222222222222222222222222222222222222222222222\"") != null);
+}
+
+test "body inspector best-effort decodes nft get static data" {
+    const allocator = std.testing.allocator;
+
+    const body_boc = try @import("../contract/standard_body.zig").createNftGetStaticDataMessage(allocator, 18);
+    defer allocator.free(body_boc);
+
+    var analysis = try inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+
+    try std.testing.expectEqual(@as(?u32, op_nft_get_static_data), analysis.opcode);
+    try std.testing.expectEqualStrings("nft_get_static_data", analysis.opcode_name.?);
+    try std.testing.expectEqualStrings("{\"query_id\":18}", analysis.decoded_json.?);
+}
+
+test "body inspector best-effort decodes nft report static data" {
+    const allocator = std.testing.allocator;
+
+    const body_boc = try @import("../contract/standard_body.zig").createNftReportStaticDataMessage(
+        allocator,
+        19,
+        &.{ 0x12, 0x34 },
+        "0:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+    );
+    defer allocator.free(body_boc);
+
+    var analysis = try inspectBodyBocAlloc(allocator, body_boc);
+    defer analysis.deinit(allocator);
+
+    try std.testing.expectEqual(@as(?u32, op_nft_report_static_data), analysis.opcode);
+    try std.testing.expectEqualStrings("nft_report_static_data", analysis.opcode_name.?);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"index\":\"0x1234\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, analysis.decoded_json.?, "\"collection\":\"0:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\"") != null);
 }
 
 test "body inspector best-effort decodes nft ownership assigned" {
