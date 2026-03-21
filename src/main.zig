@@ -81,6 +81,586 @@ pub fn main() !void {
         return;
     }
 
+    if (std.mem.eql(u8, command, "tool")) {
+        if (args.len < 3) {
+            std.debug.print("Usage: ton-zig-agent-kit tool <wallet-state|analyze-transfer|analyze-contract-call|watch-payment|inspect-contract|capabilities|recent-activity|portfolio|demo-manifest|runtime-spec> [json_payload]\n", .{});
+            return;
+        }
+
+        const action = args[2];
+        const payload = if (args.len >= 4) args[3] else "{}";
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, payload, .{});
+        defer parsed.deinit();
+        if (parsed.value != .object) {
+            std.debug.print("{{\"success\":false,\"error\":\"InvalidJsonPayload\"}}\n", .{});
+            return;
+        }
+
+        var provider = try initDefaultProvider(allocator);
+        defer provider.deinit();
+
+        const wallet_private_key = loadWalletPrivateKeyFromEnv(allocator) catch null;
+        var tools = ton_zig_agent_kit.tools.tools_mod.ProviderAgentTools.init(
+            allocator,
+            &provider,
+            .{
+                .rpc_url = "",
+                .wallet_private_key = wallet_private_key,
+                .wallet_version = .v4,
+                .wallet_workchain = 0,
+                .wallet_id = signing.default_wallet_id_v4,
+                .wallet_address = if (parsed.value.object.get("wallet_address")) |value| switch (value) {
+                    .string => value.string,
+                    else => null,
+                } else null,
+            },
+        );
+
+        if (std.mem.eql(u8, action, "wallet-state")) {
+            const result = try tools.getWalletState();
+            defer {
+                if (result.wallet_address.len > 0) allocator.free(result.wallet_address);
+                if (result.user_friendly_address.len > 0) allocator.free(result.user_friendly_address);
+                if (result.public_key_hex.len > 0) allocator.free(result.public_key_hex);
+                if (result.state_init_boc.len > 0) allocator.free(result.state_init_boc);
+            }
+            const seqno_text = if (result.seqno) |seqno| try std.fmt.allocPrint(allocator, "{d}", .{seqno}) else "null";
+            defer if (result.seqno != null) allocator.free(seqno_text);
+            std.debug.print(
+                "{{\"success\":{s},\"wallet_address\":\"{s}\",\"user_friendly_address\":\"{s}\",\"wallet_version\":\"{s}\",\"workchain\":{d},\"wallet_id\":{d},\"public_key_hex\":\"{s}\",\"balance\":{d},\"seqno\":{s},\"deployed\":{s},\"state_init_required_for_first_send\":{s},\"state_init_boc\":\"{s}\"}}\n",
+                .{
+                    if (result.success) "true" else "false",
+                    result.wallet_address,
+                    result.user_friendly_address,
+                    signing.walletVersionName(result.wallet_version),
+                    result.workchain,
+                    result.wallet_id,
+                    result.public_key_hex,
+                    result.balance,
+                    seqno_text,
+                    if (result.deployed) "true" else "false",
+                    if (result.state_init_required_for_first_send) "true" else "false",
+                    result.state_init_boc,
+                },
+            );
+            return;
+        }
+
+        if (std.mem.eql(u8, action, "analyze-transfer")) {
+            const destination = if (parsed.value.object.get("destination")) |value| switch (value) {
+                .string => value.string,
+                else => {
+                    std.debug.print("{{\"success\":false,\"error\":\"MissingDestination\"}}\n", .{});
+                    return;
+                },
+            } else {
+                std.debug.print("{{\"success\":false,\"error\":\"MissingDestination\"}}\n", .{});
+                return;
+            };
+            const amount = if (parsed.value.object.get("amount")) |value| switch (value) {
+                .integer => @as(u64, @intCast(value.integer)),
+                .string => try std.fmt.parseInt(u64, value.string, 10),
+                else => 0,
+            } else 0;
+            const comment = if (parsed.value.object.get("comment")) |value| switch (value) {
+                .string => value.string,
+                else => null,
+            } else null;
+
+            var result = try tools.analyzeTransfer(destination, amount, comment);
+            defer result.deinit(allocator);
+            const comment_text = if (result.comment) |value| try std.fmt.allocPrint(allocator, "\"{s}\"", .{value}) else "null";
+            defer if (result.comment != null) allocator.free(comment_text);
+            const seqno_text = if (result.seqno) |seqno| try std.fmt.allocPrint(allocator, "{d}", .{seqno}) else "null";
+            defer if (result.seqno != null) allocator.free(seqno_text);
+            const risk_flags_text = blk: {
+                var writer = std.io.Writer.Allocating.init(allocator);
+                defer writer.deinit();
+                for (result.risk_flags, 0..) |flag, idx| {
+                    if (idx != 0) try writer.writer.writeByte(',');
+                    try writer.writer.print("\"{s}\"", .{flag});
+                }
+                break :blk try writer.toOwnedSlice();
+            };
+            defer allocator.free(risk_flags_text);
+            std.debug.print(
+                "{{\"success\":{s},\"wallet_address\":\"{s}\",\"destination\":\"{s}\",\"amount\":{d},\"comment\":{s},\"wallet_version\":\"{s}\",\"wallet_id\":{d},\"deployed\":{s},\"seqno\":{s},\"state_init_attached_if_execute\":{s},\"estimated_body_kind\":\"{s}\",\"recommended_action\":\"{s}\",\"executable\":{s},\"risk_flags\":[{s}]}}\n",
+                .{
+                    if (result.success) "true" else "false",
+                    result.wallet_address,
+                    result.destination,
+                    result.amount,
+                    comment_text,
+                    signing.walletVersionName(result.wallet_version),
+                    result.wallet_id,
+                    if (result.deployed) "true" else "false",
+                    seqno_text,
+                    if (result.state_init_attached_if_execute) "true" else "false",
+                    result.estimated_body_kind,
+                    result.recommended_action,
+                    if (result.executable) "true" else "false",
+                    risk_flags_text,
+                },
+            );
+            return;
+        }
+
+        if (std.mem.eql(u8, action, "watch-payment")) {
+            const comment = if (parsed.value.object.get("comment")) |value| switch (value) {
+                .string => value.string,
+                else => {
+                    std.debug.print("{{\"success\":false,\"error\":\"MissingComment\"}}\n", .{});
+                    return;
+                },
+            } else {
+                std.debug.print("{{\"success\":false,\"error\":\"MissingComment\"}}\n", .{});
+                return;
+            };
+            const timeout_ms: u32 = if (parsed.value.object.get("timeout_ms")) |value| switch (value) {
+                .integer => @as(u32, @intCast(value.integer)),
+                .string => try std.fmt.parseInt(u32, value.string, 10),
+                else => 30000,
+            } else 30000;
+            const wallet_address = if (parsed.value.object.get("wallet_address")) |value| switch (value) {
+                .string => value.string,
+                else => null,
+            } else null;
+            if (wallet_address == null) {
+                std.debug.print("{{\"success\":false,\"error\":\"MissingWalletAddress\"}}\n", .{});
+                return;
+            }
+            tools.config.wallet_address = wallet_address;
+            const trigger_payload = if (parsed.value.object.get("trigger_payload")) |value| switch (value) {
+                .string => value.string,
+                else => null,
+            } else null;
+            const workflow_name = if (parsed.value.object.get("workflow_name")) |value| switch (value) {
+                .string => value.string,
+                else => null,
+            } else null;
+            const correlation_id = if (parsed.value.object.get("correlation_id")) |value| switch (value) {
+                .string => value.string,
+                else => null,
+            } else null;
+            const result = try tools.watchPaymentWithTriggerMeta(comment, timeout_ms, trigger_payload, workflow_name, correlation_id);
+            const tx_hash_text = if (result.tx_hash) |value| try std.fmt.allocPrint(allocator, "\"{s}\"", .{value}) else "null";
+            defer if (result.tx_hash != null) allocator.free(tx_hash_text);
+            const tx_lt_text = if (result.tx_lt) |value| try std.fmt.allocPrint(allocator, "{d}", .{value}) else "null";
+            defer if (result.tx_lt != null) allocator.free(tx_lt_text);
+            const amount_text = if (result.amount) |value| try std.fmt.allocPrint(allocator, "{d}", .{value}) else "null";
+            defer if (result.amount != null) allocator.free(amount_text);
+            const sender_text = if (result.sender) |value| try std.fmt.allocPrint(allocator, "\"{s}\"", .{value}) else "null";
+            defer if (result.sender != null) allocator.free(sender_text);
+            const timestamp_text = if (result.timestamp) |value| try std.fmt.allocPrint(allocator, "{d}", .{value}) else "null";
+            defer if (result.timestamp != null) allocator.free(timestamp_text);
+            const matched_comment_text = if (result.matched_comment) |value| try std.fmt.allocPrint(allocator, "\"{s}\"", .{value}) else "null";
+            defer if (result.matched_comment != null) allocator.free(matched_comment_text);
+            const trigger_payload_text = if (result.trigger_payload_json) |value| value else "null";
+            const next_action_text = if (result.recommended_next_action) |value| try std.fmt.allocPrint(allocator, "\"{s}\"", .{value}) else "null";
+            defer if (result.recommended_next_action != null) allocator.free(next_action_text);
+            const trigger_id_text = if (result.trigger_id) |value| try std.fmt.allocPrint(allocator, "\"{s}\"", .{value}) else "null";
+            defer if (result.trigger_id != null) allocator.free(trigger_id_text);
+            const workflow_name_text = if (result.workflow_name) |value| try std.fmt.allocPrint(allocator, "\"{s}\"", .{value}) else "null";
+            defer if (result.workflow_name != null) allocator.free(workflow_name_text);
+            const correlation_id_text = if (result.correlation_id) |value| try std.fmt.allocPrint(allocator, "\"{s}\"", .{value}) else "null";
+            defer if (result.correlation_id != null) allocator.free(correlation_id_text);
+            std.debug.print(
+                "{{\"success\":{s},\"address\":\"{s}\",\"comment\":\"{s}\",\"timeout_ms\":{d},\"found\":{s},\"confirmed\":{s},\"trigger_ready\":{s},\"matched_comment\":{s},\"recommended_next_action\":{s},\"trigger_id\":{s},\"workflow_name\":{s},\"correlation_id\":{s},\"trigger_payload\":{s},\"tx_hash\":{s},\"tx_lt\":{s},\"amount\":{s},\"sender\":{s},\"timestamp\":{s}}}\n",
+                .{
+                    if (result.success) "true" else "false",
+                    result.address,
+                    result.comment,
+                    result.timeout_ms,
+                    if (result.found) "true" else "false",
+                    if (result.confirmed) "true" else "false",
+                    if (result.trigger_ready) "true" else "false",
+                    matched_comment_text,
+                    next_action_text,
+                    trigger_id_text,
+                    workflow_name_text,
+                    correlation_id_text,
+                    trigger_payload_text,
+                    tx_hash_text,
+                    tx_lt_text,
+                    amount_text,
+                    sender_text,
+                    timestamp_text,
+                },
+            );
+            return;
+        }
+
+        if (std.mem.eql(u8, action, "inspect-contract")) {
+            const address = if (parsed.value.object.get("address")) |value| switch (value) {
+                .string => value.string,
+                else => {
+                    std.debug.print("{{\"success\":false,\"error\":\"MissingAddress\"}}\n", .{});
+                    return;
+                },
+            } else {
+                std.debug.print("{{\"success\":false,\"error\":\"MissingAddress\"}}\n", .{});
+                return;
+            };
+            var result = try tools.inspectContract(address);
+            defer result.deinit(allocator);
+            const details_text = if (result.details_json) |value| value else "null";
+            const abi_uri_text = if (result.abi_uri) |value| try std.fmt.allocPrint(allocator, "\"{s}\"", .{value}) else "null";
+            defer if (result.abi_uri != null) allocator.free(abi_uri_text);
+            const abi_version_text = if (result.abi_version) |value| try std.fmt.allocPrint(allocator, "\"{s}\"", .{value}) else "null";
+            defer if (result.abi_version != null) allocator.free(abi_version_text);
+            const recommended_actions_text = blk: {
+                var writer = std.io.Writer.Allocating.init(allocator);
+                defer writer.deinit();
+                try writer.writer.writeByte('[');
+                var wrote = false;
+                if (result.has_abi) {
+                    if (wrote) try writer.writer.writeByte(',');
+                    wrote = true;
+                    try writer.writer.writeAll("{\"name\":\"run_get_method_auto\",\"tool\":\"inspect-contract\",\"example\":{\"address\":\"0:...\"}}");
+                    try writer.writer.writeByte(',');
+                    try writer.writer.writeAll("{\"name\":\"analyze_contract_call_auto\",\"tool\":\"analyze-contract-call\",\"example\":{\"mode\":\"auto\",\"destination\":\"0:...\",\"function\":\"transfer\",\"amount\":10000000,\"args\":[\"0:...\",1]}}");
+                    try writer.writer.writeByte(',');
+                    try writer.writer.writeAll("{\"name\":\"wallet_send_auto_abi\",\"tool\":\"analyze-contract-call\",\"example\":{\"mode\":\"abi\",\"destination\":\"0:...\",\"abi_source\":\"@abi.json\",\"function\":\"transfer\",\"amount\":10000000,\"args\":[\"0:...\",1]}}");
+                }
+                if (result.has_wallet) {
+                    if (wrote) try writer.writer.writeByte(',');
+                    wrote = true;
+                    try writer.writer.writeAll("{\"name\":\"wallet_state\",\"tool\":\"wallet-state\",\"example\":{}}");
+                    try writer.writer.writeByte(',');
+                    try writer.writer.writeAll("{\"name\":\"watch_payment\",\"tool\":\"watch-payment\",\"example\":{\"wallet_address\":\"0:...\",\"comment\":\"order-123\",\"timeout_ms\":10000}}");
+                }
+                if (result.has_jetton_master or result.has_jetton_wallet) {
+                    if (wrote) try writer.writer.writeByte(',');
+                    wrote = true;
+                    try writer.writer.writeAll("{\"name\":\"get_jetton_wallet_address\",\"tool\":\"portfolio\",\"example\":{\"address\":\"0:...\",\"jetton_masters\":[\"0:...\"]}}");
+                    try writer.writer.writeByte(',');
+                    try writer.writer.writeAll("{\"name\":\"portfolio\",\"tool\":\"portfolio\",\"example\":{\"address\":\"0:...\",\"jetton_masters\":[\"0:...\"]}}");
+                    try writer.writer.writeByte(',');
+                    try writer.writer.writeAll("{\"name\":\"recent_activity\",\"tool\":\"recent-activity\",\"example\":{\"address\":\"0:...\",\"limit\":5}}");
+                }
+                if (result.has_nft_item or result.has_nft_collection) {
+                    if (wrote) try writer.writer.writeByte(',');
+                    wrote = true;
+                    try writer.writer.writeAll("{\"name\":\"get_nft_info\",\"tool\":\"inspect-contract\",\"example\":{\"address\":\"0:...\"}}");
+                }
+                if (wrote) try writer.writer.writeByte(',');
+                try writer.writer.writeAll("{\"name\":\"inspect_contract\",\"tool\":\"inspect-contract\",\"example\":{\"address\":\"0:...\"}}");
+                try writer.writer.writeByte(']');
+                break :blk try writer.toOwnedSlice();
+            };
+            defer allocator.free(recommended_actions_text);
+            std.debug.print(
+                "{{\"success\":{s},\"address\":\"{s}\",\"has_wallet\":{s},\"has_jetton\":{s},\"has_jetton_master\":{s},\"has_jetton_wallet\":{s},\"has_nft\":{s},\"has_nft_item\":{s},\"has_nft_collection\":{s},\"has_abi\":{s},\"abi_uri\":{s},\"abi_version\":{s},\"function_count\":{d},\"event_count\":{d},\"recommended_actions\":{s},\"details\":{s}}}\n",
+                .{
+                    if (result.success) "true" else "false",
+                    result.address,
+                    if (result.has_wallet) "true" else "false",
+                    if (result.has_jetton) "true" else "false",
+                    if (result.has_jetton_master) "true" else "false",
+                    if (result.has_jetton_wallet) "true" else "false",
+                    if (result.has_nft) "true" else "false",
+                    if (result.has_nft_item) "true" else "false",
+                    if (result.has_nft_collection) "true" else "false",
+                    if (result.has_abi) "true" else "false",
+                    abi_uri_text,
+                    abi_version_text,
+                    result.functions.len,
+                    result.events.len,
+                    recommended_actions_text,
+                    details_text,
+                },
+            );
+            return;
+        }
+
+        if (std.mem.eql(u8, action, "capabilities")) {
+            var result = try tools.getCapabilities();
+            defer result.deinit(allocator);
+            std.debug.print("{s}\n", .{result.json});
+            return;
+        }
+
+        if (std.mem.eql(u8, action, "demo-manifest")) {
+            var result = try tools.getCapabilitiesWithDemoManifest(true);
+            defer result.deinit(allocator);
+            std.debug.print("{s}\n", .{result.json});
+            return;
+        }
+
+        if (std.mem.eql(u8, action, "runtime-spec")) {
+            var result = try tools.getRuntimeSpec();
+            defer result.deinit(allocator);
+            std.debug.print("{s}\n", .{result.json});
+            return;
+        }
+
+        if (std.mem.eql(u8, action, "recent-activity")) {
+            const address = if (parsed.value.object.get("address")) |value| switch (value) {
+                .string => value.string,
+                else => {
+                    std.debug.print("{{\"success\":false,\"error\":\"MissingAddress\"}}\n", .{});
+                    return;
+                },
+            } else {
+                std.debug.print("{{\"success\":false,\"error\":\"MissingAddress\"}}\n", .{});
+                return;
+            };
+            const limit: u32 = if (parsed.value.object.get("limit")) |value| switch (value) {
+                .integer => @as(u32, @intCast(value.integer)),
+                .string => try std.fmt.parseInt(u32, value.string, 10),
+                else => 10,
+            } else 10;
+            var result = try tools.getRecentActivity(address, limit);
+            defer result.deinit(allocator);
+            std.debug.print(
+                "{{\"success\":{s},\"address\":\"{s}\",\"tx_count\":{d},\"incoming_count\":{d},\"outgoing_count\":{d},\"comments_count\":{d},\"contract_calls_count\":{d},\"jetton_ops_count\":{d},\"nft_ops_count\":{d},\"abi_calls_count\":{d},\"transfer_like_count\":{d},\"items\":{s}}}\n",
+                .{
+                    if (result.success) "true" else "false",
+                    result.address,
+                    result.tx_count,
+                    result.incoming_count,
+                    result.outgoing_count,
+                    result.comments_count,
+                    result.contract_calls_count,
+                    result.jetton_ops_count,
+                    result.nft_ops_count,
+                    result.abi_calls_count,
+                    result.transfer_like_count,
+                    result.items_json,
+                },
+            );
+            return;
+        }
+
+        if (std.mem.eql(u8, action, "portfolio")) {
+            const address = if (parsed.value.object.get("address")) |value| switch (value) {
+                .string => value.string,
+                else => {
+                    std.debug.print("{{\"success\":false,\"error\":\"MissingAddress\"}}\n", .{});
+                    return;
+                },
+            } else {
+                std.debug.print("{{\"success\":false,\"error\":\"MissingAddress\"}}\n", .{});
+                return;
+            };
+
+            var masters = std.ArrayList([]const u8){};
+            defer masters.deinit(allocator);
+            if (parsed.value.object.get("jetton_masters")) |value| {
+                if (value == .array) {
+                    for (value.array.items) |item| {
+                        if (item == .string) try masters.append(allocator, item.string);
+                    }
+                }
+            }
+
+            var result = try tools.getPortfolio(address, masters.items);
+            defer result.deinit(allocator);
+            std.debug.print(
+                "{{\"success\":{s},\"address\":\"{s}\",\"ton_balance\":{d},\"jetton_count\":{d},\"wallet_state\":{s},\"jettons\":{s}}}\n",
+                .{
+                    if (result.success) "true" else "false",
+                    result.address,
+                    result.ton_balance,
+                    result.jetton_count,
+                    result.wallet_state_json,
+                    result.jettons_json,
+                },
+            );
+            return;
+        }
+
+        if (std.mem.eql(u8, action, "analyze-contract-call")) {
+            const destination = if (parsed.value.object.get("destination")) |value| switch (value) {
+                .string => value.string,
+                else => {
+                    std.debug.print("{{\"success\":false,\"error\":\"MissingDestination\"}}\n", .{});
+                    return;
+                },
+            } else {
+                std.debug.print("{{\"success\":false,\"error\":\"MissingDestination\"}}\n", .{});
+                return;
+            };
+            const amount = if (parsed.value.object.get("amount")) |value| switch (value) {
+                .integer => @as(u64, @intCast(value.integer)),
+                .string => try std.fmt.parseInt(u64, value.string, 10),
+                else => 0,
+            } else 0;
+            const mode = if (parsed.value.object.get("mode")) |value| switch (value) {
+                .string => value.string,
+                else => "auto",
+            } else "auto";
+
+            var values = std.ArrayList(AbiValue){};
+            defer values.deinit(allocator);
+            if (parsed.value.object.get("args")) |value| {
+                if (value == .array) {
+                    for (value.array.items) |item| {
+                        switch (item) {
+                            .string => try values.append(allocator, .{ .text = item.string }),
+                            .integer => try values.append(allocator, .{ .int = item.integer }),
+                            .bool => try values.append(allocator, .{ .uint = if (item.bool) 1 else 0 }),
+                            else => {},
+                        }
+                    }
+                }
+            }
+
+            var result: ton_zig_agent_kit.tools.types.ContractCallAnalysisResult = undefined;
+            if (std.mem.eql(u8, mode, "auto")) {
+                const function_name = if (parsed.value.object.get("function")) |value| switch (value) {
+                    .string => value.string,
+                    else => {
+                        std.debug.print("{{\"success\":false,\"error\":\"MissingFunction\"}}\n", .{});
+                        return;
+                    },
+                } else {
+                    std.debug.print("{{\"success\":false,\"error\":\"MissingFunction\"}}\n", .{});
+                    return;
+                };
+                result = try tools.analyzeContractCallAuto(destination, amount, function_name, values.items);
+            } else if (std.mem.eql(u8, mode, "standard")) {
+                const kind = if (parsed.value.object.get("kind")) |value| switch (value) {
+                    .string => value.string,
+                    else => {
+                        std.debug.print("{{\"success\":false,\"error\":\"MissingKind\"}}\n", .{});
+                        return;
+                    },
+                } else {
+                    std.debug.print("{{\"success\":false,\"error\":\"MissingKind\"}}\n", .{});
+                    return;
+                };
+                const spec = if (parsed.value.object.get("spec")) |value| switch (value) {
+                    .string => value.string,
+                    else => {
+                        std.debug.print("{{\"success\":false,\"error\":\"MissingSpec\"}}\n", .{});
+                        return;
+                    },
+                } else {
+                    std.debug.print("{{\"success\":false,\"error\":\"MissingSpec\"}}\n", .{});
+                    return;
+                };
+                const wallet_state = try tools.getWalletState();
+                defer {
+                    if (wallet_state.wallet_address.len > 0) allocator.free(wallet_state.wallet_address);
+                    if (wallet_state.user_friendly_address.len > 0) allocator.free(wallet_state.user_friendly_address);
+                    if (wallet_state.public_key_hex.len > 0) allocator.free(wallet_state.public_key_hex);
+                    if (wallet_state.state_init_boc.len > 0) allocator.free(wallet_state.state_init_boc);
+                }
+                var built = try tools.buildContractBodyStandard(kind, spec);
+                defer built.deinit(allocator);
+                const risk_flags = try allocator.alloc([]const u8, if (wallet_state.deployed) 0 else 1);
+                if (!wallet_state.deployed and risk_flags.len > 0) risk_flags[0] = "wallet_not_deployed";
+                result = .{
+                    .destination = try allocator.dupe(u8, destination),
+                    .amount = amount,
+                    .wallet_address = try allocator.dupe(u8, wallet_state.wallet_address),
+                    .wallet_version = wallet_state.wallet_version,
+                    .wallet_id = wallet_state.wallet_id,
+                    .deployed = wallet_state.deployed,
+                    .seqno = wallet_state.seqno,
+                    .selector = try allocator.dupe(u8, built.selector),
+                    .state_init_attached_if_execute = !wallet_state.deployed,
+                    .body_boc = try allocator.dupe(u8, built.body_boc),
+                    .risk_flags = risk_flags,
+                    .recommended_action = try allocator.dupe(u8, if (wallet_state.deployed) "wallet-send-standard" else "wallet-send-init-standard"),
+                    .executable = true,
+                    .success = true,
+                    .error_message = null,
+                };
+            } else if (std.mem.eql(u8, mode, "abi")) {
+                const function_name = if (parsed.value.object.get("function")) |value| switch (value) {
+                    .string => value.string,
+                    else => {
+                        std.debug.print("{{\"success\":false,\"error\":\"MissingFunction\"}}\n", .{});
+                        return;
+                    },
+                } else {
+                    std.debug.print("{{\"success\":false,\"error\":\"MissingFunction\"}}\n", .{});
+                    return;
+                };
+                const abi_source = if (parsed.value.object.get("abi_source")) |value| switch (value) {
+                    .string => value.string,
+                    else => {
+                        std.debug.print("{{\"success\":false,\"error\":\"MissingAbiSource\"}}\n", .{});
+                        return;
+                    },
+                } else {
+                    std.debug.print("{{\"success\":false,\"error\":\"MissingAbiSource\"}}\n", .{});
+                    return;
+                };
+                const wallet_state = try tools.getWalletState();
+                defer {
+                    if (wallet_state.wallet_address.len > 0) allocator.free(wallet_state.wallet_address);
+                    if (wallet_state.user_friendly_address.len > 0) allocator.free(wallet_state.user_friendly_address);
+                    if (wallet_state.public_key_hex.len > 0) allocator.free(wallet_state.public_key_hex);
+                    if (wallet_state.state_init_boc.len > 0) allocator.free(wallet_state.state_init_boc);
+                }
+                var built = try tools.buildContractBodyAbi(abi_source, function_name, values.items);
+                defer built.deinit(allocator);
+                const risk_flags = try allocator.alloc([]const u8, if (wallet_state.deployed) 0 else 1);
+                if (!wallet_state.deployed and risk_flags.len > 0) risk_flags[0] = "wallet_not_deployed";
+                result = .{
+                    .destination = try allocator.dupe(u8, destination),
+                    .amount = amount,
+                    .wallet_address = try allocator.dupe(u8, wallet_state.wallet_address),
+                    .wallet_version = wallet_state.wallet_version,
+                    .wallet_id = wallet_state.wallet_id,
+                    .deployed = wallet_state.deployed,
+                    .seqno = wallet_state.seqno,
+                    .selector = try allocator.dupe(u8, built.selector),
+                    .state_init_attached_if_execute = !wallet_state.deployed,
+                    .body_boc = try allocator.dupe(u8, built.body_boc),
+                    .risk_flags = risk_flags,
+                    .recommended_action = try allocator.dupe(u8, if (wallet_state.deployed) "wallet-send-abi" else "wallet-send-init-abi"),
+                    .executable = true,
+                    .success = true,
+                    .error_message = null,
+                };
+            } else {
+                std.debug.print("{{\"success\":false,\"error\":\"UnsupportedMode\"}}\n", .{});
+                return;
+            }
+
+            defer result.deinit(allocator);
+            const seqno_text = if (result.seqno) |seqno| try std.fmt.allocPrint(allocator, "{d}", .{seqno}) else "null";
+            defer if (result.seqno != null) allocator.free(seqno_text);
+            const risk_flags_text = blk: {
+                var writer = std.io.Writer.Allocating.init(allocator);
+                defer writer.deinit();
+                for (result.risk_flags, 0..) |flag, idx| {
+                    if (idx != 0) try writer.writer.writeByte(',');
+                    try writer.writer.print("\"{s}\"", .{flag});
+                }
+                break :blk try writer.toOwnedSlice();
+            };
+            defer allocator.free(risk_flags_text);
+            std.debug.print(
+                "{{\"success\":{s},\"destination\":\"{s}\",\"amount\":{d},\"wallet_address\":\"{s}\",\"wallet_version\":\"{s}\",\"wallet_id\":{d},\"deployed\":{s},\"seqno\":{s},\"selector\":\"{s}\",\"state_init_attached_if_execute\":{s},\"body_boc\":\"{s}\",\"recommended_action\":\"{s}\",\"executable\":{s},\"risk_flags\":[{s}]}}\n",
+                .{
+                    if (result.success) "true" else "false",
+                    result.destination,
+                    result.amount,
+                    result.wallet_address,
+                    signing.walletVersionName(result.wallet_version),
+                    result.wallet_id,
+                    if (result.deployed) "true" else "false",
+                    seqno_text,
+                    result.selector,
+                    if (result.state_init_attached_if_execute) "true" else "false",
+                    result.body_boc,
+                    result.recommended_action,
+                    if (result.executable) "true" else "false",
+                    risk_flags_text,
+                },
+            );
+            return;
+        }
+
+        std.debug.print("{{\"success\":false,\"error\":\"UnknownToolAction\"}}\n", .{});
+        return;
+    }
+
     if (std.mem.eql(u8, command, "getBalance") or std.mem.eql(u8, command, "balance")) {
         if (args.len < 3) {
             std.debug.print("Usage: ton-zig-agent-kit getBalance <address>\n", .{});
@@ -4519,6 +5099,7 @@ fn printUsage() !void {
     std.debug.print("Usage:\n", .{});
     std.debug.print("  ton-zig-agent-kit help                          Show this help\n", .{});
     std.debug.print("  ton-zig-agent-kit version                       Show version\n", .{});
+    std.debug.print("  ton-zig-agent-kit tool <action> [json]         Agent tool mode (wallet-state, analyze-transfer, analyze-contract-call, watch-payment, inspect-contract, capabilities, recent-activity, portfolio)\n", .{});
     std.debug.print("  ton-zig-agent-kit abi describe <source|auto:addr> [function]  Describe ABI and show call templates\n", .{});
     std.debug.print("  ton-zig-agent-kit abi decode-function <source|auto:addr> <body_b64> [function]  Decode an ABI function body\n", .{});
     std.debug.print("  ton-zig-agent-kit abi decode-event <source|auto:addr> <body_b64> [event]  Decode an ABI event body\n", .{});
@@ -4608,6 +5189,19 @@ fn printUsage() !void {
 }
 
 /// Run Telegram Bot Demo
+fn loadWalletPrivateKeyFromEnv(allocator: std.mem.Allocator) !?[32]u8 {
+    _ = allocator;
+    if (std.process.getEnvVarOwned(std.heap.page_allocator, wallet_private_key_hex_env)) |value| {
+        defer std.heap.page_allocator.free(value);
+        const trimmed = std.mem.trim(u8, value, " \t\r\n");
+        if (trimmed.len != 64) return error.InvalidPrivateKeyHex;
+        var seed: [32]u8 = undefined;
+        _ = try std.fmt.hexToBytes(&seed, trimmed);
+        return seed;
+    } else |_| {}
+    return null;
+}
+
 fn runBotDemo() !void {
     const allocator = std.heap.page_allocator;
 

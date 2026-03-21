@@ -2104,6 +2104,49 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 null;
             errdefer if (to) |value| self.allocator.free(value);
 
+            const opcode_name = if (tx.in_msg) |msg|
+                if (msg.body) |body|
+                    if (try self.buildBodyAnalysisResultAlloc(body)) |analysis_value|
+                        blk: {
+                            var analysis = analysis_value;
+                            defer freeBodyAnalysisAlloc(self.allocator, &analysis);
+                            break :blk try self.dupOptionalStringAlloc(analysis.opcode_name);
+                        }
+                    else
+                        null
+                else
+                    null
+            else
+                null;
+            errdefer if (opcode_name) |value| self.allocator.free(value);
+
+            const comment = if (tx.in_msg) |msg|
+                if (msg.body) |body|
+                    if (try self.buildBodyAnalysisResultAlloc(body)) |analysis_value|
+                        blk: {
+                            var analysis = analysis_value;
+                            defer freeBodyAnalysisAlloc(self.allocator, &analysis);
+                            break :blk try self.dupOptionalStringAlloc(analysis.comment);
+                        }
+                    else
+                        null
+                else
+                    null
+            else
+                null;
+            errdefer if (comment) |value| self.allocator.free(value);
+
+            const abi_selector = null;
+            errdefer if (abi_selector) |value| self.allocator.free(value);
+
+            const message_kind = if (comment != null)
+                try self.allocator.dupe(u8, "comment")
+            else if (opcode_name != null)
+                try self.allocator.dupe(u8, "standard")
+            else
+                try self.allocator.dupe(u8, "transfer");
+            errdefer self.allocator.free(message_kind);
+
             return .{
                 .hash = hash,
                 .lt = tx.lt,
@@ -2111,6 +2154,10 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 .from = from,
                 .to = to,
                 .value = if (tx.in_msg) |msg| msg.value else 0,
+                .opcode_name = opcode_name,
+                .comment = comment,
+                .abi_selector = abi_selector,
+                .message_kind = message_kind,
                 .status = .confirmed,
                 .success = true,
                 .error_message = null,
@@ -2550,6 +2597,71 @@ fn AgentToolsImpl(comptime ClientType: type) type {
             };
             errdefer if (details_json) |value| self.allocator.free(value);
 
+            const enhanced_details_json = blk: {
+                var writer = std.io.Writer.Allocating.init(self.allocator);
+                errdefer writer.deinit();
+                try writer.writer.writeByte('{');
+                var wrote_any = false;
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "interfaces");
+                try writer.writer.writeByte('{');
+                var wrote_interfaces = false;
+                try writeJsonFieldPrefix(&writer.writer, &wrote_interfaces, "wallet");
+                try writer.writer.writeAll(if (supported.has_wallet) "true" else "false");
+                try writeJsonFieldPrefix(&writer.writer, &wrote_interfaces, "jetton");
+                try writer.writer.writeAll(if (supported.has_jetton) "true" else "false");
+                try writeJsonFieldPrefix(&writer.writer, &wrote_interfaces, "nft");
+                try writer.writer.writeAll(if (supported.has_nft) "true" else "false");
+                try writeJsonFieldPrefix(&writer.writer, &wrote_interfaces, "abi");
+                try writer.writer.writeAll(if (supported.has_abi) "true" else "false");
+                try writer.writer.writeByte('}');
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "agent_hints");
+                try writer.writer.writeByte('[');
+                var wrote_hint = false;
+                if (supported.has_wallet) {
+                    if (wrote_hint) try writer.writer.writeByte(',');
+                    wrote_hint = true;
+                    try writeJsonString(&writer.writer, "wallet_runtime_supported");
+                }
+                if (supported.has_jetton_master or supported.has_jetton_wallet) {
+                    if (wrote_hint) try writer.writer.writeByte(',');
+                    wrote_hint = true;
+                    try writeJsonString(&writer.writer, "jetton_standard_detected");
+                }
+                if (supported.has_nft_item or supported.has_nft_collection) {
+                    if (wrote_hint) try writer.writer.writeByte(',');
+                    wrote_hint = true;
+                    try writeJsonString(&writer.writer, "nft_standard_detected");
+                }
+                if (supported.has_abi) {
+                    if (wrote_hint) try writer.writer.writeByte(',');
+                    wrote_hint = true;
+                    try writeJsonString(&writer.writer, "abi_execution_available");
+                }
+                try writer.writer.writeByte(']');
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "risk_flags");
+                try writer.writer.writeByte('[');
+                var wrote_risk = false;
+                if (!supported.has_abi) {
+                    if (wrote_risk) try writer.writer.writeByte(',');
+                    wrote_risk = true;
+                    try writeJsonString(&writer.writer, "no_abi_detected");
+                }
+                if (!supported.has_wallet and !supported.has_jetton and !supported.has_nft) {
+                    if (wrote_risk) try writer.writer.writeByte(',');
+                    wrote_risk = true;
+                    try writeJsonString(&writer.writer, "unknown_contract_type");
+                }
+                try writer.writer.writeByte(']');
+                if (details_json) |value| {
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_any, "details");
+                    try writer.writer.writeAll(value);
+                }
+                try writer.writer.writeByte('}');
+                break :blk try writer.toOwnedSlice();
+            };
+            errdefer self.allocator.free(enhanced_details_json);
+            if (details_json) |value| self.allocator.free(value);
+
             return .{
                 .address = contract_address,
                 .has_wallet = supported.has_wallet,
@@ -2566,7 +2678,305 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 .functions = abi_summary.functions,
                 .events = abi_summary.events,
                 .observed_messages = observed_messages,
-                .details_json = details_json,
+                .details_json = enhanced_details_json,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
+        pub fn getCapabilities(self: *@This()) !tools_types.CapabilitiesResult {
+            return self.getCapabilitiesWithMode(.default);
+        }
+
+        const CapabilitiesMode = enum {
+            default,
+            demo_only,
+            runtime_spec,
+        };
+
+        pub fn getCapabilitiesWithDemoManifest(self: *@This(), demo_only: bool) !tools_types.CapabilitiesResult {
+            return self.getCapabilitiesWithMode(if (demo_only) .demo_only else .default);
+        }
+
+        pub fn getRuntimeSpec(self: *@This()) !tools_types.CapabilitiesResult {
+            return self.getCapabilitiesWithMode(.runtime_spec);
+        }
+
+        fn getCapabilitiesWithMode(self: *@This(), mode: CapabilitiesMode) !tools_types.CapabilitiesResult {
+            const name = try self.allocator.dupe(u8, "ton-zig-agent-kit");
+            errdefer self.allocator.free(name);
+            const category = try self.allocator.dupe(u8, "agent-infrastructure");
+            errdefer self.allocator.free(category);
+            const json = if (mode == .demo_only)
+                try self.allocator.dupe(
+                    u8,
+                    "{\"name\":\"ton-zig-agent-kit\",\"category\":\"agent-infrastructure\",\"demo_manifest\":{\"title\":\"TON Agent Runtime Demo\",\"steps\":[{\"action\":\"capabilities\",\"purpose\":\"show runtime manifest\",\"what_this_proves\":\"runtime discovery and agent handshake\",\"example\":\"ton-zig-agent-kit tool capabilities\"},{\"action\":\"wallet-state\",\"purpose\":\"show wallet execution context\",\"what_this_proves\":\"wallet readiness and deployment-aware execution planning\",\"example\":\"ton-zig-agent-kit tool wallet-state\"},{\"action\":\"inspect-contract\",\"purpose\":\"show contract intelligence\",\"what_this_proves\":\"interface detection and next-step recommendations for agents\",\"example\":\"ton-zig-agent-kit tool inspect-contract {\\\"address\\\":\\\"0:...\\\"}\"},{\"action\":\"recent-activity\",\"purpose\":\"show semantic activity feed\",\"what_this_proves\":\"transaction semantics and followup hints\",\"example\":\"ton-zig-agent-kit tool recent-activity {\\\"address\\\":\\\"0:...\\\",\\\"limit\\\":5}\"},{\"action\":\"analyze-transfer\",\"purpose\":\"show safe preflight planning\",\"what_this_proves\":\"analyze-first safety model before execution\",\"example\":\"ton-zig-agent-kit tool analyze-transfer {\\\"destination\\\":\\\"0:...\\\",\\\"amount\\\":10000000,\\\"comment\\\":\\\"demo\\\"}\"},{\"action\":\"watch-payment\",\"purpose\":\"show payment-triggered workflow\",\"what_this_proves\":\"payment-confirmed event primitive for downstream automation\",\"example\":\"ton-zig-agent-kit tool watch-payment {\\\"wallet_address\\\":\\\"0:...\\\",\\\"comment\\\":\\\"order-123\\\",\\\"timeout_ms\\\":10000,\\\"workflow_name\\\":\\\"grant_access\\\",\\\"correlation_id\\\":\\\"order-123\\\"}\"}]}}"
+                )
+            else if (mode == .runtime_spec)
+                try self.allocator.dupe(
+                    u8,
+                    "{\"runtime\":\"ton-zig-agent-kit\",\"runtime_version\":\"0.0.1\",\"protocol_version\":\"1\",\"default_response_envelope\":{\"success\":\"bool\",\"error\":\"optional string\"},\"documentation_refs\":[\"README.md\",\"RUNTIME_GUARANTEES.md\",\"WHY_AGENT_INFRASTRUCTURE.md\",\"examples/action-schemas.json\"],\"actions\":[{\"name\":\"capabilities\",\"kind\":\"manifest\",\"risk_level\":\"none\",\"stability\":\"stable\",\"side_effects\":\"none\",\"safe_for_read_only\":true,\"required_fields\":[],\"output_highlights\":[\"actions\",\"supports\",\"risk_model\"]},{\"name\":\"demo-manifest\",\"kind\":\"manifest\",\"risk_level\":\"none\",\"stability\":\"stable\",\"side_effects\":\"none\",\"safe_for_read_only\":true,\"required_fields\":[],\"output_highlights\":[\"demo_manifest\"]},{\"name\":\"runtime-spec\",\"kind\":\"manifest\",\"risk_level\":\"none\",\"stability\":\"stable\",\"side_effects\":\"none\",\"safe_for_read_only\":true,\"required_fields\":[],\"output_highlights\":[\"actions\",\"protocol_version\"]},{\"name\":\"wallet-state\",\"kind\":\"read\",\"domain\":\"wallet\",\"risk_level\":\"none\",\"stability\":\"stable\",\"side_effects\":\"none\",\"safe_for_read_only\":true,\"required_fields\":[],\"output_highlights\":[\"balance\",\"seqno\",\"deployed\",\"state_init_required_for_first_send\"]},{\"name\":\"inspect-contract\",\"kind\":\"read\",\"domain\":\"contract\",\"risk_level\":\"none\",\"stability\":\"stable\",\"side_effects\":\"none\",\"safe_for_read_only\":true,\"required_fields\":[\"address\"],\"output_highlights\":[\"agent_hints\",\"risk_flags\",\"recommended_actions\"]},{\"name\":\"recent-activity\",\"kind\":\"read\",\"domain\":\"activity\",\"risk_level\":\"none\",\"stability\":\"stable\",\"side_effects\":\"none\",\"safe_for_read_only\":true,\"required_fields\":[\"address\"],\"output_highlights\":[\"items\",\"semantic_tag\",\"recommended_followup\"]},{\"name\":\"portfolio\",\"kind\":\"read\",\"domain\":\"portfolio\",\"risk_level\":\"none\",\"stability\":\"stable\",\"side_effects\":\"none\",\"safe_for_read_only\":true,\"required_fields\":[\"address\"],\"output_highlights\":[\"ton_balance\",\"wallet_state\",\"jettons\"]},{\"name\":\"analyze-transfer\",\"kind\":\"analyze\",\"domain\":\"execution\",\"risk_level\":\"planning_only\",\"stability\":\"stable\",\"side_effects\":\"planning_only\",\"safe_for_read_only\":true,\"required_fields\":[\"destination\"],\"produces_risk_flags\":true,\"produces_recommended_action\":true,\"output_highlights\":[\"executable\",\"recommended_action\",\"risk_flags\"]},{\"name\":\"analyze-contract-call\",\"kind\":\"analyze\",\"domain\":\"execution\",\"risk_level\":\"planning_only\",\"stability\":\"stable\",\"side_effects\":\"planning_only\",\"safe_for_read_only\":true,\"required_fields\":[\"destination\"],\"produces_risk_flags\":true,\"produces_recommended_action\":true,\"output_highlights\":[\"selector\",\"executable\",\"risk_flags\"]},{\"name\":\"watch-payment\",\"kind\":\"watch\",\"domain\":\"events\",\"risk_level\":\"low\",\"stability\":\"stable\",\"side_effects\":\"observation_only\",\"safe_for_read_only\":true,\"required_fields\":[\"wallet_address\",\"comment\"],\"output_highlights\":[\"trigger_ready\",\"trigger_payload\",\"workflow_name\",\"correlation_id\"]}]}"
+                )
+            else
+                try self.allocator.dupe(
+                    u8,
+                    "{\"name\":\"ton-zig-agent-kit\",\"category\":\"agent-infrastructure\",\"tagline\":\"TON-native runtime for agent context, execution planning, and payment-triggered workflows\",\"submission_pitch\":\"A Zig-built TON agent runtime that gives autonomous systems structured wallet context, contract intelligence, safe preflight execution analysis, and payment-triggered workflow primitives.\",\"input_schema_style\":\"json-payload-per-action\",\"execution_model\":\"analyze-first\",\"response_contract\":\"structured-json\",\"documentation_refs\":[\"README.md\",\"SUBMISSION.md\",\"RUNTIME_GUARANTEES.md\",\"WHY_AGENT_INFRASTRUCTURE.md\",\"examples/action-schemas.json\"],\"supports\":{\"wallet\":[\"v4\",\"v5\"],\"contracts\":[\"generic\",\"jetton\",\"nft\",\"abi\"],\"workflows\":[\"wallet_state\",\"analyze_transfer\",\"analyze_contract_call\",\"watch_payment\",\"inspect_contract\",\"recent_activity\",\"portfolio\"],\"tool_mode\":true,\"json_output\":true},\"actions\":[\"wallet-state\",\"analyze-transfer\",\"analyze-contract-call\",\"watch-payment\",\"inspect-contract\",\"capabilities\",\"recent-activity\",\"portfolio\",\"demo-manifest\",\"runtime-spec\"],\"env\":[\"TON_RPC_URL\",\"TON_RPC_URLS\",\"TON_API_KEY\",\"TON_API_KEYS\",\"TON_NETWORK\",\"TON_PRIVATE_KEY_HEX\",\"TON_SEED\",\"TON_SEED_FILE\"],\"examples\":{\"wallet_state\":\"ton-zig-agent-kit tool wallet-state\",\"analyze_transfer\":\"ton-zig-agent-kit tool analyze-transfer {\\\"destination\\\":\\\"0:...\\\",\\\"amount\\\":10000000}\",\"analyze_contract_call\":\"ton-zig-agent-kit tool analyze-contract-call {\\\"mode\\\":\\\"auto\\\",\\\"destination\\\":\\\"0:...\\\",\\\"function\\\":\\\"transfer\\\",\\\"args\\\":[\\\"0:...\\\",1]}\",\"watch_payment\":\"ton-zig-agent-kit tool watch-payment {\\\"wallet_address\\\":\\\"0:...\\\",\\\"comment\\\":\\\"order-123\\\",\\\"timeout_ms\\\":10000}\",\"watch_payment_workflow\":\"ton-zig-agent-kit tool watch-payment {\\\"wallet_address\\\":\\\"0:...\\\",\\\"comment\\\":\\\"order-123\\\",\\\"timeout_ms\\\":10000,\\\"workflow_name\\\":\\\"grant_access\\\",\\\"correlation_id\\\":\\\"order-123\\\",\\\"trigger_payload\\\":\\\"{\\\\\\\"order_id\\\\\\\":\\\\\\\"123\\\\\\\"}\\\"}\",\"demo_manifest\":\"ton-zig-agent-kit tool demo-manifest\",\"runtime_spec\":\"ton-zig-agent-kit tool runtime-spec\"},\"risk_model\":{\"preflight\":[\"wallet deployment detection\",\"seqno detection\",\"state init attachment planning\",\"contract interface detection\"]},\"safety_primitives\":[\"risk_flags\",\"recommended_action\",\"recommended_followup\",\"state_init_planning\",\"deployment_awareness\",\"seqno_awareness\"],\"event_primitives\":[\"payment_confirmed\"],\"intended_integrations\":[\"autonomous_agents\",\"copilots\",\"workflow_engines\",\"bot_backends\"],\"action_descriptors\":[{\"name\":\"wallet-state\",\"kind\":\"read\",\"risk_level\":\"none\",\"stability\":\"stable\",\"side_effects\":\"none\",\"safe_for_read_only\":true},{\"name\":\"inspect-contract\",\"kind\":\"read\",\"risk_level\":\"none\",\"stability\":\"stable\",\"side_effects\":\"none\",\"safe_for_read_only\":true},{\"name\":\"recent-activity\",\"kind\":\"read\",\"risk_level\":\"none\",\"stability\":\"stable\",\"side_effects\":\"none\",\"safe_for_read_only\":true},{\"name\":\"portfolio\",\"kind\":\"read\",\"risk_level\":\"none\",\"stability\":\"stable\",\"side_effects\":\"none\",\"safe_for_read_only\":true},{\"name\":\"analyze-transfer\",\"kind\":\"analyze\",\"risk_level\":\"planning_only\",\"stability\":\"stable\",\"side_effects\":\"planning_only\",\"safe_for_read_only\":true},{\"name\":\"analyze-contract-call\",\"kind\":\"analyze\",\"risk_level\":\"planning_only\",\"stability\":\"stable\",\"side_effects\":\"planning_only\",\"safe_for_read_only\":true},{\"name\":\"watch-payment\",\"kind\":\"watch\",\"risk_level\":\"low\",\"stability\":\"stable\",\"side_effects\":\"observation_only\",\"safe_for_read_only\":true},{\"name\":\"capabilities\",\"kind\":\"manifest\",\"risk_level\":\"none\",\"stability\":\"stable\",\"side_effects\":\"none\",\"safe_for_read_only\":true},{\"name\":\"demo-manifest\",\"kind\":\"manifest\",\"risk_level\":\"none\",\"stability\":\"stable\",\"side_effects\":\"none\",\"safe_for_read_only\":true},{\"name\":\"runtime-spec\",\"kind\":\"manifest\",\"risk_level\":\"none\",\"stability\":\"stable\",\"side_effects\":\"none\",\"safe_for_read_only\":true}],\"demo_flows\":[{\"name\":\"wallet_and_capabilities\",\"steps\":[\"capabilities\",\"wallet-state\"]},{\"name\":\"contract_intelligence\",\"steps\":[\"inspect-contract\",\"recent-activity\"]},{\"name\":\"safe_execution\",\"steps\":[\"analyze-transfer\",\"analyze-contract-call\"]},{\"name\":\"payment_trigger\",\"steps\":[\"watch-payment\"]}],\"agent_patterns\":[{\"name\":\"read_then_plan_then_execute\",\"steps\":[\"wallet-state\",\"inspect-contract\",\"analyze-transfer\"]},{\"name\":\"contract_discovery_loop\",\"steps\":[\"inspect-contract\",\"recent-activity\",\"portfolio\"]},{\"name\":\"payment_to_workflow\",\"steps\":[\"watch-payment\",\"trigger_agent_workflow\"]}]}"
+                );
+            errdefer self.allocator.free(json);
+            return .{
+                .name = name,
+                .category = category,
+                .json = json,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
+        pub fn getRecentActivity(self: *@This(), account_address: []const u8, limit: u32) !tools_types.RecentActivityResult {
+            var txs = try self.getTransactions(account_address, limit);
+            defer txs.deinit(self.allocator);
+
+            var incoming_count: u32 = 0;
+            var outgoing_count: u32 = 0;
+            var comments_count: u32 = 0;
+            var contract_calls_count: u32 = 0;
+            var jetton_ops_count: u32 = 0;
+            var nft_ops_count: u32 = 0;
+            var abi_calls_count: u32 = 0;
+            var transfer_like_count: u32 = 0;
+
+            var writer = std.io.Writer.Allocating.init(self.allocator);
+            errdefer writer.deinit();
+            try writer.writer.writeByte('[');
+            for (txs.items, 0..) |item, idx| {
+                if (idx != 0) try writer.writer.writeByte(',');
+                const is_incoming = item.to != null and std.mem.eql(u8, item.to.?, account_address);
+                const is_outgoing = item.from != null and std.mem.eql(u8, item.from.?, account_address);
+                if (is_incoming) incoming_count += 1;
+                if (is_outgoing) outgoing_count += 1;
+                if (item.comment != null) comments_count += 1;
+                if (item.message_kind) |kind| {
+                    if (std.mem.eql(u8, kind, "standard") or std.mem.eql(u8, kind, "comment") or std.mem.eql(u8, kind, "abi")) contract_calls_count += 1;
+                    if (std.mem.eql(u8, kind, "abi")) abi_calls_count += 1;
+                } else {
+                    transfer_like_count += 1;
+                }
+                if (item.opcode_name) |opcode_name| {
+                    if (std.mem.indexOf(u8, opcode_name, "jetton") != null) jetton_ops_count += 1;
+                    if (std.mem.indexOf(u8, opcode_name, "nft") != null) nft_ops_count += 1;
+                }
+                try writer.writer.writeByte('{');
+                var wrote_any = false;
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "hash");
+                try writeJsonString(&writer.writer, item.hash);
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "lt");
+                try writer.writer.print("{d}", .{item.lt});
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "timestamp");
+                try writer.writer.print("{d}", .{item.timestamp});
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "direction");
+                try writeJsonString(&writer.writer, if (is_incoming) "incoming" else if (is_outgoing) "outgoing" else "unknown");
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "value");
+                try writer.writer.print("{d}", .{item.value});
+                if (item.from) |value| {
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_any, "from");
+                    try writeJsonString(&writer.writer, value);
+                }
+                if (item.to) |value| {
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_any, "to");
+                    try writeJsonString(&writer.writer, value);
+                }
+                if (item.opcode_name) |value| {
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_any, "opcode_name");
+                    try writeJsonString(&writer.writer, value);
+                }
+                if (item.comment) |value| {
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_any, "comment");
+                    try writeJsonString(&writer.writer, value);
+                }
+                if (item.message_kind) |value| {
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_any, "message_kind");
+                    try writeJsonString(&writer.writer, value);
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_any, "semantic_tag");
+                    if (std.mem.eql(u8, value, "comment")) {
+                        try writeJsonString(&writer.writer, "user_comment");
+                        try writeJsonFieldPrefix(&writer.writer, &wrote_any, "recommended_followup");
+                        try writeJsonString(&writer.writer, "inspect_transfer_source");
+                    } else if (item.opcode_name) |opcode_name| {
+                        if (std.mem.indexOf(u8, opcode_name, "jetton") != null) {
+                            try writeJsonString(&writer.writer, "jetton_operation");
+                            try writeJsonFieldPrefix(&writer.writer, &wrote_any, "recommended_followup");
+                            try writeJsonString(&writer.writer, "portfolio");
+                        } else if (std.mem.indexOf(u8, opcode_name, "nft") != null) {
+                            try writeJsonString(&writer.writer, "nft_operation");
+                            try writeJsonFieldPrefix(&writer.writer, &wrote_any, "recommended_followup");
+                            try writeJsonString(&writer.writer, "inspect_contract");
+                        } else {
+                            try writeJsonString(&writer.writer, "contract_message");
+                            try writeJsonFieldPrefix(&writer.writer, &wrote_any, "recommended_followup");
+                            try writeJsonString(&writer.writer, "inspect_contract");
+                        }
+                    } else {
+                        try writeJsonString(&writer.writer, "transfer");
+                        try writeJsonFieldPrefix(&writer.writer, &wrote_any, "recommended_followup");
+                        try writeJsonString(&writer.writer, "recent_activity");
+                    }
+                }
+                if (item.abi_selector) |value| {
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_any, "abi_selector");
+                    try writeJsonString(&writer.writer, value);
+                }
+                try writer.writer.writeByte('}');
+            }
+            try writer.writer.writeByte(']');
+            const items_json = try writer.toOwnedSlice();
+            errdefer self.allocator.free(items_json);
+
+            return .{
+                .address = try self.allocator.dupe(u8, account_address),
+                .tx_count = @intCast(txs.items.len),
+                .incoming_count = incoming_count,
+                .outgoing_count = outgoing_count,
+                .comments_count = comments_count,
+                .contract_calls_count = contract_calls_count,
+                .jetton_ops_count = jetton_ops_count,
+                .nft_ops_count = nft_ops_count,
+                .abi_calls_count = abi_calls_count,
+                .transfer_like_count = transfer_like_count,
+                .items_json = items_json,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
+        pub fn getPortfolio(self: *@This(), account_address: []const u8, jetton_masters: []const []const u8) !tools_types.PortfolioResult {
+            const balance = try self.getBalance(account_address);
+            errdefer if (balance.formatted.len > 0) self.allocator.free(balance.formatted);
+
+            const wallet_info = signing.getWalletInfo(self.client, account_address) catch null;
+            const wallet_state_json = blk: {
+                var writer = std.io.Writer.Allocating.init(self.allocator);
+                errdefer writer.deinit();
+                try writer.writer.writeByte('{');
+                var wrote_any = false;
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "address");
+                try writeJsonString(&writer.writer, account_address);
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "balance");
+                try writer.writer.print("{d}", .{balance.balance});
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "formatted");
+                try writeJsonString(&writer.writer, balance.formatted);
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "deployed");
+                try writer.writer.writeAll(if (wallet_info != null) "true" else "false");
+                try writeJsonFieldPrefix(&writer.writer, &wrote_any, "seqno");
+                if (wallet_info) |info| {
+                    try writer.writer.print("{d}", .{info.seqno});
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_any, "wallet_id");
+                    try writer.writer.print("{d}", .{info.wallet_id});
+                    try writeJsonFieldPrefix(&writer.writer, &wrote_any, "wallet_version");
+                    try writeJsonString(&writer.writer, signing.walletVersionName(info.version));
+                } else {
+                    try writer.writer.writeAll("null");
+                }
+                try writer.writer.writeByte('}');
+                break :blk try writer.toOwnedSlice();
+            };
+            errdefer self.allocator.free(wallet_state_json);
+
+            var writer = std.io.Writer.Allocating.init(self.allocator);
+            errdefer writer.deinit();
+            try writer.writer.writeByte('[');
+            var built: u32 = 0;
+            for (jetton_masters) |master| {
+                const wallet_address_result = try self.getJettonWalletAddress(master, account_address);
+                if (!wallet_address_result.success or wallet_address_result.wallet_address == null) continue;
+                if (built != 0) try writer.writer.writeByte(',');
+                const balance_result = try self.getJettonBalance(wallet_address_result.wallet_address.?, master);
+                try writer.writer.print("{{\"master\":\"{s}\",\"wallet\":\"{s}\",\"balance\":\"{s}\"}}", .{ master, wallet_address_result.wallet_address.?, balance_result.balance });
+                built += 1;
+            }
+            try writer.writer.writeByte(']');
+            const jettons_json = try writer.toOwnedSlice();
+            errdefer self.allocator.free(jettons_json);
+
+            return .{
+                .address = try self.allocator.dupe(u8, account_address),
+                .wallet_state_json = wallet_state_json,
+                .ton_balance = balance.balance,
+                .jetton_count = built,
+                .jettons_json = jettons_json,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
+        pub fn analyzeContractCallAuto(
+            self: *@This(),
+            destination: []const u8,
+            amount: u64,
+            function_name: []const u8,
+            values: []const abi_adapter.AbiValue,
+        ) !tools_types.ContractCallAnalysisResult {
+            const wallet_state = try self.getWalletState();
+            if (!wallet_state.success) {
+                return .{
+                    .destination = try self.allocator.dupe(u8, destination),
+                    .amount = amount,
+                    .wallet_address = "",
+                    .wallet_version = self.config.wallet_version,
+                    .wallet_id = self.config.wallet_id,
+                    .deployed = false,
+                    .seqno = null,
+                    .selector = "",
+                    .state_init_attached_if_execute = false,
+                    .body_boc = "",
+                    .risk_flags = &.{},
+                    .recommended_action = "",
+                    .executable = false,
+                    .success = false,
+                    .error_message = wallet_state.error_message,
+                };
+            }
+            defer {
+                if (wallet_state.wallet_address.len > 0) self.allocator.free(wallet_state.wallet_address);
+                if (wallet_state.user_friendly_address.len > 0) self.allocator.free(wallet_state.user_friendly_address);
+                if (wallet_state.public_key_hex.len > 0) self.allocator.free(wallet_state.public_key_hex);
+                if (wallet_state.state_init_boc.len > 0) self.allocator.free(wallet_state.state_init_boc);
+            }
+
+            var built = try self.buildContractBodyAuto(destination, function_name, values);
+            defer built.deinit(self.allocator);
+
+            const selector = try self.allocator.dupe(u8, built.selector);
+            errdefer self.allocator.free(selector);
+            const body_boc = try self.allocator.dupe(u8, built.body_boc);
+            errdefer self.allocator.free(body_boc);
+            const recommended_action = try self.allocator.dupe(u8, if (wallet_state.deployed) "wallet-send-auto-abi" else "wallet-send-init-auto-abi");
+            errdefer self.allocator.free(recommended_action);
+
+            var risk_count: usize = 0;
+            if (!wallet_state.deployed) risk_count += 1;
+            if (!std.mem.startsWith(u8, built.selector, "standard:")) risk_count += 0;
+            const risk_flags = try self.allocator.alloc([]const u8, risk_count);
+            errdefer if (risk_flags.len > 0) self.allocator.free(risk_flags);
+            var risk_index: usize = 0;
+            if (!wallet_state.deployed) {
+                risk_flags[risk_index] = "wallet_not_deployed";
+                risk_index += 1;
+            }
+
+            return .{
+                .destination = try self.allocator.dupe(u8, destination),
+                .amount = amount,
+                .wallet_address = try self.allocator.dupe(u8, wallet_state.wallet_address),
+                .wallet_version = wallet_state.wallet_version,
+                .wallet_id = wallet_state.wallet_id,
+                .deployed = wallet_state.deployed,
+                .seqno = wallet_state.seqno,
+                .selector = selector,
+                .state_init_attached_if_execute = !wallet_state.deployed,
+                .body_boc = body_boc,
+                .risk_flags = risk_flags,
+                .recommended_action = recommended_action,
+                .executable = true,
                 .success = true,
                 .error_message = null,
             };
@@ -2645,6 +3055,123 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                     .success = false,
                     .error_message = @errorName(err),
                 };
+            };
+        }
+
+        pub fn getWalletState(self: *@This()) !tools_types.WalletStateResult {
+            const private_key = self.config.wallet_private_key orelse {
+                return .{
+                    .wallet_address = "",
+                    .user_friendly_address = "",
+                    .wallet_version = self.config.wallet_version,
+                    .workchain = self.config.wallet_workchain,
+                    .wallet_id = self.config.wallet_id,
+                    .public_key_hex = "",
+                    .balance = 0,
+                    .seqno = null,
+                    .deployed = false,
+                    .state_init_boc = "",
+                    .state_init_required_for_first_send = false,
+                    .success = false,
+                    .error_message = "Wallet not configured",
+                };
+            };
+
+            const wallet_init_result = try self.buildWalletInitResultAlloc(private_key);
+            errdefer {
+                if (wallet_init_result.raw_address.len > 0) self.allocator.free(wallet_init_result.raw_address);
+                if (wallet_init_result.user_friendly_address.len > 0) self.allocator.free(wallet_init_result.user_friendly_address);
+                if (wallet_init_result.public_key_hex.len > 0) self.allocator.free(wallet_init_result.public_key_hex);
+                if (wallet_init_result.state_init_boc.len > 0) self.allocator.free(wallet_init_result.state_init_boc);
+            }
+
+            const balance_result = try self.getBalance(wallet_init_result.raw_address);
+            errdefer if (balance_result.formatted.len > 0) self.allocator.free(balance_result.formatted);
+
+            const wallet_info = signing.getWalletInfo(self.client, wallet_init_result.raw_address) catch null;
+            const deployed = wallet_info != null;
+            const seqno = if (wallet_info) |info| info.seqno else null;
+
+            return .{
+                .wallet_address = wallet_init_result.raw_address,
+                .user_friendly_address = wallet_init_result.user_friendly_address,
+                .wallet_version = wallet_init_result.wallet_version,
+                .workchain = wallet_init_result.workchain,
+                .wallet_id = wallet_init_result.wallet_id,
+                .public_key_hex = wallet_init_result.public_key_hex,
+                .balance = if (balance_result.success) balance_result.balance else 0,
+                .seqno = seqno,
+                .deployed = deployed,
+                .state_init_boc = wallet_init_result.state_init_boc,
+                .state_init_required_for_first_send = !deployed,
+                .success = true,
+                .error_message = null,
+            };
+        }
+
+        pub fn analyzeTransfer(self: *@This(), destination: []const u8, amount: u64, comment: ?[]const u8) !tools_types.TransferAnalysisResult {
+            const wallet_state = try self.getWalletState();
+            if (!wallet_state.success) {
+                return .{
+                    .wallet_address = "",
+                    .destination = destination,
+                    .amount = amount,
+                    .comment = if (comment) |value| value else null,
+                    .wallet_version = self.config.wallet_version,
+                    .wallet_id = self.config.wallet_id,
+                    .deployed = false,
+                    .seqno = null,
+                    .state_init_attached_if_execute = false,
+                    .estimated_body_kind = "",
+                    .risk_flags = &.{},
+                    .recommended_action = "",
+                    .executable = false,
+                    .success = false,
+                    .error_message = wallet_state.error_message,
+                };
+            }
+            defer {
+                if (wallet_state.wallet_address.len > 0) self.allocator.free(wallet_state.wallet_address);
+                if (wallet_state.user_friendly_address.len > 0) self.allocator.free(wallet_state.user_friendly_address);
+                if (wallet_state.public_key_hex.len > 0) self.allocator.free(wallet_state.public_key_hex);
+                if (wallet_state.state_init_boc.len > 0) self.allocator.free(wallet_state.state_init_boc);
+            }
+
+            const owned_destination = try self.allocator.dupe(u8, destination);
+            errdefer self.allocator.free(owned_destination);
+            const owned_comment = if (comment) |value| try self.allocator.dupe(u8, value) else null;
+            errdefer if (owned_comment) |value| self.allocator.free(value);
+            const estimated_body_kind = try self.allocator.dupe(u8, if (comment != null) "comment" else "empty");
+            errdefer self.allocator.free(estimated_body_kind);
+            const recommended_action = try self.allocator.dupe(u8, if (wallet_state.deployed) "send" else "send-init");
+            errdefer self.allocator.free(recommended_action);
+
+            var risk_count: usize = 0;
+            if (!wallet_state.deployed) risk_count += 1;
+            const risk_flags = try self.allocator.alloc([]const u8, risk_count);
+            errdefer if (risk_flags.len > 0) self.allocator.free(risk_flags);
+            var risk_index: usize = 0;
+            if (!wallet_state.deployed) {
+                risk_flags[risk_index] = "wallet_not_deployed";
+                risk_index += 1;
+            }
+
+            return .{
+                .wallet_address = try self.allocator.dupe(u8, wallet_state.wallet_address),
+                .destination = owned_destination,
+                .amount = amount,
+                .comment = owned_comment,
+                .wallet_version = wallet_state.wallet_version,
+                .wallet_id = wallet_state.wallet_id,
+                .deployed = wallet_state.deployed,
+                .seqno = wallet_state.seqno,
+                .state_init_attached_if_execute = !wallet_state.deployed,
+                .estimated_body_kind = estimated_body_kind,
+                .risk_flags = risk_flags,
+                .recommended_action = recommended_action,
+                .executable = true,
+                .success = true,
+                .error_message = null,
             };
         }
 
@@ -3182,6 +3709,93 @@ fn AgentToolsImpl(comptime ClientType: type) type {
                 .timestamp = result.confirmed_at,
                 .success = true,
                 .error_message = null,
+            };
+        }
+
+        pub fn watchPayment(self: *@This(), comment: []const u8, timeout_ms: u32) !tools_types.PaymentWatchResult {
+            return self.watchPaymentWithTrigger(comment, timeout_ms, null);
+        }
+
+        pub fn watchPaymentWithTrigger(self: *@This(), comment: []const u8, timeout_ms: u32, trigger_payload: ?[]const u8) !tools_types.PaymentWatchResult {
+            return self.watchPaymentWithTriggerMeta(comment, timeout_ms, trigger_payload, null, null);
+        }
+
+        pub fn watchPaymentWithTriggerMeta(self: *@This(), comment: []const u8, timeout_ms: u32, trigger_payload: ?[]const u8, workflow_name_override: ?[]const u8, correlation_id_override: ?[]const u8) !tools_types.PaymentWatchResult {
+            const dest = self.config.wallet_address orelse "";
+            const verify = try self.waitPayment(comment, timeout_ms);
+            const workflow_name: ?[]const u8 = if (workflow_name_override) |value| value else if (trigger_payload != null) "custom_workflow" else null;
+            const trigger_id = if (verify.verified)
+                try std.fmt.allocPrint(self.allocator, "ton-payment:{s}:{s}", .{ dest, comment })
+            else
+                null;
+            const correlation_id = if (verify.verified)
+                if (correlation_id_override) |value|
+                    try self.allocator.dupe(u8, value)
+                else if (verify.tx_hash) |tx_hash|
+                    try std.fmt.allocPrint(self.allocator, "ton-tx:{s}", .{tx_hash})
+                else
+                    try std.fmt.allocPrint(self.allocator, "ton-comment:{s}:{s}", .{ dest, comment })
+            else
+                null;
+            const trigger_payload_json = if (verify.verified)
+                if (trigger_payload) |payload|
+                    try std.fmt.allocPrint(
+                        self.allocator,
+                        "{{\"event\":\"payment_confirmed\",\"address\":\"{s}\",\"comment\":\"{s}\",\"tx_hash\":{s},\"tx_lt\":{s},\"amount\":{s},\"sender\":{s},\"timestamp\":{s},\"trigger_id\":{s},\"workflow_name\":{s},\"correlation_id\":{s},\"user_payload\":{s}}}",
+                        .{
+                            dest,
+                            comment,
+                            if (verify.tx_hash) |value| try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{value}) else "null",
+                            if (verify.tx_lt) |value| try std.fmt.allocPrint(self.allocator, "{d}", .{value}) else "null",
+                            if (verify.amount) |value| try std.fmt.allocPrint(self.allocator, "{d}", .{value}) else "null",
+                            if (verify.sender) |value| try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{value}) else "null",
+                            if (verify.timestamp) |value| try std.fmt.allocPrint(self.allocator, "{d}", .{value}) else "null",
+                            if (trigger_id) |value| try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{value}) else "null",
+                            if (workflow_name) |value| try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{value}) else "null",
+                            if (correlation_id) |value| try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{value}) else "null",
+                            payload,
+                        },
+                    )
+                else
+                    try std.fmt.allocPrint(
+                        self.allocator,
+                        "{{\"event\":\"payment_confirmed\",\"address\":\"{s}\",\"comment\":\"{s}\",\"tx_hash\":{s},\"tx_lt\":{s},\"amount\":{s},\"sender\":{s},\"timestamp\":{s},\"trigger_id\":{s},\"workflow_name\":{s},\"correlation_id\":{s}}}",
+                        .{
+                            dest,
+                            comment,
+                            if (verify.tx_hash) |value| try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{value}) else "null",
+                            if (verify.tx_lt) |value| try std.fmt.allocPrint(self.allocator, "{d}", .{value}) else "null",
+                            if (verify.amount) |value| try std.fmt.allocPrint(self.allocator, "{d}", .{value}) else "null",
+                            if (verify.sender) |value| try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{value}) else "null",
+                            if (verify.timestamp) |value| try std.fmt.allocPrint(self.allocator, "{d}", .{value}) else "null",
+                            if (trigger_id) |value| try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{value}) else "null",
+                            if (workflow_name) |value| try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{value}) else "null",
+                            if (correlation_id) |value| try std.fmt.allocPrint(self.allocator, "\"{s}\"", .{value}) else "null",
+                        },
+                    )
+            else
+                null;
+
+            return .{
+                .address = dest,
+                .comment = comment,
+                .timeout_ms = timeout_ms,
+                .found = verify.verified,
+                .tx_hash = verify.tx_hash,
+                .tx_lt = verify.tx_lt,
+                .amount = verify.amount,
+                .sender = verify.sender,
+                .timestamp = verify.timestamp,
+                .confirmed = verify.verified,
+                .trigger_ready = verify.verified,
+                .matched_comment = if (verify.verified) comment else null,
+                .trigger_payload_json = trigger_payload_json,
+                .recommended_next_action = if (verify.verified) "trigger_agent_workflow" else "keep_waiting",
+                .trigger_id = trigger_id,
+                .workflow_name = workflow_name,
+                .correlation_id = correlation_id,
+                .success = verify.success,
+                .error_message = verify.error_message,
             };
         }
 

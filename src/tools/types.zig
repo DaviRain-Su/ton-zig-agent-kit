@@ -175,6 +175,10 @@ pub const TxResult = struct {
     from: ?[]const u8,
     to: ?[]const u8,
     value: u64,
+    opcode_name: ?[]const u8 = null,
+    comment: ?[]const u8 = null,
+    abi_selector: ?[]const u8 = null,
+    message_kind: ?[]const u8 = null,
     status: TxStatus,
     success: bool,
     error_message: ?[]const u8 = null,
@@ -183,6 +187,10 @@ pub const TxResult = struct {
         if (self.hash.len > 0) allocator.free(self.hash);
         if (self.from) |value| allocator.free(value);
         if (self.to) |value| allocator.free(value);
+        if (self.opcode_name) |value| allocator.free(value);
+        if (self.comment) |value| allocator.free(value);
+        if (self.abi_selector) |value| allocator.free(value);
+        if (self.message_kind) |value| allocator.free(value);
         self.* = undefined;
     }
 };
@@ -423,6 +431,154 @@ pub const WalletInitResult = struct {
     error_message: ?[]const u8 = null,
 };
 
+pub const WalletStateResult = struct {
+    wallet_address: []const u8,
+    user_friendly_address: []const u8,
+    wallet_version: signing.WalletVersion = .v4,
+    workchain: i8,
+    wallet_id: u32,
+    public_key_hex: []const u8,
+    balance: u64,
+    seqno: ?u32,
+    deployed: bool,
+    state_init_boc: []const u8,
+    state_init_required_for_first_send: bool,
+    success: bool,
+    error_message: ?[]const u8 = null,
+};
+
+pub const TransferAnalysisResult = struct {
+    wallet_address: []const u8,
+    destination: []const u8,
+    amount: u64,
+    comment: ?[]const u8,
+    wallet_version: signing.WalletVersion = .v4,
+    wallet_id: u32,
+    deployed: bool,
+    seqno: ?u32,
+    state_init_attached_if_execute: bool,
+    estimated_body_kind: []const u8,
+    risk_flags: []const []const u8,
+    recommended_action: []const u8,
+    executable: bool,
+    success: bool,
+    error_message: ?[]const u8 = null,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.wallet_address.len > 0) allocator.free(self.wallet_address);
+        if (self.destination.len > 0) allocator.free(self.destination);
+        if (self.comment) |value| allocator.free(value);
+        if (self.estimated_body_kind.len > 0) allocator.free(self.estimated_body_kind);
+        if (self.recommended_action.len > 0) allocator.free(self.recommended_action);
+        if (self.risk_flags.len > 0) allocator.free(self.risk_flags);
+        self.* = undefined;
+    }
+};
+
+pub const PaymentWatchResult = struct {
+    address: []const u8,
+    comment: []const u8,
+    timeout_ms: u32,
+    found: bool,
+    tx_hash: ?[]const u8,
+    tx_lt: ?i64,
+    amount: ?u64,
+    sender: ?[]const u8,
+    timestamp: ?i64,
+    confirmed: bool,
+    trigger_ready: bool,
+    matched_comment: ?[]const u8,
+    trigger_payload_json: ?[]const u8,
+    recommended_next_action: ?[]const u8,
+    trigger_id: ?[]const u8,
+    workflow_name: ?[]const u8,
+    correlation_id: ?[]const u8,
+    success: bool,
+    error_message: ?[]const u8 = null,
+};
+
+pub const CapabilitiesResult = struct {
+    name: []const u8,
+    category: []const u8,
+    json: []const u8,
+    success: bool,
+    error_message: ?[]const u8 = null,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.name.len > 0) allocator.free(self.name);
+        if (self.category.len > 0) allocator.free(self.category);
+        if (self.json.len > 0) allocator.free(self.json);
+        self.* = undefined;
+    }
+};
+
+pub const RecentActivityResult = struct {
+    address: []const u8,
+    tx_count: u32,
+    incoming_count: u32,
+    outgoing_count: u32,
+    comments_count: u32,
+    contract_calls_count: u32,
+    jetton_ops_count: u32,
+    nft_ops_count: u32,
+    abi_calls_count: u32,
+    transfer_like_count: u32,
+    items_json: []const u8,
+    success: bool,
+    error_message: ?[]const u8 = null,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.address.len > 0) allocator.free(self.address);
+        if (self.items_json.len > 0) allocator.free(self.items_json);
+        self.* = undefined;
+    }
+};
+
+pub const PortfolioResult = struct {
+    address: []const u8,
+    wallet_state_json: []const u8,
+    ton_balance: u64,
+    jetton_count: u32,
+    jettons_json: []const u8,
+    success: bool,
+    error_message: ?[]const u8 = null,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.address.len > 0) allocator.free(self.address);
+        if (self.wallet_state_json.len > 0) allocator.free(self.wallet_state_json);
+        if (self.jettons_json.len > 0) allocator.free(self.jettons_json);
+        self.* = undefined;
+    }
+};
+
+pub const ContractCallAnalysisResult = struct {
+    destination: []const u8,
+    amount: u64,
+    wallet_address: []const u8,
+    wallet_version: signing.WalletVersion = .v4,
+    wallet_id: u32,
+    deployed: bool,
+    seqno: ?u32,
+    selector: []const u8,
+    state_init_attached_if_execute: bool,
+    body_boc: []const u8,
+    risk_flags: []const []const u8,
+    recommended_action: []const u8,
+    executable: bool,
+    success: bool,
+    error_message: ?[]const u8 = null,
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        if (self.destination.len > 0) allocator.free(self.destination);
+        if (self.wallet_address.len > 0) allocator.free(self.wallet_address);
+        if (self.selector.len > 0) allocator.free(self.selector);
+        if (self.body_boc.len > 0) allocator.free(self.body_boc);
+        if (self.risk_flags.len > 0) allocator.free(self.risk_flags);
+        if (self.recommended_action.len > 0) allocator.free(self.recommended_action);
+        self.* = undefined;
+    }
+};
+
 pub const JettonBalanceResult = struct {
     address: []const u8,
     jetton_master: []const u8,
@@ -477,6 +633,13 @@ pub const ToolResponse = union(enum) {
     balance: BalanceResult,
     address: AddressResult,
     wallet_init: WalletInitResult,
+    wallet_state: WalletStateResult,
+    transfer_analysis: TransferAnalysisResult,
+    payment_watch: PaymentWatchResult,
+    capabilities: CapabilitiesResult,
+    recent_activity: RecentActivityResult,
+    portfolio: PortfolioResult,
+    contract_call_analysis: ContractCallAnalysisResult,
     send: SendResult,
     run_method: RunMethodResult,
     decoded_body: DecodedBodyResult,

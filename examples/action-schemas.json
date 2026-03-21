@@ -1,0 +1,102 @@
+{
+  "runtime": "ton-zig-agent-kit",
+  "version": "0.0.1",
+  "actions": [
+    {
+      "name": "capabilities",
+      "category": "manifest",
+      "risk_level": "none",
+      "safe_for_read_only": true,
+      "required_fields": [],
+      "input_example": {},
+      "output_highlights": ["actions", "supports", "risk_model", "action_descriptors"]
+    },
+    {
+      "name": "runtime-spec",
+      "category": "manifest",
+      "risk_level": "none",
+      "safe_for_read_only": true,
+      "required_fields": [],
+      "input_example": {},
+      "output_highlights": ["runtime_version", "protocol_version", "actions"]
+    },
+    {
+      "name": "demo-manifest",
+      "category": "manifest",
+      "risk_level": "none",
+      "safe_for_read_only": true,
+      "required_fields": [],
+      "input_example": {},
+      "output_highlights": ["demo_manifest"]
+    },
+    {
+      "name": "wallet-state",
+      "category": "read",
+      "risk_level": "none",
+      "safe_for_read_only": true,
+      "required_fields": [],
+      "input_example": {},
+      "output_highlights": ["wallet_address", "balance", "seqno", "deployed", "state_init_required_for_first_send"]
+    },
+    {
+      "name": "inspect-contract",
+      "category": "read",
+      "risk_level": "none",
+      "safe_for_read_only": true,
+      "required_fields": ["address"],
+      "input_example": {"address": "0:..."},
+      "output_highlights": ["agent_hints", "risk_flags", "recommended_actions", "details"]
+    },
+    {
+      "name": "recent-activity",
+      "category": "read",
+      "risk_level": "none",
+      "safe_for_read_only": true,
+      "required_fields": ["address"],
+      "input_example": {"address": "0:...", "limit": 5},
+      "output_highlights": ["items", "semantic_tag", "recommended_followup", "comments_count"]
+    },
+    {
+      "name": "portfolio",
+      "category": "read",
+      "risk_level": "none",
+      "safe_for_read_only": true,
+      "required_fields": ["address"],
+      "input_example": {"address": "0:...", "jetton_masters": ["0:..."]},
+      "output_highlights": ["ton_balance", "wallet_state", "jettons"]
+    },
+    {
+      "name": "analyze-transfer",
+      "category": "analyze",
+      "risk_level": "planning_only",
+      "safe_for_read_only": true,
+      "required_fields": ["destination"],
+      "input_example": {"destination": "0:...", "amount": 10000000, "comment": "demo"},
+      "output_highlights": ["executable", "recommended_action", "risk_flags", "state_init_attached_if_execute"]
+    },
+    {
+      "name": "analyze-contract-call",
+      "category": "analyze",
+      "risk_level": "planning_only",
+      "safe_for_read_only": true,
+      "required_fields": ["destination"],
+      "input_example": {"mode": "auto", "destination": "0:...", "function": "transfer", "amount": 10000000, "args": ["0:...", 1]},
+      "output_highlights": ["selector", "executable", "recommended_action", "risk_flags"]
+    },
+    {
+      "name": "watch-payment",
+      "category": "watch",
+      "risk_level": "low",
+      "safe_for_read_only": true,
+      "required_fields": ["wallet_address", "comment"],
+      "input_example": {
+        "wallet_address": "0:...",
+        "comment": "order-123",
+        "timeout_ms": 10000,
+        "workflow_name": "grant_access",
+        "correlation_id": "order-123"
+      },
+      "output_highlights": ["trigger_ready", "trigger_id", "workflow_name", "correlation_id", "trigger_payload"]
+    }
+  ]
+}

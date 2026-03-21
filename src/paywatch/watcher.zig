@@ -171,7 +171,8 @@ fn extractMessageComment(msg: *const types.Message) !?[]const u8 {
 fn formatIncomingSenderAlloc(allocator: std.mem.Allocator, msg: ?*types.Message) !?[]u8 {
     const value = msg orelse return null;
     const source = value.source orelse return null;
-    return address_mod.formatRaw(allocator, &source);
+    const formatted = try address_mod.formatRaw(allocator, &source);
+    return formatted;
 }
 
 test "payment watcher init" {

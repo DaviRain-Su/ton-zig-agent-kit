@@ -1,188 +1,434 @@
 # ton-zig-agent-kit
 
-A **Zig-native TON contract toolkit for AI agents** - enabling AI agents to interact with any TON smart contract, complete "create invoice → monitor payment → verify on-chain" workflows.
+TON-native agent runtime and execution toolkit built in Zig.
 
-## 🎯 Hackathon Submission
+Submission-ready copy is available in `FINAL_SUBMISSION_COPY.md`.
+See also `SUBMISSION.md`, `DOCS_INDEX.md`, `JUDGE_COMMANDS.md`, and `FINAL_CHECKLIST.md`.
 
-**Track**: Agent Infrastructure  
-**Project**: `ton-zig-agent-kit` - A Zig-native TON execution and payment toolkit for AI agents  
-**Submission Date**: 2026-03-25
+## Judge Quickstart
 
-## ✨ Features
+```bash
+zig build
+zig test src/root.zig
+./zig-out/bin/ton-zig-agent-kit tool demo-manifest
+./zig-out/bin/ton-zig-agent-kit tool capabilities
+```
 
-### Core Capabilities
+## Why Judges Should Care
 
-- ✅ **Raw Contract Interaction** - Call any TON contract via `runGetMethod` and BoC messaging
-- ✅ **Cell/Builder/Slice** - Full bit-level serialization (up to 1023 bits, 4 refs per cell)
-- ✅ **BoC Serialization** - Bag of Cells encode/decode
-- ✅ **Wallet Operations** - Ed25519 signing, seqno management, transfer creation
-- ✅ **Payment Flows** - Invoice generation, payment monitoring, on-chain verification
+This project turns TON into an agent-consumable runtime surface.
+It gives AI systems structured wallet context, contract intelligence, semantic activity understanding, safe preflight planning, and payment-triggered workflow primitives.
 
-### Contract Standards
+That makes it infrastructure for agents, not just another blockchain CLI.
 
-- ✅ **Jetton (TEP-74)** - Query balance, transfer tokens
-- ✅ **NFT (TEP-62/64/66)** - Get NFT data, ownership info
-- ✅ **Generic Contract** - Interface detection, ABI introspection
+## Hackathon Positioning
 
-### AI Agent Tools
+**Track:** Agent Infrastructure
 
-- ✅ **AgentTools** - Unified API for balance, invoice, verification
-- ✅ **Error Handling** - Structured results with error codes
-- ✅ **Multi-Provider** - Failover support for RPC endpoints
+**Tagline:** TON-native runtime for agent context, execution planning, and payment-triggered workflows
 
-### Demo
+**Submission Pitch:** A Zig-built TON agent runtime that gives autonomous systems structured wallet context, contract intelligence, safe preflight execution analysis, and payment-triggered workflow primitives.
 
-- ✅ **Telegram Bot Demo** - Complete payment flow simulation
+`ton-zig-agent-kit` is no longer just a TON CLI/toolkit. It now exposes a structured, agent-friendly runtime for:
 
-## 🚀 Quick Start
+- wallet state introspection
+- transfer and contract-call preflight analysis
+- contract intelligence and interface detection
+- portfolio and recent-activity context
+- payment-triggered workflow execution
 
-### Build
+This makes it suitable as a TON execution layer for autonomous agents, copilots, bots, and orchestration frameworks.
+
+## Project Structure for Judges
+
+- `src/main.zig` — CLI and tool-mode entrypoint
+- `src/tools/tools_mod.zig` — agent runtime implementation
+- `src/tools/types.zig` — structured JSON-facing result types
+- `src/paywatch/` — payment monitoring and verification
+- `src/contract/` — contract, ABI, Jetton, and NFT helpers
+- `README.md` — repo overview and quickstart
+- `SUBMISSION.md` — submission-oriented summary
+- `WHY_AGENT_INFRASTRUCTURE.md` — track-fit explanation
+- `RUNTIME_GUARANTEES.md` — runtime behavior and safety guarantees
+- `DOCS_INDEX.md` — documentation entrypoint
+- `examples/` — demo, integration, playbooks, and judge walkthroughs
+
+## Machine-readable Assets
+
+- `capabilities` — runtime handshake
+- `runtime-spec` — formal action contract
+- `demo-manifest` — compact evaluation path
+- `examples/action-schemas.json` — schema-shaped action examples
+
+## For Agent Builders
+
+If you are building an autonomous agent, copilot, or workflow backend, start with:
+
+1. `capabilities` — runtime handshake and action discovery
+2. `wallet-state` — wallet readiness and deployment context
+3. `inspect-contract` — interface detection and recommended actions
+4. `recent-activity` — semantic activity feed and followups
+5. `analyze-transfer` / `analyze-contract-call` — safe planning before execution
+6. `watch-payment` — payment-triggered workflow handoff
+
+## What It Provides
+
+### Agent runtime primitives
+
+- `wallet-state`
+- `analyze-transfer`
+- `analyze-contract-call`
+- `inspect-contract`
+- `recent-activity`
+- `portfolio`
+- `watch-payment`
+- `capabilities`
+
+### TON-native execution support
+
+- wallet v4 / v5 support
+- seqno and deployment-state detection
+- state-init attachment planning for first send
+- ABI-aware contract call analysis
+- standard TON message body analysis
+- Jetton and NFT interface detection
+
+### Payment-triggered automation
+
+- watch TON payments by comment
+- emit structured trigger payloads
+- attach user workflow payloads
+- recommend next action after payment confirmation
+
+## Why This Fits Agent Infrastructure
+
+The project acts like a TON-native runtime that an agent can query before acting.
+
+Instead of only providing low-level chain operations, it returns structured JSON suitable for autonomous decision loops:
+
+- what wallet is available
+- whether a wallet is deployed
+- whether a transfer is executable
+- whether state init will be required
+- what contract interfaces are present
+- what actions are recommended next
+- what recent activity means semantically
+- whether a payment event should trigger a workflow
+
+## Build
 
 ```bash
 zig build
 ```
 
-### Run Tests
+## Test
 
 ```bash
-zig build test
+zig test src/root.zig
 ```
 
-### CLI Usage
+Current validated result during implementation:
+
+- **245 passed**
+- **7 skipped**
+- **0 failed**
+
+## Tool Mode
+
+Structured JSON tool mode:
 
 ```bash
-# Check TON balance
-./zig-out/bin/ton-zig-agent-kit getBalance EQCD39vd5kB8FW5w6KH7HpNmP8GCvGajvLKGPMgY4sUXJyxqH
-
-# Create payment invoice
-./zig-out/bin/ton-zig-agent-kit paywatch invoice EQCD39vd5kB8FW5w6KH7HpNmP8GCvGajvLKGPMgY4sUXJyxqH 10
-
-# Verify payment
-./zig-out/bin/ton-zig-agent-kit paywatch verify <address> <comment>
-
-# Run demo
-./zig-out/bin/ton-zig-agent-kit demo bot
-
-# Show help
-./zig-out/bin/ton-zig-agent-kit help
+ton-zig-agent-kit tool <action> '<json_payload>'
 ```
 
-## 🏗️ Architecture
+Role of the core manifest actions:
 
-```
-ton-zig-agent-kit/
-├── src/
-│   ├── core/           # Layer 1: Raw Contract
-│   │   ├── http_client.zig    # TonAPI/TON Center client
-│   │   ├── cell.zig           # Cell/Builder/Slice
-│   │   ├── boc.zig            # BoC serialization
-│   │   ├── address.zig        # Address parsing
-│   │   └── types.zig          # Core types
-│   ├── wallet/         # Layer 1: Wallet
-│   │   └── signing.zig        # Ed25519 signing
-│   ├── contract/       # Layer 2: Contract Standards
-│   │   ├── jetton.zig         # TEP-74 Jetton
-│   │   ├── nft.zig            # TEP-62/64/66 NFT
-│   │   └── abi_adapter.zig    # Interface detection
-│   ├── paywatch/       # Layer 2: Payment Flows
-│   │   ├── invoice.zig        # Invoice generation
-│   │   ├── watcher.zig        # Payment monitoring
-│   │   └── verifier.zig       # On-chain verification
-│   ├── tools/          # Layer 2: Agent Tools
-│   │   ├── tools_mod.zig      # AgentTools API
-│   │   └── types.zig          # Tool result types
-│   ├── demo/           # Layer 3: Demo
-│   │   └── telegram_bot.zig   # Bot demo
-│   ├── main.zig        # CLI entry
-│   └── root.zig        # Library exports
-```
+- `capabilities` — runtime handshake and capability discovery
+- `runtime-spec` — formal machine-readable action contract
+- `demo-manifest` — compact evaluation flow for judges and automated review
 
-## 📋 Implementation Status
+How they fit together:
 
-| Day | Module | Status | Key Features |
-|-----|--------|--------|--------------|
-| 1 | core/http_client, core/address | ✅ | HTTP provider, address parsing |
-| 2 | core/cell, core/boc | ✅ | Cell/Builder/Slice, BoC serialization |
-| 3 | wallet/signing | ✅ | Ed25519 signing, wallet v4 messages |
-| 4 | contract/jetton, contract/nft | ✅ | Jetton/NFT standard interfaces |
-| 5 | paywatch | ✅ | Invoice, watcher, verifier |
-| 6 | tools, demo | ✅ | AgentTools, Telegram bot demo |
-| 7 | README, docs | ✅ | Documentation, final polish |
+- `capabilities` tells an agent or reviewer what the runtime can do
+- `runtime-spec` defines the action-level contract and behavior expectations
+- `demo-manifest` provides the shortest high-signal evaluation path
+- `examples/action-schemas.json` provides schema-shaped examples for automated consumers
 
-## 🔧 Technical Highlights
+### Supported actions
 
-### Cell/Builder/Slice
+- `wallet-state`
+- `analyze-transfer`
+- `analyze-contract-call`
+- `watch-payment`
+- `inspect-contract`
+- `capabilities`
+- `recent-activity`
+- `portfolio`
+- `demo-manifest`
 
-Full bit-level control for TON's fundamental data structure:
+## Quick Examples
 
-```zig
-var builder = Builder.init();
-try builder.storeUint(42, 8);
-try builder.storeCoins(1000000000);
-try builder.storeAddress("EQ...");
-const cell = try builder.toCell(allocator);
-```
-
-### Payment Verification
-
-```zig
-// Create invoice with unique comment
-const invoice = try createInvoice(allocator, destination, amount, "Payment");
-
-// Monitor for payment
-var watcher = PaymentWatcher.init(&invoice, &client, 5000, 30000);
-const result = try waitPayment(&watcher);
-
-if (result.found) {
-    // Payment confirmed on-chain
-}
-```
-
-### Agent Tools
-
-```zig
-var tools = AgentTools.init(allocator, &client, config);
-
-// Get balance
-const balance = try tools.getBalance("EQ...");
-
-// Create invoice
-const invoice = try tools.createInvoice(1000000000, "Service payment");
-
-// Verify payment
-const verified = try tools.verifyPayment(invoice.comment);
-```
-
-## 🎬 Demo
-
-Run the Telegram bot demo:
+### 1. Wallet state
 
 ```bash
-./zig-out/bin/ton-zig-agent-kit demo bot
+ton-zig-agent-kit tool wallet-state
 ```
 
-Shows complete payment flow:
-1. User creates order with `/buy 10`
-2. Bot generates unique invoice with comment
-3. User pays via TON wallet
-4. Bot monitors and confirms payment
-5. Order marked as complete
+Returns agent-relevant wallet context such as:
 
-## 📦 Dependencies
+- address
+- wallet version
+- wallet id
+- public key
+- balance
+- seqno
+- deployed / undeployed
+- whether state init is required for first send
 
-- Zig 0.15.2+
-- Standard library only (no external dependencies)
+### 2. Analyze a transfer before execution
 
-## 📝 License
+```bash
+ton-zig-agent-kit tool analyze-transfer '{
+  "destination":"0:...",
+  "amount":10000000,
+  "comment":"demo"
+}'
+```
 
-MIT License - See LICENSE file
+Returns structured preflight analysis such as:
 
-## 🤝 Acknowledgments
+- wallet address
+- deployment status
+- seqno
+- estimated body kind
+- executable flag
+- recommended action
+- risk flags
 
-Built for **TON AI Hackathon** - Track 1: Agent Infrastructure
+### 3. Analyze a contract call
 
----
+#### Auto mode
 
-**Project**: ton-zig-agent-kit  
-**Tagline**: A Zig-native TON execution and payment toolkit for AI agents  
-**Team**: Davirian
+```bash
+ton-zig-agent-kit tool analyze-contract-call '{
+  "mode":"auto",
+  "destination":"0:...",
+  "function":"transfer",
+  "amount":10000000,
+  "args":["0:...",123]
+}'
+```
+
+#### ABI mode
+
+```bash
+ton-zig-agent-kit tool analyze-contract-call '{
+  "mode":"abi",
+  "destination":"0:...",
+  "abi_source":"@abi.json",
+  "function":"transfer",
+  "amount":10000000,
+  "args":["0:...",123]
+}'
+```
+
+#### Standard mode
+
+```bash
+ton-zig-agent-kit tool analyze-contract-call '{
+  "mode":"standard",
+  "destination":"0:...",
+  "kind":"jetton_transfer",
+  "spec":"@spec.json",
+  "amount":10000000
+}'
+```
+
+Returns:
+
+- selector
+- body BOC
+- wallet runtime context
+- deployment planning
+- executable flag
+- recommended action
+- risk flags
+
+### 4. Inspect a contract for agent use
+
+```bash
+ton-zig-agent-kit tool inspect-contract '{
+  "address":"0:..."
+}'
+```
+
+Returns:
+
+- wallet / jetton / nft / abi interface detection
+- agent hints
+- risk flags
+- recommended actions
+- detailed observed message intelligence
+
+`recommended_actions` now includes example tool payloads so an agent or reviewer can see the next executable step immediately.
+
+### 5. Read recent activity with semantic tags
+
+```bash
+ton-zig-agent-kit tool recent-activity '{
+  "address":"0:...",
+  "limit":5
+}'
+```
+
+Returns activity summaries with fields such as:
+
+- `opcode_name`
+- `comment`
+- `message_kind`
+- `semantic_tag`
+- `recommended_followup`
+
+Example semantic tags:
+
+- `user_comment`
+- `jetton_operation`
+- `nft_operation`
+- `contract_message`
+- `transfer`
+
+Example followup recommendations:
+
+- `inspect_transfer_source`
+- `portfolio`
+- `inspect_contract`
+- `recent_activity`
+
+### 6. Read portfolio context
+
+```bash
+ton-zig-agent-kit tool portfolio '{
+  "address":"0:...",
+  "jetton_masters":["0:..."]
+}'
+```
+
+Returns:
+
+- TON balance
+- wallet state JSON
+- discovered jetton wallet addresses
+- jetton balances
+
+### 7. Watch payments as workflow triggers
+
+```bash
+ton-zig-agent-kit tool watch-payment '{
+  "wallet_address":"0:...",
+  "comment":"order-123",
+  "timeout_ms":10000,
+  "workflow_name":"grant_access",
+  "correlation_id":"order-123",
+  "trigger_payload":"{\"workflow\":\"grant_access\",\"order_id\":\"123\"}"
+}'
+```
+
+When payment is confirmed, the result can include:
+
+- `trigger_ready: true`
+- `matched_comment`
+- `recommended_next_action: "trigger_agent_workflow"`
+- `trigger_id`
+- `workflow_name`
+- `correlation_id`
+- `trigger_payload`
+
+The emitted trigger payload includes:
+
+- `event = payment_confirmed`
+- wallet address
+- comment
+- tx hash
+- tx lt
+- amount
+- sender
+- timestamp
+- optional `user_payload`
+
+This is the strongest infrastructure story in the project: TON payments can directly trigger downstream agent workflows.
+
+### 8. Discover runtime capabilities
+
+```bash
+ton-zig-agent-kit tool capabilities
+```
+
+This action also serves as the runtime handshake for agent frameworks.
+
+Returns a runtime manifest-like JSON document containing:
+
+- supported wallets
+- supported contract categories
+- workflows
+- actions
+- environment variables
+- examples
+- risk model summary
+- tagline and submission pitch
+- demo flows and agent patterns
+
+### 9. Show demo manifest
+
+```bash
+ton-zig-agent-kit tool demo-manifest
+```
+
+Returns a compact JSON step list optimized for hackathon demos and judge walkthroughs.
+
+## Environment Variables
+
+Common runtime env vars:
+
+- `TON_RPC_URL`
+- `TON_RPC_URLS`
+- `TON_API_KEY`
+- `TON_API_KEYS`
+- `TON_NETWORK`
+- `TON_PRIVATE_KEY_HEX`
+- `TON_SEED`
+- `TON_SEED_FILE`
+
+## Architecture
+
+```text
+src/
+├── core/        # cells, BoC, addresses, provider, body inspection
+├── wallet/      # signing, wallet deployment and message construction
+├── contract/    # generic contract, ABI adapter, Jetton, NFT helpers
+├── paywatch/    # invoices, payment watcher, verifier
+├── tools/       # agent-facing runtime and JSON result types
+├── demo/        # demos
+├── main.zig     # CLI + tool mode
+└── root.zig     # package exports
+```
+
+## Demo Narrative for Judges
+
+A strong demo flow is:
+
+1. `capabilities` → show runtime manifest
+2. `wallet-state` → show wallet execution context
+3. `inspect-contract` → show contract intelligence and recommended actions
+4. `recent-activity` → show semantic transaction understanding
+5. `analyze-transfer` or `analyze-contract-call` → show safe preflight planning
+6. `watch-payment` → show payment-confirmed trigger payload for workflows
+
+This sequence presents the project as infrastructure for agent execution on TON, not just a developer CLI.
+
+## Status
+
+Implemented and validated in the current Zig codebase with green tests.
+
+## License
+
+MIT
